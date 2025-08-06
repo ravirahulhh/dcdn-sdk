@@ -2,25 +2,31 @@
 #define _DCDN_SDK_EVENT_H_
 
 #include <string>
+#include <variant>
 #include "common/Common.h"
+#include "Common.h"  // 为了使用FileDescriptor
 
 NS_BEGIN(dcdn)
 
 struct EventType
 {
-    enum Type {
+    enum Type
+    {
         None = 0,
 
-        //FileManager
+        // FileManager
         AddFile = 10000,
+        RemoveFile = 10001,
+        FileDownloadDone = 10002,
+        FileDownloadFailed = 10003,
 
-        //UploadManager
+        // UploadManager
         UploadMsg = 20000,
 
-        //DownloadManager
+        // DownloadManager
         DeployMsg = 30000,
 
-        //WebSocketManager
+        // WebSocketManager
         AckMsg = 40000,
     };
 };
@@ -28,8 +34,7 @@ struct EventType
 class Event
 {
 public:
-    Event(int etype = EventType::None):
-        mType(etype)
+    Event(int etype = EventType::None) : mType(etype)
     {
     }
     virtual ~Event()
@@ -39,30 +44,30 @@ public:
     {
         return mType;
     }
+
 private:
     int mType;
 };
 
-template<class ArgType>
-class ArgEvent: public Event
+template <class ArgType>
+class ArgEvent : public Event
 {
 public:
-    ArgEvent(int etype, ArgType&& arg):
-        Event(etype),
-        mArg(arg)
+    ArgEvent(int etype, ArgType &&arg) : Event(etype),
+                                         mArg(arg)
     {
     }
-    ArgType& Arg()
-    {
-        return mArg;
-    }
-    const ArgType& Arg() const
+    ArgType &Arg()
     {
         return mArg;
     }
+    const ArgType &Arg() const
+    {
+        return mArg;
+    }
+
 private:
     ArgType mArg;
-
 };
 
 struct AddFileArg
@@ -75,7 +80,23 @@ struct AddFileArg
     size_t block_end;
 };
 
-NS_END
+struct FileDownloadDoneArg
+{
+    std::string url;
+    std::string file_path;
+    BlockInfo block_info;
+};
 
+struct FileDownloadFailedArg
+{
+    FileDescriptor file;
+};
+
+struct RemoveFileArg
+{
+    std::string block_hash;
+};
+
+NS_END
 
 #endif
