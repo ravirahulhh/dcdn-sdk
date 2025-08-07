@@ -23,7 +23,6 @@ struct FileItem : BlockInfo {
   uint64_t id;
   FileStatus status;
   std::string path;
-  uint64_t file_size;
   uint64_t last_access; // 改名为更语义化的名称
   uint64_t last_report;
   std::string created_at;
@@ -114,16 +113,16 @@ private:
   void runFlushThread();          // 刷新访问记录线程函数
   void runReportThread();         // 定时上报文件线程函数
   void runScanThread();           // 扫描清理孤立文件线程函数
+  // TODO: consider disk db inconsistent
   void scanAndCleanOrphanFiles(); // 扫描并清理孤立文件
   void cleanMissingFilesFromDB(); // 清理数据库中不存在的文件记录
   void cleanStaleDownloads();     // 清理过期的下载文件
 
-  // LRU相关内部方法
-  uint64_t getCurrentTimestamp();
-  uint64_t calculateTotalStorageSize();
-  void removeLRUFiles(uint64_t target_size);
-
-
+  uint64_t getCurrentTimestamp() {
+    return std::chrono::duration_cast<std::chrono::seconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+  };
   // 文件最近一次被写入的时间
   uint64_t durSinceFileLastUpdateTime(std::filesystem::path path) {
     std::filesystem::file_time_type ftime =
@@ -132,6 +131,10 @@ private:
     auto duration = now.time_since_epoch() - ftime.time_since_epoch();
     return std::chrono::duration_cast<std::chrono::seconds>(duration).count();
   }
+
+  // LRU相关内部方法
+  uint64_t calculateTotalStorageSize();
+  void removeLRUFiles(uint64_t current_size, uint64_t target_size);
 
   // db
   std::filesystem::path dbPath() const {

@@ -27,7 +27,6 @@ auto createFileStorage(const std::string &filename) {
           make_column("file_hash", &FileItem::file_hash),
           make_column("file_path", &FileItem::path),
           make_column("status", &FileItem::status),
-          make_column("file_size", &FileItem::file_size),
           make_column("block_start", &FileItem::block_start),
           make_column("block_end", &FileItem::block_end),
           make_column("last_access", &FileItem::last_access),
@@ -46,6 +45,28 @@ FileManager::FileManager(MainManager *man, const FileManagerOption &opt)
     : BaseManager(man), mOpt(opt) {
   mLastFlushTime = std::chrono::steady_clock::now();
   mLastLRUCheckTime = std::chrono::steady_clock::now();
+
+  // check if database exists
+  if (!std::filesystem::exists(dbPath())) {
+    if (createTable() != ErrorCodeOk) {
+      logError << "Failed to create files.db table";
+      throw std::runtime_error("Failed to create files.db table");
+    }
+  }
+
+  if (auto db = getDB()) {
+    try {
+      db->stor.sync_schema();
+    } catch (...) {
+      // TODO:handle create db failed
+      logError << "Failed to sync schema for files.db";
+      throw std::runtime_error("Failed to sync schema for files.db");
+    }
+  }
+
+  // 从数据库加载文件访问记录到LRU缓存
+  loadAccessRecordsFromDB();
+
   registerHandler(EventType::FileDownloadDone,
                   &FileManager::handleDownloadFileDone);
   registerHandler(EventType::FileDownloadFailed,
@@ -98,30 +119,19 @@ void FileManager::run() {
     logInfo << "Created root directory: " << mOpt.RootPath;
   }
 
-  // check if database exists
-  if (!std::filesystem::exists(dbPath())) {
-    if (createTable() != ErrorCodeOk) {
-      logError << "Failed to create files.db table";
-      return;
-    }
+  if (!std::filesystem::exists(tmpDir())) {
+    std::filesystem::create_directories(tmpDir());
+    logInfo << "Created tmp directory: " << tmpDir();
   }
 
-  if (auto db = getDB()) {
-    try {
-      db->stor.sync_schema();
-    } catch (...) {
-      // TODO:handle create db failed
-      logError << "Failed to sync schema for files.db";
-      return;
-    }
+  if (!std::filesystem::exists(fileDir())) {
+    std::filesystem::create_directories(fileDir());
+    logInfo << "Created file directory: " << fileDir();
   }
-
-  // 从数据库加载文件访问记录到LRU缓存
-  loadAccessRecordsFromDB();
 
   while (true) {
-    waitAllEvents(std::chrono::milliseconds(1000));
     // 主循环中只处理事件，刷新任务由独立线程处理
+    waitAllEvents(std::chrono::milliseconds(1000));
   }
   logInfo << "FileManager exit";
 }
@@ -156,7 +166,7 @@ int FileManager::createTable() {
         block_hash TEXT NOT NULL,
         file_hash TEXT NOT NULL,
         file_path TEXT NOT NULL,
-        file_size INTEGER,
+        status INTEGER NOT NULL DEFAULT 1,
         block_start INTEGER,
         block_end INTEGER,
         last_access INTEGER,
@@ -197,14 +207,17 @@ std::string FileManager::GetPathByBlockHash(const std::string &block_hash,
     if (!files.empty()) {
       auto &file = files[0];
       uint64_t file_id = std::get<0>(file);
-      std::string file_path = std::get<1>(file);
+      std::string relative_file_path = std::get<1>(file);
       uint64_t block_end = std::get<2>(file);
       uint64_t block_start = std::get<3>(file);
       uint64_t file_size = block_end - block_start;
 
       // 记录文件访问，使用文件ID
-      RecordFileAccess(file_id, file_path, file_size);
-      return file_path;
+      RecordFileAccess(file_id, relative_file_path, file_size);
+
+      std::filesystem::path file_path = mOpt.RootPath;
+      file_path.append(relative_file_path);
+      return file_path.string();
     }
 
     return "";
@@ -307,12 +320,6 @@ void FileManager::FlushAccessRecords() {
   }
 }
 
-uint64_t FileManager::getCurrentTimestamp() {
-  return std::chrono::duration_cast<std::chrono::seconds>(
-             std::chrono::system_clock::now().time_since_epoch())
-      .count();
-}
-
 void FileManager::loadAccessRecordsFromDB() {
   logInfo << "Loading file access records from database";
 
@@ -344,16 +351,6 @@ void FileManager::loadAccessRecordsFromDB() {
       uint64_t block_end = std::get<3>(file);
       uint64_t block_start = std::get<4>(file);
       uint64_t file_size = block_end - block_start;
-
-      // 检查文件是否实际存在于磁盘上
-      std::filesystem::path full_path(mOpt.RootPath);
-      full_path.append(file_path);
-
-      if (!std::filesystem::exists(full_path)) {
-        logDebug << "File not found on disk, skipping: " << file_path;
-        // 可以选择从数据库中删除这个记录，但为了安全起见这里只是跳过
-        continue;
-      }
 
       // 添加到LRU列表和缓存
       mLRUList.push_back(file_id); // 按访问时间降序添加，最新的在前面
@@ -410,6 +407,10 @@ uint64_t FileManager::calculateTotalStorageSize() {
 
 void FileManager::CheckAndEliminateFiles() {
   uint64_t current_size = calculateTotalStorageSize();
+  if (current_size == 0) {
+    logInfo << "No files to check for elimination, current size is 0";
+    return;
+  }
   uint64_t upper_bound =
       (mOpt.MaxStorageSize * mOpt.LRUUpperBoundPercent) / 100;
 
@@ -419,13 +420,12 @@ void FileManager::CheckAndEliminateFiles() {
             << upper_bound
             << "), starting LRU elimination to target size: " << target_size;
 
-    removeLRUFiles(target_size);
+    removeLRUFiles(current_size, target_size);
   }
 }
 
-void FileManager::removeLRUFiles(uint64_t target_size) {
+void FileManager::removeLRUFiles(uint64_t current_size, uint64_t target_size) {
   std::vector<uint64_t> files_to_remove;
-  uint64_t current_size = calculateTotalStorageSize();
   uint64_t size_to_free = 0;
 
   {
@@ -469,6 +469,8 @@ void FileManager::removeLRUFiles(uint64_t target_size) {
               }
             }
           } catch (...) {
+            logWarn << "Failed to query file size for ID " << file_id
+                    << ", using estimated size";
             // 如果数据库查询失败，使用估算值
             uint64_t estimated_size = 1024 * 1024; // 1MB估算
             size_to_free += estimated_size;
@@ -598,7 +600,6 @@ void FileManager::reportHaveFile(const FileItem &item) {
     j["block_hash"] = item.block_hash;
     j["block_start"] = item.block_start;
     j["block_end"] = item.block_end;
-    j["file_size"] = item.file_size;
     j["last_access"] = item.last_access;
 
     std::string resp;
@@ -747,7 +748,7 @@ void FileManager::runReportThread() {
         auto files = db->stor.select(
             columns(&FileItem::id, &FileItem::file_hash, &FileItem::block_hash,
                     &FileItem::block_start, &FileItem::block_end,
-                    &FileItem::file_size, &FileItem::last_access),
+                    &FileItem::last_access),
             where(c(&FileItem::status) == FileStatus::AVAILABLE),
             order_by(&FileItem::last_report).asc(),
             limit(mOpt.ReportBatchSize));
@@ -771,8 +772,7 @@ void FileManager::runReportThread() {
             item.block_hash = std::get<2>(file);
             item.block_start = std::get<3>(file);
             item.block_end = std::get<4>(file);
-            item.file_size = std::get<5>(file);
-            item.last_access = std::get<6>(file);
+            item.last_access = std::get<5>(file);
 
             // 上报文件
             reportHaveFile(item);
