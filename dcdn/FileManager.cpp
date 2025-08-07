@@ -57,9 +57,12 @@ FileManager::FileManager(MainManager *man, const FileManagerOption &opt)
 
   // 启动刷新线程
   mFlushThread = std::thread(&FileManager::runFlushThread, this);
-  
+
   // 启动上报线程
   mReportThread = std::thread(&FileManager::runReportThread, this);
+
+  // 启动扫描清理线程
+  mScanThread = std::thread(&FileManager::runScanThread, this);
 }
 
 FileManager::~FileManager() {
@@ -68,6 +71,7 @@ FileManager::~FileManager() {
   mLRUCondition.notify_all();
   mFlushCondition.notify_all();
   mReportCondition.notify_all();
+  mScanCondition.notify_all();
 
   if (mLRUThread.joinable()) {
     mLRUThread.join();
@@ -76,9 +80,13 @@ FileManager::~FileManager() {
   if (mFlushThread.joinable()) {
     mFlushThread.join();
   }
-  
+
   if (mReportThread.joinable()) {
     mReportThread.join();
+  }
+
+  if (mScanThread.joinable()) {
+    mScanThread.join();
   }
 }
 
@@ -208,7 +216,7 @@ std::string FileManager::GetPathByBlockHash(const std::string &block_hash,
 
 std::string FileManager::NewDownloadPath(const FileDescriptor &file) {
   auto storage_path = tmpDir();
-  std::string file_name = FilePath(file);
+  std::string file_name = FileName(file);
   storage_path.append(file_name);
   return storage_path.string();
 }
@@ -592,10 +600,11 @@ void FileManager::reportHaveFile(const FileItem &item) {
     j["block_end"] = item.block_end;
     j["file_size"] = item.file_size;
     j["last_access"] = item.last_access;
-    
+
     std::string resp;
-    mClient.Post(mOpt.PCDNReportUrl.c_str(), j.dump(), resp, "application/json");
-    logDebug << "Successfully reported have file: " << item.file_hash 
+    mClient.Post(mOpt.PCDNReportUrl.c_str(), j.dump(), resp,
+                 "application/json");
+    logDebug << "Successfully reported have file: " << item.file_hash
              << " (block: " << item.block_start << "-" << item.block_end << ")";
   } catch (const std::exception &e) {
     logWarn << "Failed to report have file: " << e.what();
@@ -713,9 +722,9 @@ void FileManager::runReportThread() {
     try {
       // 等待指定的上报间隔时间，或者被停止信号唤醒
       std::unique_lock<std::mutex> lock(mReportConditionMutex);
-      if (mReportCondition.wait_for(
-              lock, std::chrono::seconds(mOpt.ReportInterval),
-              [this] { return mShouldStop.load(); })) {
+      if (mReportCondition.wait_for(lock,
+                                    std::chrono::seconds(mOpt.ReportInterval),
+                                    [this] { return mShouldStop.load(); })) {
         // 被停止信号唤醒
         break;
       }
@@ -798,6 +807,427 @@ void FileManager::runReportThread() {
   }
 
   logInfo << "Report thread stopped";
+}
+
+void FileManager::runScanThread() {
+  logInfo << "Scan thread started";
+
+  while (!mShouldStop) {
+    try {
+      // 等待指定的扫描间隔时间，或者被停止信号唤醒
+      std::unique_lock<std::mutex> lock(mScanConditionMutex);
+      if (mScanCondition.wait_for(lock, std::chrono::seconds(mOpt.ScanInterval),
+                                  [this] { return mShouldStop.load(); })) {
+        // 被停止信号唤醒
+        break;
+      }
+
+      // 执行目录扫描和清理
+      scanAndCleanOrphanFiles();
+
+      // 执行数据库清理，删除不存在文件的记录
+      cleanMissingFilesFromDB();
+
+      // 清理过期的下载文件
+      cleanStaleDownloads();
+    } catch (const std::exception &e) {
+      logWarn << "Scan thread exception: " << e.what();
+      // 发生异常时等待一段时间再重试，避免快速循环
+      std::this_thread::sleep_for(std::chrono::seconds(30));
+    } catch (...) {
+      logWarn << "Scan thread unknown exception";
+      std::this_thread::sleep_for(std::chrono::seconds(30));
+    }
+  }
+
+  logInfo << "Scan thread stopped";
+}
+
+void FileManager::scanAndCleanOrphanFiles() {
+  logInfo << "Starting directory scan for orphan files";
+
+  if (!std::filesystem::exists(fileDir())) {
+    logWarn << "Files path does not exist: " << fileDir();
+    return;
+  }
+
+  auto db = getDB();
+  if (!db) {
+    logWarn << "Failed to get database connection for orphan file scan";
+    return;
+  }
+
+  try {
+    // 获取数据库中所有文件路径的集合
+    std::unordered_set<std::string> db_file_paths;
+    auto db_files = db->stor.select(
+        &FileItem::path, where(c(&FileItem::status) == FileStatus::AVAILABLE));
+
+    for (const auto &path : db_files) {
+      db_file_paths.insert(path);
+    }
+
+    logInfo << "Found " << db_file_paths.size() << " files in database";
+
+    // 递归扫描目录
+    uint64_t scanned_count = 0;
+    uint64_t orphan_count = 0;
+    uint64_t deleted_count = 0;
+    uint64_t total_size_freed = 0;
+
+    std::filesystem::recursive_directory_iterator dir_iter(fileDir());
+
+    for (const auto &entry : dir_iter) {
+      if (mShouldStop) {
+        logInfo << "Scan interrupted by stop signal";
+        break;
+      }
+
+      // 只处理普通文件，跳过目录和特殊文件
+      if (!entry.is_regular_file()) {
+        continue;
+      }
+
+      scanned_count++;
+
+      try {
+        // 获取相对于根目录的路径
+        std::filesystem::path relative_path =
+            std::filesystem::relative(entry.path(), mOpt.RootPath);
+        std::string relative_path_str = relative_path.string();
+
+        // 检查文件是否在数据库中
+        if (db_file_paths.find(relative_path_str) == db_file_paths.end()) {
+          // 文件不在数据库中，是孤立文件
+          orphan_count++;
+
+          try {
+            // 获取文件大小
+            uint64_t file_size = std::filesystem::file_size(entry.path());
+
+            // 删除孤立文件
+            std::filesystem::remove(entry.path());
+            deleted_count++;
+            total_size_freed += file_size;
+
+            logInfo << "Deleted orphan file: " << relative_path_str
+                    << " (size: " << file_size << " bytes)";
+
+          } catch (const std::filesystem::filesystem_error &e) {
+            logWarn << "Failed to delete orphan file " << relative_path_str
+                    << ": " << e.what();
+          }
+        }
+
+        // 每扫描1000个文件输出一次进度
+        if (scanned_count % 1000 == 0) {
+          logDebug << "Scanned " << scanned_count << " files, found "
+                   << orphan_count << " orphans";
+        }
+
+      } catch (const std::exception &e) {
+        logWarn << "Error processing file " << entry.path() << ": " << e.what();
+      }
+    }
+
+    logInfo << "Directory scan completed: scanned " << scanned_count
+            << " files, found " << orphan_count << " orphan files, "
+            << "deleted " << deleted_count << " files, "
+            << "freed " << total_size_freed << " bytes";
+
+  } catch (const std::exception &e) {
+    logWarn << "Failed to scan directory for orphan files: " << e.what();
+  }
+}
+
+void FileManager::cleanMissingFilesFromDB() {
+  logInfo << "Starting database cleanup for missing files";
+
+  auto db = getDB();
+  if (!db) {
+    logWarn << "Failed to get database connection for missing file cleanup";
+    return;
+  }
+
+  try {
+    // 查询数据库中所有文件记录
+    auto db_files = db->stor.select(
+        columns(&FileItem::id, &FileItem::path, &FileItem::file_hash,
+                &FileItem::block_start, &FileItem::block_end));
+
+    if (db_files.empty()) {
+      logInfo << "No files found in database";
+      return;
+    }
+
+    logInfo << "Checking " << db_files.size() << " files from database";
+
+    std::vector<uint64_t> missing_file_ids;
+    std::vector<FileItem> missing_files_for_report;
+    uint64_t checked_count = 0;
+    uint64_t missing_count = 0;
+
+    for (const auto &db_file : db_files) {
+      if (mShouldStop) {
+        logInfo << "Missing file cleanup interrupted by stop signal";
+        break;
+      }
+
+      try {
+        uint64_t file_id = std::get<0>(db_file);
+        std::string relative_path = std::get<1>(db_file);
+        std::string file_hash = std::get<2>(db_file);
+        uint64_t block_start = std::get<3>(db_file);
+        uint64_t block_end = std::get<4>(db_file);
+
+        // 构建完整的文件路径
+        std::filesystem::path full_path(mOpt.RootPath);
+        full_path.append(relative_path);
+
+        checked_count++;
+
+        // 检查文件是否存在
+        if (!std::filesystem::exists(full_path)) {
+          // 文件不存在，记录需要删除的文件ID
+          missing_file_ids.push_back(file_id);
+          missing_count++;
+
+          // 准备用于上报的文件信息
+          FileItem missing_item;
+          missing_item.id = file_id;
+          missing_item.path = relative_path;
+          missing_item.file_hash = file_hash;
+          missing_item.block_start = block_start;
+          missing_item.block_end = block_end;
+          missing_files_for_report.push_back(missing_item);
+
+          logDebug << "Found missing file in database: " << relative_path
+                   << " (ID: " << file_id << ")";
+
+          // 从LRU缓存中删除该文件（如果存在）
+          {
+            std::lock_guard<std::mutex> lock(mLRUMutex);
+            auto cache_it = mLRUCache.find(file_id);
+            if (cache_it != mLRUCache.end()) {
+              mLRUList.erase(cache_it->second.list_iter);
+              mLRUCache.erase(cache_it);
+              logDebug << "Removed missing file from LRU cache: " << file_id;
+            }
+          }
+        }
+
+        // 每检查1000个文件输出一次进度
+        if (checked_count % 1000 == 0) {
+          logDebug << "Checked " << checked_count << " files, found "
+                   << missing_count << " missing files";
+        }
+
+      } catch (const std::exception &e) {
+        logWarn << "Error checking file existence: " << e.what();
+      }
+    }
+
+    // 批量删除数据库中的缺失文件记录
+    if (!missing_file_ids.empty()) {
+      logInfo << "Removing " << missing_file_ids.size()
+              << " missing file records from database";
+
+      uint64_t deleted_count = 0;
+
+      // 分批删除，避免SQL语句过长
+      const size_t batch_size = 100;
+      for (size_t i = 0; i < missing_file_ids.size(); i += batch_size) {
+        try {
+          size_t end = std::min(i + batch_size, missing_file_ids.size());
+
+          for (size_t j = i; j < end; ++j) {
+            db->stor.remove<FileItem>(missing_file_ids[j]);
+            deleted_count++;
+          }
+
+        } catch (const std::exception &e) {
+          logWarn << "Failed to delete batch of missing file records: "
+                  << e.what();
+        }
+      }
+
+      logInfo << "Successfully removed " << deleted_count
+              << " missing file records";
+
+      // 上报删除的文件（如果配置了上报URL）
+      if (!mOpt.PCDNReportUrl.empty()) {
+        logInfo << "Reporting " << missing_files_for_report.size()
+                << " removed files to PCDN server";
+
+        uint64_t reported_count = 0;
+        for (const auto &missing_file : missing_files_for_report) {
+          try {
+            reportRemoveFile(missing_file);
+            reported_count++;
+          } catch (const std::exception &e) {
+            logWarn << "Failed to report removed file " << missing_file.path
+                    << ": " << e.what();
+          }
+        }
+
+        logInfo << "Successfully reported " << reported_count << "/"
+                << missing_files_for_report.size() << " removed files";
+      }
+    }
+
+    logInfo << "Database cleanup completed: checked " << checked_count
+            << " files, found " << missing_count << " missing files, "
+            << "removed " << missing_file_ids.size() << " database records";
+
+  } catch (const std::exception &e) {
+    logWarn << "Failed to clean missing files from database: " << e.what();
+  }
+}
+
+void FileManager::cleanStaleDownloads() {
+  logInfo << "Starting cleanup of stale download files";
+
+  std::filesystem::path tmp_dir = tmpDir();
+
+  // 检查tmp目录是否存在
+  if (!std::filesystem::exists(tmp_dir)) {
+    logDebug << "Tmp directory does not exist: " << tmp_dir;
+    return;
+  }
+
+  auto db = getDB();
+  if (!db) {
+    logWarn << "Failed to get database connection for stale download cleanup";
+    return;
+  }
+
+  try {
+    uint64_t current_time = getCurrentTimestamp();
+    uint64_t timeout_seconds = mOpt.DownloadTimeout;
+
+    // 递归扫描tmp目录
+    uint64_t scanned_count = 0;
+    uint64_t stale_count = 0;
+    uint64_t deleted_count = 0;
+    uint64_t total_size_freed = 0;
+    std::vector<std::string> deleted_files_for_db;
+
+    std::filesystem::recursive_directory_iterator dir_iter(tmp_dir);
+
+    for (const auto &entry : dir_iter) {
+      if (mShouldStop) {
+        logInfo << "Stale download cleanup interrupted by stop signal";
+        break;
+      }
+
+      // 只处理普通文件，跳过目录和特殊文件
+      if (!entry.is_regular_file()) {
+        continue;
+      }
+
+      scanned_count++;
+
+      try {
+        // 获取文件的最后写入时间
+        auto last_write_time = std::filesystem::last_write_time(entry.path());
+        auto durSinceLastWrite = durSinceFileLastUpdateTime(entry.path());
+        // 检查文件是否超时
+        if (durSinceLastWrite > timeout_seconds) {
+          stale_count++;
+
+          try {
+            // 获取文件大小
+            uint64_t file_size = std::filesystem::file_size(entry.path());
+
+            // 获取相对于tmp目录的路径
+            std::filesystem::path relative_path =
+                std::filesystem::relative(entry.path(), tmp_dir);
+            std::string relative_path_str = relative_path.string();
+
+            // 删除物理文件
+            std::filesystem::remove(entry.path());
+            deleted_count++;
+            total_size_freed += file_size;
+
+            // 记录需要从数据库中删除的文件
+            deleted_files_for_db.push_back(relative_path_str);
+
+            uint64_t stale_duration = durSinceLastWrite;
+            logInfo << "Deleted stale download file: " << relative_path_str
+                    << " (size: " << file_size
+                    << " bytes, stale for: " << stale_duration << " seconds)";
+
+          } catch (const std::filesystem::filesystem_error &e) {
+            logWarn << "Failed to delete stale download file " << entry.path()
+                    << ": " << e.what();
+          }
+        }
+
+        // 每扫描1000个文件输出一次进度
+        if (scanned_count % 1000 == 0) {
+          logDebug << "Scanned " << scanned_count << " download files, found "
+                   << stale_count << " stale files";
+        }
+
+      } catch (const std::exception &e) {
+        logWarn << "Error processing download file " << entry.path() << ": "
+                << e.what();
+      }
+    }
+
+    // 从数据库中删除对应的下载记录
+    if (!deleted_files_for_db.empty()) {
+      try {
+        // 查找并删除数据库中状态为DOWNLOADING且路径匹配的记录
+        uint64_t db_deleted_count = 0;
+
+        for (const auto &file_path : deleted_files_for_db) {
+          try {
+            // 构建完整的文件路径用于匹配
+            std::filesystem::path relative_path =
+                std::filesystem::relative(file_path, mOpt.RootPath);
+
+            // 查询匹配的下载记录
+            auto download_records = db->stor.select(
+                &FileItem::id,
+                where(c(&FileItem::status) == FileStatus::DOWNLOADING and
+                      c(&FileItem::path) == relative_path.string()));
+
+            // 删除找到的记录
+            for (const auto &record_id : download_records) {
+              db->stor.remove<FileItem>(record_id);
+              db_deleted_count++;
+
+              logDebug << "Removed stale download record from database: "
+                       << relative_path.string() << " (ID: " << record_id
+                       << ")";
+            }
+
+          } catch (const std::exception &e) {
+            logWarn << "Failed to remove download record for " << file_path
+                    << ": " << e.what();
+          }
+        }
+
+        if (db_deleted_count > 0) {
+          logInfo << "Removed " << db_deleted_count
+                  << " stale download records from database";
+        }
+
+      } catch (const std::exception &e) {
+        logWarn << "Failed to clean stale download records from database: "
+                << e.what();
+      }
+    }
+
+    logInfo << "Stale download cleanup completed: scanned " << scanned_count
+            << " files, found " << stale_count << " stale files, "
+            << "deleted " << deleted_count << " files, "
+            << "freed " << total_size_freed << " bytes";
+
+  } catch (const std::exception &e) {
+    logWarn << "Failed to clean stale download files: " << e.what();
+  }
 }
 
 NS_END

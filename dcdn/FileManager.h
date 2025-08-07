@@ -13,6 +13,7 @@
 #include <nlohmann/json.hpp>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 NS_BEGIN(dcdn)
 
@@ -49,6 +50,8 @@ struct FileManagerOption {
   uint32_t LRUCheckInterval = 300;         // LRU检查间隔(秒)
   uint32_t ReportInterval = 60 * 60;       // 文件上报间隔1小时
   uint32_t ReportBatchSize = 10;           // 每次上报的文件数量
+  uint32_t ScanInterval = 6 * 60 * 60;     // 扫描清理间隔6小时
+  uint32_t DownloadTimeout = 30 * 60;      // 下载超时时间30分钟
 };
 
 class StorageRef;
@@ -69,11 +72,12 @@ public:
   // LRU相关方法
   void RecordFileAccess(uint64_t file_id, const std::string &file_path,
                         uint64_t file_size);
+
   void FlushAccessRecords();
   void CheckAndEliminateFiles();
 
 public:
-  std::string FilePath(const FileDescriptor &file) {
+  std::string FileName(const FileDescriptor &file) {
     if (std::holds_alternative<BlockInfo>(file)) {
       const auto &block = std::get<BlockInfo>(file);
       return "blk_" + block.file_hash + "_" +
@@ -104,19 +108,30 @@ private:
   void reportHaveFile(const FileItem &item);
   void reportRemoveFile(const FileItem &item);
 
-  // jobs
-  void scanFiles();
-  void reportFiles();
-  void eliminateFiles();
+  // 定时任务
+  void runLRUThread();            // LRU线程函数
+  void loadAccessRecordsFromDB(); // 从数据库加载文件访问记录
+  void runFlushThread();          // 刷新访问记录线程函数
+  void runReportThread();         // 定时上报文件线程函数
+  void runScanThread();           // 扫描清理孤立文件线程函数
+  void scanAndCleanOrphanFiles(); // 扫描并清理孤立文件
+  void cleanMissingFilesFromDB(); // 清理数据库中不存在的文件记录
+  void cleanStaleDownloads();     // 清理过期的下载文件
 
   // LRU相关内部方法
   uint64_t getCurrentTimestamp();
   uint64_t calculateTotalStorageSize();
   void removeLRUFiles(uint64_t target_size);
-  void runLRUThread();            // LRU线程函数
-  void loadAccessRecordsFromDB(); // 从数据库加载文件访问记录
-  void runFlushThread();          // 刷新访问记录线程函数
-  void runReportThread();         // 定时上报文件线程函数
+
+
+  // 文件最近一次被写入的时间
+  uint64_t durSinceFileLastUpdateTime(std::filesystem::path path) {
+    std::filesystem::file_time_type ftime =
+        std::filesystem::last_write_time(path);
+    auto now = std::chrono::system_clock::now();
+    auto duration = now.time_since_epoch() - ftime.time_since_epoch();
+    return std::chrono::duration_cast<std::chrono::seconds>(duration).count();
+  }
 
   // db
   std::filesystem::path dbPath() const {
@@ -126,9 +141,15 @@ private:
   }
 
   std::filesystem::path tmpDir() const {
-    std::filesystem::path tmpPath(mMan->Option().WorkDir);
+    std::filesystem::path tmpPath(mOpt.RootPath);
     tmpPath.append("tmp");
     return tmpPath;
+  }
+
+  std::filesystem::path fileDir() const {
+    std::filesystem::path filesPath(mOpt.RootPath);
+    filesPath.append("files");
+    return filesPath;
   }
 
 private:
@@ -161,6 +182,11 @@ private:
   std::thread mReportThread;
   std::condition_variable mReportCondition;
   std::mutex mReportConditionMutex;
+
+  // 扫描清理线程控制
+  std::thread mScanThread;
+  std::condition_variable mScanCondition;
+  std::mutex mScanConditionMutex;
 };
 
 NS_END
