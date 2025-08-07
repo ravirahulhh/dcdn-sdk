@@ -5,7 +5,9 @@
 #include "Common.h"
 #include "EventLoop.h"
 #include "util/HttpClient.h"
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <list>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -109,6 +111,8 @@ private:
   uint64_t getCurrentTimestamp();
   uint64_t calculateTotalStorageSize();
   void removeLRUFiles(uint64_t target_size);
+  void runLRUThread(); // LRU线程函数
+  void loadAccessRecordsFromDB(); // 从数据库加载文件访问记录
 
   // db
   std::filesystem::path dbPath() const {
@@ -137,6 +141,12 @@ private:
   // 定时器相关
   std::chrono::steady_clock::time_point mLastFlushTime;
   std::chrono::steady_clock::time_point mLastLRUCheckTime;
+  
+  // LRU线程控制
+  std::atomic<bool> mShouldStop{false};
+  std::thread mLRUThread;
+  std::condition_variable mLRUCondition;
+  std::mutex mLRUConditionMutex;
 };
 
 NS_END

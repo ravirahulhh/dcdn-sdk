@@ -51,12 +51,28 @@ FileManager::FileManager(MainManager *man, const FileManagerOption &opt)
   registerHandler(EventType::FileDownloadFailed,
                   &FileManager::handleDownloadFileFailed);
   registerHandler(EventType::RemoveFile, &FileManager::handleRemoveFile);
+  
+  // 启动LRU线程
+  mLRUThread = std::thread(&FileManager::runLRUThread, this);
 }
 
-FileManager::~FileManager() {}
+FileManager::~FileManager() {
+  // 停止LRU线程
+  mShouldStop = true;
+  mLRUCondition.notify_all();
+  if (mLRUThread.joinable()) {
+    mLRUThread.join();
+  }
+}
 
 void FileManager::run() {
   logInfo << "FileManager running";
+  // check root dir exists
+  if (!std::filesystem::exists(mOpt.RootPath)) {
+    std::filesystem::create_directories(mOpt.RootPath);
+    logInfo << "Created root directory: " << mOpt.RootPath;
+  }
+
   // check if database exists
   if (!std::filesystem::exists(dbPath())) {
     if (createTable() != ErrorCodeOk) {
@@ -75,6 +91,9 @@ void FileManager::run() {
     }
   }
 
+  // 从数据库加载文件访问记录到LRU缓存
+  loadAccessRecordsFromDB();
+
   while (true) {
     waitAllEvents(std::chrono::milliseconds(1000));
 
@@ -85,14 +104,6 @@ void FileManager::run() {
     if (flush_duration.count() >= mOpt.AccessRecordFlushInterval) {
       FlushAccessRecords();
       mLastFlushTime = now;
-    }
-
-    // 检查是否需要进行LRU淘汰
-    auto lru_duration = std::chrono::duration_cast<std::chrono::seconds>(
-        now - mLastLRUCheckTime);
-    if (lru_duration.count() >= mOpt.LRUCheckInterval) {
-      CheckAndEliminateFiles();
-      mLastLRUCheckTime = now;
     }
   }
   logInfo << "FileManager exit";
@@ -283,6 +294,71 @@ uint64_t FileManager::getCurrentTimestamp() {
   return std::chrono::duration_cast<std::chrono::seconds>(
              std::chrono::system_clock::now().time_since_epoch())
       .count();
+}
+
+void FileManager::loadAccessRecordsFromDB() {
+  logInfo << "Loading file access records from database";
+  
+  auto db = getDB();
+  if (!db) {
+    logWarn << "Failed to get database connection for loading access records";
+    return;
+  }
+
+  try {
+    // 查询所有文件记录，按最后访问时间降序排列
+    auto files = db->stor.select(
+        columns(&FileItem::id, &FileItem::path, &FileItem::last_access,
+                &FileItem::block_end, &FileItem::block_start),
+        where(c(&FileItem::status) == FileStatus::AVAILABLE),
+        order_by(&FileItem::last_access).desc());
+
+    std::lock_guard<std::mutex> lock(mLRUMutex);
+    
+    // 清空现有的LRU缓存和列表
+    mLRUCache.clear();
+    mLRUList.clear();
+
+    uint64_t loaded_count = 0;
+    for (const auto &file : files) {
+      uint64_t file_id = std::get<0>(file);
+      std::string file_path = std::get<1>(file);
+      uint64_t last_access = std::get<2>(file);
+      uint64_t block_end = std::get<3>(file);
+      uint64_t block_start = std::get<4>(file);
+      uint64_t file_size = block_end - block_start;
+
+      // 检查文件是否实际存在于磁盘上
+      std::filesystem::path full_path(mOpt.RootPath);
+      full_path.append(file_path);
+      
+      if (!std::filesystem::exists(full_path)) {
+        logDebug << "File not found on disk, skipping: " << file_path;
+        // 可以选择从数据库中删除这个记录，但为了安全起见这里只是跳过
+        continue;
+      }
+
+      // 添加到LRU列表和缓存
+      mLRUList.push_back(file_id); // 按访问时间降序添加，最新的在前面
+      
+      LRUNode node;
+      node.file_id = file_id;
+      node.last_access = last_access;
+      node.access_count = 1; // 初始化访问次数
+      node.file_size = file_size;
+      node.file_path = file_path;
+      node.list_iter = std::prev(mLRUList.end()); // 指向刚插入的元素
+      node.is_dirty = false; // 从数据库加载的记录不需要立即刷新
+      
+      mLRUCache[file_id] = node;
+      loaded_count++;
+    }
+
+    logInfo << "Loaded " << loaded_count << " file access records from database";
+    
+  } catch (const std::exception &e) {
+    logWarn << "Failed to load access records from database: " << e.what();
+  }
 }
 
 uint64_t FileManager::calculateTotalStorageSize() {
@@ -490,6 +566,82 @@ void FileManager::removeLRUFiles(uint64_t target_size) {
   logInfo << "LRU elimination completed: " << successful_removals << "/"
           << files_to_remove.size() << " files removed, " << actual_freed
           << " bytes freed";
+}
+
+void FileManager::reportHaveFile(const FileItem &item) {
+  if (mOpt.PCDNReportUrl.empty()) {
+    return;
+  }
+
+  try {
+    std::string resp;
+    mClient.Post(mOpt.PCDNReportUrl.c_str(), "", resp, "application/json");
+  } catch (const std::exception &e) {
+    logWarn << "Failed to report have file: " << e.what();
+  }
+}
+
+void FileManager::reportRemoveFile(const FileItem &item) {
+  if (mOpt.PCDNReportUrl.empty()) {
+    return;
+  }
+
+  try {
+    nlohmann::json j;
+    j["file_hash"] = item.file_hash;
+    j["block_start"] = item.block_start;
+    j["block_end"] = item.block_end;
+
+    std::string resp;
+    mClient.Post(mOpt.PCDNReportUrl.c_str(), j.dump(), resp,
+                 "application/json");
+  } catch (const std::exception &e) {
+    logWarn << "Failed to report remove file: " << e.what();
+  }
+}
+
+void FileManager::handleDownloadFileDone(std::shared_ptr<Event> evt) {
+  // TODO: 实现下载完成处理逻辑
+  logInfo << "File download completed";
+}
+
+void FileManager::handleDownloadFileFailed(std::shared_ptr<Event> evt) {
+  // TODO: 实现下载失败处理逻辑
+  logWarn << "File download failed";
+}
+
+void FileManager::handleRemoveFile(std::shared_ptr<Event> evt) {
+  // TODO: 实现文件移除处理逻辑
+  logInfo << "File remove request received";
+}
+
+void FileManager::runLRUThread() {
+  logInfo << "LRU thread started";
+  
+  while (!mShouldStop) {
+    try {
+      // 等待指定的间隔时间，或者被停止信号唤醒
+      std::unique_lock<std::mutex> lock(mLRUConditionMutex);
+      if (mLRUCondition.wait_for(lock, std::chrono::seconds(mOpt.LRUCheckInterval),
+                                [this] { return mShouldStop.load(); })) {
+        // 被停止信号唤醒
+        break;
+      }
+      
+      // 执行LRU检查和淘汰
+      CheckAndEliminateFiles();
+      
+    } catch (const std::exception &e) {
+      logWarn << "LRU thread exception: " << e.what();
+      // 发生异常时等待一段时间再重试，避免快速循环
+      std::this_thread::sleep_for(std::chrono::seconds(10));
+    } catch (...) {
+      logWarn << "LRU thread unknown exception";
+      std::this_thread::sleep_for(std::chrono::seconds(10));
+    }
+  }
+  
+  logInfo << "LRU thread stopped";
 }
 
 NS_END
