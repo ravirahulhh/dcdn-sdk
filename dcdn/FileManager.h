@@ -114,8 +114,19 @@ private:
   void runReportThread();         // 定时上报文件线程函数
   void runScanThread();           // 扫描清理孤立文件线程函数
   // TODO: consider disk db inconsistent
-  void scanAndCleanOrphanFiles(); // 扫描并清理孤立文件
-  void cleanMissingFilesFromDB(); // 清理数据库中不存在的文件记录
+  void scanAndCleanInconsistentFiles(); // 统一的文件系统与数据库一致性检查和清理
+  
+  // 辅助方法：扫描文件系统和数据库，返回文件差异信息
+  void scanFilesystemAndDatabase(
+      std::vector<std::string> &filesystem_files,
+      std::unordered_map<std::string, std::tuple<uint64_t, std::string, uint64_t, uint64_t>> &db_files_map);
+  
+  // 辅助方法：处理孤儿文件（在文件系统中但不在数据库中的文件）
+  uint64_t cleanOrphanFiles(const std::vector<std::string> &orphan_files);
+  
+  // 辅助方法：处理缺失文件（在数据库中但不在文件系统中的文件）
+  uint64_t cleanMissingFiles(const std::vector<std::tuple<uint64_t, std::string, std::string, uint64_t, uint64_t>> &missing_files);
+  
   void cleanStaleDownloads();     // 清理过期的下载文件
 
   uint64_t getCurrentTimestamp() {
@@ -165,6 +176,11 @@ private:
   std::unordered_map<uint64_t, LRUNode>
       mLRUCache;                // file_id -> LRUNode，统一管理访问记录
   std::list<uint64_t> mLRUList; // 最近使用的文件ID列表，头部最新
+
+  // 文件操作同步锁 - 用于防止文件创建/删除操作与扫描清理的竞态
+  // 此锁保护：1. 孤儿文件扫描与删除操作 2. LRU文件删除操作 3. 过期下载文件清理
+  // 确保在扫描文件系统状态时，不会有并发的文件创建/删除操作
+  std::mutex mFileOperationMutex;
 
   // 定时器相关
   std::chrono::steady_clock::time_point mLastFlushTime;

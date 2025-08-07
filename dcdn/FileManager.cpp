@@ -546,16 +546,20 @@ void FileManager::removeLRUFiles(uint64_t current_size, uint64_t target_size) {
         continue;
       }
 
-      // 删除物理文件
-      std::filesystem::path full_path(mOpt.RootPath);
-      full_path.append(file_path);
+      // 删除物理文件时加锁，防止与扫描操作冲突
+      {
+        std::lock_guard<std::mutex> file_lock(mFileOperationMutex);
 
-      if (std::filesystem::exists(full_path)) {
-        std::filesystem::remove(full_path);
-        actual_freed += file_size;
-        successful_removals++;
-        logInfo << "Removed LRU file: " << full_path << " (size: " << file_size
-                << " bytes)";
+        std::filesystem::path full_path(mOpt.RootPath);
+        full_path.append(file_path);
+
+        if (std::filesystem::exists(full_path)) {
+          std::filesystem::remove(full_path);
+          actual_freed += file_size;
+          successful_removals++;
+          logInfo << "Removed LRU file: " << full_path
+                  << " (size: " << file_size << " bytes)";
+        }
       }
 
       // 从数据库删除记录
@@ -822,11 +826,8 @@ void FileManager::runScanThread() {
         break;
       }
 
-      // 执行目录扫描和清理
-      scanAndCleanOrphanFiles();
-
-      // 执行数据库清理，删除不存在文件的记录
-      cleanMissingFilesFromDB();
+      // 执行统一的文件系统与数据库一致性检查和清理
+      scanAndCleanInconsistentFiles();
 
       // 清理过期的下载文件
       cleanStaleDownloads();
@@ -843,8 +844,11 @@ void FileManager::runScanThread() {
   logInfo << "Scan thread stopped";
 }
 
-void FileManager::scanAndCleanOrphanFiles() {
-  logInfo << "Starting directory scan for orphan files";
+void FileManager::scanFilesystemAndDatabase(
+    std::vector<std::string> &filesystem_files,
+    std::unordered_map<std::string,
+                       std::tuple<uint64_t, std::string, uint64_t, uint64_t>>
+        &db_files_map) {
 
   if (!std::filesystem::exists(fileDir())) {
     logWarn << "Files path does not exist: " << fileDir();
@@ -853,234 +857,293 @@ void FileManager::scanAndCleanOrphanFiles() {
 
   auto db = getDB();
   if (!db) {
-    logWarn << "Failed to get database connection for orphan file scan";
+    logWarn
+        << "Failed to get database connection for filesystem and database scan";
     return;
   }
 
-  try {
-    // 获取数据库中所有文件路径的集合
-    std::unordered_set<std::string> db_file_paths;
-    auto db_files = db->stor.select(
-        &FileItem::path, where(c(&FileItem::status) == FileStatus::AVAILABLE));
+  // 加锁进行一致性扫描，防止与文件创建/删除操作发生竞态
+  std::lock_guard<std::mutex> file_lock(mFileOperationMutex);
 
-    for (const auto &path : db_files) {
-      db_file_paths.insert(path);
-    }
+  logDebug << "Acquiring file operation lock for filesystem and database scan";
 
-    logInfo << "Found " << db_file_paths.size() << " files in database";
-
-    // 递归扫描目录
-    uint64_t scanned_count = 0;
-    uint64_t orphan_count = 0;
-    uint64_t deleted_count = 0;
-    uint64_t total_size_freed = 0;
-
-    std::filesystem::recursive_directory_iterator dir_iter(fileDir());
-
-    for (const auto &entry : dir_iter) {
-      if (mShouldStop) {
-        logInfo << "Scan interrupted by stop signal";
-        break;
-      }
-
-      // 只处理普通文件，跳过目录和特殊文件
-      if (!entry.is_regular_file()) {
-        continue;
-      }
-
-      scanned_count++;
-
-      try {
-        // 获取相对于根目录的路径
-        std::filesystem::path relative_path =
-            std::filesystem::relative(entry.path(), mOpt.RootPath);
-        std::string relative_path_str = relative_path.string();
-
-        // 检查文件是否在数据库中
-        if (db_file_paths.find(relative_path_str) == db_file_paths.end()) {
-          // 文件不在数据库中，是孤立文件
-          orphan_count++;
-
-          try {
-            // 获取文件大小
-            uint64_t file_size = std::filesystem::file_size(entry.path());
-
-            // 删除孤立文件
-            std::filesystem::remove(entry.path());
-            deleted_count++;
-            total_size_freed += file_size;
-
-            logInfo << "Deleted orphan file: " << relative_path_str
-                    << " (size: " << file_size << " bytes)";
-
-          } catch (const std::filesystem::filesystem_error &e) {
-            logWarn << "Failed to delete orphan file " << relative_path_str
-                    << ": " << e.what();
-          }
-        }
-
-        // 每扫描1000个文件输出一次进度
-        if (scanned_count % 1000 == 0) {
-          logDebug << "Scanned " << scanned_count << " files, found "
-                   << orphan_count << " orphans";
-        }
-
-      } catch (const std::exception &e) {
-        logWarn << "Error processing file " << entry.path() << ": " << e.what();
-      }
-    }
-
-    logInfo << "Directory scan completed: scanned " << scanned_count
-            << " files, found " << orphan_count << " orphan files, "
-            << "deleted " << deleted_count << " files, "
-            << "freed " << total_size_freed << " bytes";
-
-  } catch (const std::exception &e) {
-    logWarn << "Failed to scan directory for orphan files: " << e.what();
-  }
-}
-
-void FileManager::cleanMissingFilesFromDB() {
-  logInfo << "Starting database cleanup for missing files";
-
-  auto db = getDB();
-  if (!db) {
-    logWarn << "Failed to get database connection for missing file cleanup";
-    return;
-  }
-
-  try {
-    // 查询数据库中所有文件记录
-    auto db_files = db->stor.select(
-        columns(&FileItem::id, &FileItem::path, &FileItem::file_hash,
-                &FileItem::block_start, &FileItem::block_end));
-
-    if (db_files.empty()) {
-      logInfo << "No files found in database";
+  // 1. 扫描文件系统，收集所有文件路径
+  std::filesystem::recursive_directory_iterator dir_iter(fileDir());
+  for (const auto &entry : dir_iter) {
+    if (mShouldStop) {
+      logInfo << "Filesystem scan interrupted by stop signal";
       return;
     }
 
-    logInfo << "Checking " << db_files.size() << " files from database";
-
-    std::vector<uint64_t> missing_file_ids;
-    std::vector<FileItem> missing_files_for_report;
-    uint64_t checked_count = 0;
-    uint64_t missing_count = 0;
-
-    for (const auto &db_file : db_files) {
-      if (mShouldStop) {
-        logInfo << "Missing file cleanup interrupted by stop signal";
-        break;
-      }
-
-      try {
-        uint64_t file_id = std::get<0>(db_file);
-        std::string relative_path = std::get<1>(db_file);
-        std::string file_hash = std::get<2>(db_file);
-        uint64_t block_start = std::get<3>(db_file);
-        uint64_t block_end = std::get<4>(db_file);
-
-        // 构建完整的文件路径
-        std::filesystem::path full_path(mOpt.RootPath);
-        full_path.append(relative_path);
-
-        checked_count++;
-
-        // 检查文件是否存在
-        if (!std::filesystem::exists(full_path)) {
-          // 文件不存在，记录需要删除的文件ID
-          missing_file_ids.push_back(file_id);
-          missing_count++;
-
-          // 准备用于上报的文件信息
-          FileItem missing_item;
-          missing_item.id = file_id;
-          missing_item.path = relative_path;
-          missing_item.file_hash = file_hash;
-          missing_item.block_start = block_start;
-          missing_item.block_end = block_end;
-          missing_files_for_report.push_back(missing_item);
-
-          logDebug << "Found missing file in database: " << relative_path
-                   << " (ID: " << file_id << ")";
-
-          // 从LRU缓存中删除该文件（如果存在）
-          {
-            std::lock_guard<std::mutex> lock(mLRUMutex);
-            auto cache_it = mLRUCache.find(file_id);
-            if (cache_it != mLRUCache.end()) {
-              mLRUList.erase(cache_it->second.list_iter);
-              mLRUCache.erase(cache_it);
-              logDebug << "Removed missing file from LRU cache: " << file_id;
-            }
-          }
-        }
-
-        // 每检查1000个文件输出一次进度
-        if (checked_count % 1000 == 0) {
-          logDebug << "Checked " << checked_count << " files, found "
-                   << missing_count << " missing files";
-        }
-
-      } catch (const std::exception &e) {
-        logWarn << "Error checking file existence: " << e.what();
-      }
+    // 只处理普通文件，跳过目录和特殊文件
+    if (!entry.is_regular_file()) {
+      continue;
     }
 
-    // 批量删除数据库中的缺失文件记录
-    if (!missing_file_ids.empty()) {
-      logInfo << "Removing " << missing_file_ids.size()
-              << " missing file records from database";
+    try {
+      // 获取相对于根目录的路径
+      std::filesystem::path relative_path =
+          std::filesystem::relative(entry.path(), mOpt.RootPath);
+      filesystem_files.push_back(relative_path.string());
+    } catch (const std::exception &e) {
+      logWarn << "Error processing file path " << entry.path() << ": "
+              << e.what();
+    }
+  }
 
-      uint64_t deleted_count = 0;
+  // 2. 查询数据库，获取所有AVAILABLE状态的文件信息
+  try {
+    auto db_files = db->stor.select(
+        columns(&FileItem::id, &FileItem::path, &FileItem::file_hash,
+                &FileItem::block_start, &FileItem::block_end),
+        where(c(&FileItem::status) == FileStatus::AVAILABLE));
 
-      // 分批删除，避免SQL语句过长
-      const size_t batch_size = 100;
-      for (size_t i = 0; i < missing_file_ids.size(); i += batch_size) {
-        try {
-          size_t end = std::min(i + batch_size, missing_file_ids.size());
+    for (const auto &file : db_files) {
+      std::string path = std::get<1>(file);
+      uint64_t id = std::get<0>(file);
+      std::string hash = std::get<2>(file);
+      uint64_t block_start = std::get<3>(file);
+      uint64_t block_end = std::get<4>(file);
 
-          for (size_t j = i; j < end; ++j) {
-            db->stor.remove<FileItem>(missing_file_ids[j]);
-            deleted_count++;
-          }
-
-        } catch (const std::exception &e) {
-          logWarn << "Failed to delete batch of missing file records: "
-                  << e.what();
-        }
-      }
-
-      logInfo << "Successfully removed " << deleted_count
-              << " missing file records";
-
-      // 上报删除的文件（如果配置了上报URL）
-      if (!mOpt.PCDNReportUrl.empty()) {
-        logInfo << "Reporting " << missing_files_for_report.size()
-                << " removed files to PCDN server";
-
-        uint64_t reported_count = 0;
-        for (const auto &missing_file : missing_files_for_report) {
-          try {
-            reportRemoveFile(missing_file);
-            reported_count++;
-          } catch (const std::exception &e) {
-            logWarn << "Failed to report removed file " << missing_file.path
-                    << ": " << e.what();
-          }
-        }
-
-        logInfo << "Successfully reported " << reported_count << "/"
-                << missing_files_for_report.size() << " removed files";
-      }
+      db_files_map[path] = std::make_tuple(id, hash, block_start, block_end);
     }
 
-    logInfo << "Database cleanup completed: checked " << checked_count
-            << " files, found " << missing_count << " missing files, "
-            << "removed " << missing_file_ids.size() << " database records";
+    logInfo << "Filesystem and database scan completed: found "
+            << filesystem_files.size() << " files in filesystem, "
+            << db_files_map.size() << " files in database";
 
   } catch (const std::exception &e) {
-    logWarn << "Failed to clean missing files from database: " << e.what();
+    logWarn << "Failed to query database during scan: " << e.what();
+    throw; // 重新抛出异常让调用者处理
+  }
+}
+
+uint64_t
+FileManager::cleanOrphanFiles(const std::vector<std::string> &orphan_files) {
+  if (orphan_files.empty()) {
+    return 0;
+  }
+
+  logInfo << "Cleaning " << orphan_files.size() << " orphan files";
+
+  uint64_t orphan_deleted_count = 0;
+
+  for (const auto &orphan_file : orphan_files) {
+    if (mShouldStop) {
+      logInfo << "Orphan file cleanup interrupted by stop signal";
+      break;
+    }
+
+    try {
+      std::filesystem::path full_path(mOpt.RootPath);
+      full_path.append(orphan_file);
+
+      // 再次检查文件是否存在（可能被其他进程删除）
+      if (!std::filesystem::exists(full_path)) {
+        logDebug << "Orphan file no longer exists, skipping: " << orphan_file;
+        continue;
+      }
+
+      // 删除孤儿文件
+      std::filesystem::remove(full_path);
+      orphan_deleted_count++;
+
+      logInfo << "Deleted orphan file: " << orphan_file;
+
+    } catch (const std::filesystem::filesystem_error &e) {
+      logWarn << "Failed to delete orphan file " << orphan_file << ": "
+              << e.what();
+    } catch (const std::exception &e) {
+      logWarn << "Error processing orphan file " << orphan_file << ": "
+              << e.what();
+    }
+  }
+
+  logInfo << "Orphan file cleanup completed: deleted " << orphan_deleted_count
+          << " files";
+
+  return orphan_deleted_count;
+}
+
+uint64_t FileManager::cleanMissingFiles(
+    const std::vector<std::tuple<uint64_t, std::string, std::string, uint64_t,
+                                 uint64_t>> &missing_files) {
+  if (missing_files.empty()) {
+    return 0;
+  }
+
+  auto db = getDB();
+  if (!db) {
+    logWarn << "Failed to get database connection for cleaning missing files";
+    return 0;
+  }
+
+  logInfo << "Cleaning " << missing_files.size() << " missing file records";
+
+  std::vector<uint64_t> missing_file_ids;
+  std::vector<FileItem> missing_files_for_report;
+
+  // 处理LRU缓存清理
+  for (const auto &missing_file : missing_files) {
+    uint64_t file_id = std::get<0>(missing_file);
+    std::string relative_path = std::get<1>(missing_file);
+    std::string file_hash = std::get<2>(missing_file);
+    uint64_t block_start = std::get<3>(missing_file);
+    uint64_t block_end = std::get<4>(missing_file);
+
+    missing_file_ids.push_back(file_id);
+
+    // 准备用于上报的文件信息
+    FileItem missing_item;
+    missing_item.id = file_id;
+    missing_item.path = relative_path;
+    missing_item.file_hash = file_hash;
+    missing_item.block_start = block_start;
+    missing_item.block_end = block_end;
+    missing_files_for_report.push_back(missing_item);
+
+    logDebug << "Found missing file in database: " << relative_path
+             << " (ID: " << file_id << ")";
+
+    // 从LRU缓存中删除该文件（如果存在）
+    {
+      std::lock_guard<std::mutex> lock(mLRUMutex);
+      auto cache_it = mLRUCache.find(file_id);
+      if (cache_it != mLRUCache.end()) {
+        mLRUList.erase(cache_it->second.list_iter);
+        mLRUCache.erase(cache_it);
+        logDebug << "Removed missing file from LRU cache: " << file_id;
+      }
+    }
+  }
+
+  // 批量删除数据库中的缺失文件记录
+  uint64_t deleted_count = 0;
+  if (!missing_file_ids.empty()) {
+    try {
+      // 使用 sqlite_orm 的批量删除：WHERE id IN (?, ?, ?, ...)
+      // 这样只需要一次数据库操作就能删除所有记录
+      db->stor.remove_all<FileItem>(where(in(&FileItem::id, missing_file_ids)));
+      
+      // 由于 remove_all 不返回删除数量，我们假设全部删除成功
+      // 如果需要精确计数，可以先查询符合条件的记录数量
+      deleted_count = missing_file_ids.size();
+      
+      logInfo << "Successfully removed " << deleted_count
+              << " missing file records from database (batch operation)";
+              
+    } catch (const std::exception &e) {
+      logWarn << "Batch delete failed, falling back to individual deletes: " << e.what();
+      
+      // 如果批量删除失败，回退到逐个删除
+      for (const auto &file_id : missing_file_ids) {
+        try {
+          db->stor.remove<FileItem>(file_id);
+          deleted_count++;
+        } catch (const std::exception &e) {
+          logWarn << "Failed to delete missing file record ID " << file_id << ": " << e.what();
+        }
+      }
+      
+      logInfo << "Successfully removed " << deleted_count
+              << " missing file records from database (individual operations)";
+    }
+  }
+
+  // 上报删除的文件（如果配置了上报URL）
+  if (!mOpt.PCDNReportUrl.empty()) {
+    logInfo << "Reporting " << missing_files_for_report.size()
+            << " removed files to PCDN server";
+
+    uint64_t reported_count = 0;
+    for (const auto &missing_file : missing_files_for_report) {
+      try {
+        reportRemoveFile(missing_file);
+        reported_count++;
+      } catch (const std::exception &e) {
+        logWarn << "Failed to report removed file " << missing_file.path << ": "
+                << e.what();
+      }
+    }
+
+    logInfo << "Successfully reported " << reported_count << "/"
+            << missing_files_for_report.size() << " removed files";
+  }
+
+  return deleted_count;
+}
+
+void FileManager::scanAndCleanInconsistentFiles() {
+  logInfo << "Starting unified file system and database consistency check";
+
+  auto db = getDB();
+  if (!db) {
+    logWarn << "Failed to get database connection for consistency check";
+    return;
+  }
+
+  try {
+    // 用于存储扫描和检查结果的数据结构
+    std::vector<std::string> filesystem_files; // 文件系统中的文件列表
+    std::unordered_map<std::string,
+                       std::tuple<uint64_t, std::string, uint64_t, uint64_t>>
+        db_files_map; // 数据库文件映射：路径 -> (id, hash, block_start,
+                      // block_end)
+
+    // 使用辅助方法扫描文件系统和数据库
+    scanFilesystemAndDatabase(filesystem_files, db_files_map);
+
+    // 分析并清理不一致的文件
+    std::vector<std::string>
+        orphan_files; // 在文件系统中但不在数据库中的孤儿文件
+    std::vector<
+        std::tuple<uint64_t, std::string, std::string, uint64_t, uint64_t>>
+        missing_files; // 在数据库中但不在文件系统中的文件
+
+    // 找孤儿文件
+    for (const auto &fs_file : filesystem_files) {
+      if (db_files_map.find(fs_file) == db_files_map.end()) {
+        orphan_files.push_back(fs_file);
+      }
+    }
+
+    // 找缺失文件
+    for (const auto &[db_path, file_info] : db_files_map) {
+      bool found_in_filesystem = false;
+      for (const auto &fs_file : filesystem_files) {
+        if (fs_file == db_path) {
+          found_in_filesystem = true;
+          break;
+        }
+      }
+
+      if (!found_in_filesystem) {
+        uint64_t id = std::get<0>(file_info);
+        std::string hash = std::get<1>(file_info);
+        uint64_t block_start = std::get<2>(file_info);
+        uint64_t block_end = std::get<3>(file_info);
+        missing_files.push_back(
+            std::make_tuple(id, db_path, hash, block_start, block_end));
+      }
+    }
+
+    logInfo << "Found " << orphan_files.size() << " orphan files and "
+            << missing_files.size() << " missing files";
+
+    // 处理孤儿文件（在文件系统中但不在数据库中）
+    uint64_t orphan_deleted_count = cleanOrphanFiles(orphan_files);
+
+    // 处理缺失文件（在数据库中但不在文件系统中）
+    uint64_t missing_deleted_count = cleanMissingFiles(missing_files);
+
+    logInfo << "Unified consistency check completed: processed "
+            << filesystem_files.size() << " filesystem files, "
+            << db_files_map.size() << " database files, deleted "
+            << orphan_deleted_count << " orphan files and "
+            << missing_deleted_count << " missing file records";
+
+  } catch (const std::exception &e) {
+    logWarn << "Failed to perform unified consistency check: " << e.what();
   }
 }
 
@@ -1143,8 +1206,6 @@ void FileManager::cleanStaleDownloads() {
             std::filesystem::path relative_path =
                 std::filesystem::relative(entry.path(), tmp_dir);
             std::string relative_path_str = relative_path.string();
-
-            // 删除物理文件
             std::filesystem::remove(entry.path());
             deleted_count++;
             total_size_freed += file_size;
