@@ -47,6 +47,8 @@ struct FileManagerOption {
   std::string PCDNReportUrl;
   uint32_t AccessRecordFlushInterval = 60; // 访问记录刷新到数据库的间隔(秒)
   uint32_t LRUCheckInterval = 300;         // LRU检查间隔(秒)
+  uint32_t ReportInterval = 60 * 60;       // 文件上报间隔1小时
+  uint32_t ReportBatchSize = 10;           // 每次上报的文件数量
 };
 
 class StorageRef;
@@ -111,9 +113,10 @@ private:
   uint64_t getCurrentTimestamp();
   uint64_t calculateTotalStorageSize();
   void removeLRUFiles(uint64_t target_size);
-  void runLRUThread(); // LRU线程函数
+  void runLRUThread();            // LRU线程函数
   void loadAccessRecordsFromDB(); // 从数据库加载文件访问记录
-  void runFlushThread(); // 刷新访问记录线程函数
+  void runFlushThread();          // 刷新访问记录线程函数
+  void runReportThread();         // 定时上报文件线程函数
 
   // db
   std::filesystem::path dbPath() const {
@@ -142,17 +145,22 @@ private:
   // 定时器相关
   std::chrono::steady_clock::time_point mLastFlushTime;
   std::chrono::steady_clock::time_point mLastLRUCheckTime;
-  
+
   // LRU线程控制
   std::atomic<bool> mShouldStop{false};
   std::thread mLRUThread;
   std::condition_variable mLRUCondition;
   std::mutex mLRUConditionMutex;
-  
+
   // 刷新线程控制
   std::thread mFlushThread;
   std::condition_variable mFlushCondition;
   std::mutex mFlushConditionMutex;
+
+  // 上报线程控制
+  std::thread mReportThread;
+  std::condition_variable mReportCondition;
+  std::mutex mReportConditionMutex;
 };
 
 NS_END

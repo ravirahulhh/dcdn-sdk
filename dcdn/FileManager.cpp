@@ -57,6 +57,9 @@ FileManager::FileManager(MainManager *man, const FileManagerOption &opt)
 
   // 启动刷新线程
   mFlushThread = std::thread(&FileManager::runFlushThread, this);
+  
+  // 启动上报线程
+  mReportThread = std::thread(&FileManager::runReportThread, this);
 }
 
 FileManager::~FileManager() {
@@ -64,6 +67,7 @@ FileManager::~FileManager() {
   mShouldStop = true;
   mLRUCondition.notify_all();
   mFlushCondition.notify_all();
+  mReportCondition.notify_all();
 
   if (mLRUThread.joinable()) {
     mLRUThread.join();
@@ -71,6 +75,10 @@ FileManager::~FileManager() {
 
   if (mFlushThread.joinable()) {
     mFlushThread.join();
+  }
+  
+  if (mReportThread.joinable()) {
+    mReportThread.join();
   }
 }
 
@@ -576,8 +584,19 @@ void FileManager::reportHaveFile(const FileItem &item) {
   }
 
   try {
+    nlohmann::json j;
+    j["action"] = "have_file";
+    j["file_hash"] = item.file_hash;
+    j["block_hash"] = item.block_hash;
+    j["block_start"] = item.block_start;
+    j["block_end"] = item.block_end;
+    j["file_size"] = item.file_size;
+    j["last_access"] = item.last_access;
+    
     std::string resp;
-    mClient.Post(mOpt.PCDNReportUrl.c_str(), "", resp, "application/json");
+    mClient.Post(mOpt.PCDNReportUrl.c_str(), j.dump(), resp, "application/json");
+    logDebug << "Successfully reported have file: " << item.file_hash 
+             << " (block: " << item.block_start << "-" << item.block_end << ")";
   } catch (const std::exception &e) {
     logWarn << "Failed to report have file: " << e.what();
   }
@@ -685,6 +704,100 @@ void FileManager::runFlushThread() {
   }
 
   logInfo << "Flush thread stopped";
+}
+
+void FileManager::runReportThread() {
+  logInfo << "Report thread started";
+
+  while (!mShouldStop) {
+    try {
+      // 等待指定的上报间隔时间，或者被停止信号唤醒
+      std::unique_lock<std::mutex> lock(mReportConditionMutex);
+      if (mReportCondition.wait_for(
+              lock, std::chrono::seconds(mOpt.ReportInterval),
+              [this] { return mShouldStop.load(); })) {
+        // 被停止信号唤醒
+        break;
+      }
+
+      // 如果没有配置上报URL，跳过上报
+      if (mOpt.PCDNReportUrl.empty()) {
+        continue;
+      }
+
+      // 从数据库查询最久没有上报的文件
+      auto db = getDB();
+      if (!db) {
+        logWarn << "Failed to get database connection for reporting files";
+        continue;
+      }
+
+      try {
+        // 查询最久没有上报的文件，按last_report升序排列
+        // 如果last_report为空或0，则优先上报
+        auto files = db->stor.select(
+            columns(&FileItem::id, &FileItem::file_hash, &FileItem::block_hash,
+                    &FileItem::block_start, &FileItem::block_end,
+                    &FileItem::file_size, &FileItem::last_access),
+            where(c(&FileItem::status) == FileStatus::AVAILABLE),
+            order_by(&FileItem::last_report).asc(),
+            limit(mOpt.ReportBatchSize));
+
+        if (files.empty()) {
+          logDebug << "No files to report";
+          continue;
+        }
+
+        logInfo << "Reporting " << files.size() << " files to PCDN server";
+
+        uint64_t current_time = getCurrentTimestamp();
+        uint64_t successful_reports = 0;
+
+        // 逐个上报文件
+        for (const auto &file : files) {
+          try {
+            FileItem item;
+            item.id = std::get<0>(file);
+            item.file_hash = std::get<1>(file);
+            item.block_hash = std::get<2>(file);
+            item.block_start = std::get<3>(file);
+            item.block_end = std::get<4>(file);
+            item.file_size = std::get<5>(file);
+            item.last_access = std::get<6>(file);
+
+            // 上报文件
+            reportHaveFile(item);
+
+            // 更新数据库中的last_report时间
+            db->stor.update_all(set(c(&FileItem::last_report) = current_time),
+                                where(c(&FileItem::id) == item.id));
+
+            successful_reports++;
+
+          } catch (const std::exception &e) {
+            logWarn << "Failed to report file ID " << std::get<0>(file) << ": "
+                    << e.what();
+          }
+        }
+
+        logInfo << "Successfully reported " << successful_reports << "/"
+                << files.size() << " files";
+
+      } catch (const std::exception &e) {
+        logWarn << "Failed to query files for reporting: " << e.what();
+      }
+
+    } catch (const std::exception &e) {
+      logWarn << "Report thread exception: " << e.what();
+      // 发生异常时等待一段时间再重试，避免快速循环
+      std::this_thread::sleep_for(std::chrono::seconds(10));
+    } catch (...) {
+      logWarn << "Report thread unknown exception";
+      std::this_thread::sleep_for(std::chrono::seconds(10));
+    }
+  }
+
+  logInfo << "Report thread stopped";
 }
 
 NS_END
