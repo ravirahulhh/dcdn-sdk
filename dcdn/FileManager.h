@@ -113,6 +113,7 @@ private:
   void removeLRUFiles(uint64_t target_size);
   void runLRUThread(); // LRU线程函数
   void loadAccessRecordsFromDB(); // 从数据库加载文件访问记录
+  void runFlushThread(); // 刷新访问记录线程函数
 
   // db
   std::filesystem::path dbPath() const {
@@ -147,6 +148,11 @@ private:
   std::thread mLRUThread;
   std::condition_variable mLRUCondition;
   std::mutex mLRUConditionMutex;
+  
+  // 刷新线程控制
+  std::thread mFlushThread;
+  std::condition_variable mFlushCondition;
+  std::mutex mFlushConditionMutex;
 };
 
 NS_END

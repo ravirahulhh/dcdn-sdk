@@ -51,17 +51,26 @@ FileManager::FileManager(MainManager *man, const FileManagerOption &opt)
   registerHandler(EventType::FileDownloadFailed,
                   &FileManager::handleDownloadFileFailed);
   registerHandler(EventType::RemoveFile, &FileManager::handleRemoveFile);
-  
+
   // 启动LRU线程
   mLRUThread = std::thread(&FileManager::runLRUThread, this);
+
+  // 启动刷新线程
+  mFlushThread = std::thread(&FileManager::runFlushThread, this);
 }
 
 FileManager::~FileManager() {
-  // 停止LRU线程
+  // 停止所有线程
   mShouldStop = true;
   mLRUCondition.notify_all();
+  mFlushCondition.notify_all();
+
   if (mLRUThread.joinable()) {
     mLRUThread.join();
+  }
+
+  if (mFlushThread.joinable()) {
+    mFlushThread.join();
   }
 }
 
@@ -96,15 +105,7 @@ void FileManager::run() {
 
   while (true) {
     waitAllEvents(std::chrono::milliseconds(1000));
-
-    // 检查是否需要刷新访问记录到数据库
-    auto now = std::chrono::steady_clock::now();
-    auto flush_duration =
-        std::chrono::duration_cast<std::chrono::seconds>(now - mLastFlushTime);
-    if (flush_duration.count() >= mOpt.AccessRecordFlushInterval) {
-      FlushAccessRecords();
-      mLastFlushTime = now;
-    }
+    // 主循环中只处理事件，刷新任务由独立线程处理
   }
   logInfo << "FileManager exit";
 }
@@ -298,7 +299,7 @@ uint64_t FileManager::getCurrentTimestamp() {
 
 void FileManager::loadAccessRecordsFromDB() {
   logInfo << "Loading file access records from database";
-  
+
   auto db = getDB();
   if (!db) {
     logWarn << "Failed to get database connection for loading access records";
@@ -314,7 +315,7 @@ void FileManager::loadAccessRecordsFromDB() {
         order_by(&FileItem::last_access).desc());
 
     std::lock_guard<std::mutex> lock(mLRUMutex);
-    
+
     // 清空现有的LRU缓存和列表
     mLRUCache.clear();
     mLRUList.clear();
@@ -331,7 +332,7 @@ void FileManager::loadAccessRecordsFromDB() {
       // 检查文件是否实际存在于磁盘上
       std::filesystem::path full_path(mOpt.RootPath);
       full_path.append(file_path);
-      
+
       if (!std::filesystem::exists(full_path)) {
         logDebug << "File not found on disk, skipping: " << file_path;
         // 可以选择从数据库中删除这个记录，但为了安全起见这里只是跳过
@@ -340,7 +341,7 @@ void FileManager::loadAccessRecordsFromDB() {
 
       // 添加到LRU列表和缓存
       mLRUList.push_back(file_id); // 按访问时间降序添加，最新的在前面
-      
+
       LRUNode node;
       node.file_id = file_id;
       node.last_access = last_access;
@@ -349,13 +350,14 @@ void FileManager::loadAccessRecordsFromDB() {
       node.file_path = file_path;
       node.list_iter = std::prev(mLRUList.end()); // 指向刚插入的元素
       node.is_dirty = false; // 从数据库加载的记录不需要立即刷新
-      
+
       mLRUCache[file_id] = node;
       loaded_count++;
     }
 
-    logInfo << "Loaded " << loaded_count << " file access records from database";
-    
+    logInfo << "Loaded " << loaded_count
+            << " file access records from database";
+
   } catch (const std::exception &e) {
     logWarn << "Failed to load access records from database: " << e.what();
   }
@@ -617,20 +619,21 @@ void FileManager::handleRemoveFile(std::shared_ptr<Event> evt) {
 
 void FileManager::runLRUThread() {
   logInfo << "LRU thread started";
-  
+
   while (!mShouldStop) {
     try {
       // 等待指定的间隔时间，或者被停止信号唤醒
       std::unique_lock<std::mutex> lock(mLRUConditionMutex);
-      if (mLRUCondition.wait_for(lock, std::chrono::seconds(mOpt.LRUCheckInterval),
-                                [this] { return mShouldStop.load(); })) {
+      if (mLRUCondition.wait_for(lock,
+                                 std::chrono::seconds(mOpt.LRUCheckInterval),
+                                 [this] { return mShouldStop.load(); })) {
         // 被停止信号唤醒
         break;
       }
-      
+
       // 执行LRU检查和淘汰
       CheckAndEliminateFiles();
-      
+
     } catch (const std::exception &e) {
       logWarn << "LRU thread exception: " << e.what();
       // 发生异常时等待一段时间再重试，避免快速循环
@@ -640,8 +643,48 @@ void FileManager::runLRUThread() {
       std::this_thread::sleep_for(std::chrono::seconds(10));
     }
   }
-  
+
   logInfo << "LRU thread stopped";
+}
+
+void FileManager::runFlushThread() {
+  logInfo << "Flush thread started";
+
+  while (!mShouldStop) {
+    try {
+      // 等待指定的刷新间隔时间，或者被停止信号唤醒
+      std::unique_lock<std::mutex> lock(mFlushConditionMutex);
+      if (mFlushCondition.wait_for(
+              lock, std::chrono::seconds(mOpt.AccessRecordFlushInterval),
+              [this] { return mShouldStop.load(); })) {
+        // 被停止信号唤醒
+        break;
+      }
+
+      // 执行访问记录刷新
+      FlushAccessRecords();
+
+    } catch (const std::exception &e) {
+      logWarn << "Flush thread exception: " << e.what();
+      // 发生异常时等待一段时间再重试，避免快速循环
+      std::this_thread::sleep_for(std::chrono::seconds(10));
+    } catch (...) {
+      logWarn << "Flush thread unknown exception";
+      std::this_thread::sleep_for(std::chrono::seconds(10));
+    }
+  }
+
+  // 线程停止前最后刷新一次，确保数据不丢失
+  try {
+    FlushAccessRecords();
+    logInfo << "Final flush completed before thread exit";
+  } catch (const std::exception &e) {
+    logWarn << "Final flush failed: " << e.what();
+  } catch (...) {
+    logWarn << "Final flush unknown exception";
+  }
+
+  logInfo << "Flush thread stopped";
 }
 
 NS_END
