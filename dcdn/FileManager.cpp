@@ -3,12 +3,53 @@
 #include "MainManager.h"
 #include "SqliteOrmHelper.h"
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <memory>
+#include <mutex>
 #include <sqlite3.h>
 #include <sqlite_orm/sqlite_orm.h>
+#include <stdexcept>
+#include <thread>
+#include <tuple>
+#include <unordered_map>
+#include <variant>
+#include <vector>
 
 using namespace sqlite_orm;
+
+// 为 FileStatus 枚举类型提供 sqlite_orm 类型映射
+namespace sqlite_orm {
+    template<>
+    struct type_printer<dcdn::FileStatus> : public integer_printer {};
+    
+    template<>
+    struct statement_binder<dcdn::FileStatus> {
+        int bind(sqlite3_stmt *stmt, int index, const dcdn::FileStatus &value) {
+            return statement_binder<int>().bind(stmt, index, static_cast<int>(value));
+        }
+    };
+    
+    template<>
+    struct field_printer<dcdn::FileStatus> {
+        std::string operator()(const dcdn::FileStatus &t) const {
+            return std::to_string(static_cast<int>(t));
+        }
+    };
+    
+    template<>
+    struct row_extractor<dcdn::FileStatus> {
+        dcdn::FileStatus extract(const char *row_value) {
+            return static_cast<dcdn::FileStatus>(std::atoi(row_value));
+        }
+        
+        dcdn::FileStatus extract(sqlite3_stmt *stmt, int columnIndex) {
+            return static_cast<dcdn::FileStatus>(sqlite3_column_int(stmt, columnIndex));
+        }
+    };
+}
 
 NS_BEGIN(dcdn)
 

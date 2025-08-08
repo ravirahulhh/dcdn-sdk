@@ -1,0 +1,168 @@
+g++ -std=c++17 -O3 -c -I.. -I../deps/include  -I/opt/homebrew/opt/openssl@3/include FileManager.cpp
+In file included from FileManager.cpp:1:
+./FileManager.h:55:46: warning: overflow in expression; result is 0 with type 'int' [-Winteger-overflow]
+   55 |   uint64_t MaxStorageSize = 20 * 1024 * 1024 * 1024; // 20GB
+      |                             ~~~~~~~~~~~~~~~~~^~~~~~
+In file included from FileManager.cpp:13:
+../deps/include/sqlite_orm/sqlite_orm.h:1373:20: warning: pack indexing is a C++2c extension [-Wc++26-extensions]
+ 1373 |             return Idx...[Pos];
+      |                    ^
+../deps/include/sqlite_orm/sqlite_orm.h:1640:21: warning: uninitialized variable in a constexpr function is a C++20 extension [-Wc++20-extensions]
+ 1640 |                 int sink;
+      |                     ^
+../deps/include/sqlite_orm/sqlite_orm.h:3939:39: warning: 'codecvt_utf8_utf16<wchar_t>' is deprecated [-Wdeprecated-declarations]
+ 3939 |             std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+      |                                       ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/codecvt:568:28: note: 'codecvt_utf8_utf16<wchar_t>' has been explicitly marked deprecated here
+  568 | class _LIBCPP_TEMPLATE_VIS _LIBCPP_DEPRECATED_IN_CXX17 codecvt_utf8_utf16 : public __codecvt_utf8_utf16<_Elem> {
+      |                            ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/__config:731:41: note: expanded from macro '_LIBCPP_DEPRECATED_IN_CXX17'
+  731 | #    define _LIBCPP_DEPRECATED_IN_CXX17 _LIBCPP_DEPRECATED
+      |                                         ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/__config:696:49: note: expanded from macro '_LIBCPP_DEPRECATED'
+  696 | #      define _LIBCPP_DEPRECATED __attribute__((__deprecated__))
+      |                                                 ^
+In file included from FileManager.cpp:13:
+../deps/include/sqlite_orm/sqlite_orm.h:3939:18: warning: 'wstring_convert<std::codecvt_utf8_utf16<wchar_t>>' is deprecated [-Wdeprecated-declarations]
+ 3939 |             std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+      |                  ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/locale:3145:28: note: 'wstring_convert<std::codecvt_utf8_utf16<wchar_t>>' has been explicitly marked deprecated here
+ 3145 | class _LIBCPP_TEMPLATE_VIS _LIBCPP_DEPRECATED_IN_CXX17 wstring_convert {
+      |                            ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/__config:731:41: note: expanded from macro '_LIBCPP_DEPRECATED_IN_CXX17'
+  731 | #    define _LIBCPP_DEPRECATED_IN_CXX17 _LIBCPP_DEPRECATED
+      |                                         ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/__config:696:49: note: expanded from macro '_LIBCPP_DEPRECATED'
+  696 | #      define _LIBCPP_DEPRECATED __attribute__((__deprecated__))
+      |                                                 ^
+In file included from FileManager.cpp:13:
+../deps/include/sqlite_orm/sqlite_orm.h:10117:39: warning: 'codecvt_utf8_utf16<wchar_t>' is deprecated [-Wdeprecated-declarations]
+ 10117 |             std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+       |                                       ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/codecvt:568:28: note: 'codecvt_utf8_utf16<wchar_t>' has been explicitly marked deprecated here
+  568 | class _LIBCPP_TEMPLATE_VIS _LIBCPP_DEPRECATED_IN_CXX17 codecvt_utf8_utf16 : public __codecvt_utf8_utf16<_Elem> {
+      |                            ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/__config:731:41: note: expanded from macro '_LIBCPP_DEPRECATED_IN_CXX17'
+  731 | #    define _LIBCPP_DEPRECATED_IN_CXX17 _LIBCPP_DEPRECATED
+      |                                         ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/__config:696:49: note: expanded from macro '_LIBCPP_DEPRECATED'
+  696 | #      define _LIBCPP_DEPRECATED __attribute__((__deprecated__))
+      |                                                 ^
+In file included from FileManager.cpp:13:
+../deps/include/sqlite_orm/sqlite_orm.h:10117:18: warning: 'wstring_convert<std::codecvt_utf8_utf16<wchar_t>>' is deprecated [-Wdeprecated-declarations]
+ 10117 |             std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+       |                  ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/locale:3145:28: note: 'wstring_convert<std::codecvt_utf8_utf16<wchar_t>>' has been explicitly marked deprecated here
+ 3145 | class _LIBCPP_TEMPLATE_VIS _LIBCPP_DEPRECATED_IN_CXX17 wstring_convert {
+      |                            ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/__config:731:41: note: expanded from macro '_LIBCPP_DEPRECATED_IN_CXX17'
+  731 | #    define _LIBCPP_DEPRECATED_IN_CXX17 _LIBCPP_DEPRECATED
+      |                                         ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/__config:696:49: note: expanded from macro '_LIBCPP_DEPRECATED'
+  696 | #      define _LIBCPP_DEPRECATED __attribute__((__deprecated__))
+      |                                                 ^
+In file included from FileManager.cpp:13:
+../deps/include/sqlite_orm/sqlite_orm.h:13015:43: warning: 'codecvt_utf8_utf16<wchar_t>' is deprecated [-Wdeprecated-declarations]
+ 13015 |                 std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+       |                                           ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/codecvt:568:28: note: 'codecvt_utf8_utf16<wchar_t>' has been explicitly marked deprecated here
+  568 | class _LIBCPP_TEMPLATE_VIS _LIBCPP_DEPRECATED_IN_CXX17 codecvt_utf8_utf16 : public __codecvt_utf8_utf16<_Elem> {
+      |                            ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/__config:731:41: note: expanded from macro '_LIBCPP_DEPRECATED_IN_CXX17'
+  731 | #    define _LIBCPP_DEPRECATED_IN_CXX17 _LIBCPP_DEPRECATED
+      |                                         ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/__config:696:49: note: expanded from macro '_LIBCPP_DEPRECATED'
+  696 | #      define _LIBCPP_DEPRECATED __attribute__((__deprecated__))
+      |                                                 ^
+In file included from FileManager.cpp:13:
+../deps/include/sqlite_orm/sqlite_orm.h:13015:22: warning: 'wstring_convert<std::codecvt_utf8_utf16<wchar_t>>' is deprecated [-Wdeprecated-declarations]
+ 13015 |                 std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+       |                      ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/locale:3145:28: note: 'wstring_convert<std::codecvt_utf8_utf16<wchar_t>>' has been explicitly marked deprecated here
+ 3145 | class _LIBCPP_TEMPLATE_VIS _LIBCPP_DEPRECATED_IN_CXX17 wstring_convert {
+      |                            ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/__config:731:41: note: expanded from macro '_LIBCPP_DEPRECATED_IN_CXX17'
+  731 | #    define _LIBCPP_DEPRECATED_IN_CXX17 _LIBCPP_DEPRECATED
+      |                                         ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/__config:696:49: note: expanded from macro '_LIBCPP_DEPRECATED'
+  696 | #      define _LIBCPP_DEPRECATED __attribute__((__deprecated__))
+      |                                                 ^
+In file included from FileManager.cpp:13:
+../deps/include/sqlite_orm/sqlite_orm.h:13025:43: warning: 'codecvt_utf8_utf16<wchar_t>' is deprecated [-Wdeprecated-declarations]
+ 13025 |                 std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+       |                                           ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/codecvt:568:28: note: 'codecvt_utf8_utf16<wchar_t>' has been explicitly marked deprecated here
+  568 | class _LIBCPP_TEMPLATE_VIS _LIBCPP_DEPRECATED_IN_CXX17 codecvt_utf8_utf16 : public __codecvt_utf8_utf16<_Elem> {
+      |                            ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/__config:731:41: note: expanded from macro '_LIBCPP_DEPRECATED_IN_CXX17'
+  731 | #    define _LIBCPP_DEPRECATED_IN_CXX17 _LIBCPP_DEPRECATED
+      |                                         ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/__config:696:49: note: expanded from macro '_LIBCPP_DEPRECATED'
+  696 | #      define _LIBCPP_DEPRECATED __attribute__((__deprecated__))
+      |                                                 ^
+In file included from FileManager.cpp:13:
+../deps/include/sqlite_orm/sqlite_orm.h:13025:22: warning: 'wstring_convert<std::codecvt_utf8_utf16<wchar_t>>' is deprecated [-Wdeprecated-declarations]
+ 13025 |                 std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+       |                      ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/locale:3145:28: note: 'wstring_convert<std::codecvt_utf8_utf16<wchar_t>>' has been explicitly marked deprecated here
+ 3145 | class _LIBCPP_TEMPLATE_VIS _LIBCPP_DEPRECATED_IN_CXX17 wstring_convert {
+      |                            ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/__config:731:41: note: expanded from macro '_LIBCPP_DEPRECATED_IN_CXX17'
+  731 | #    define _LIBCPP_DEPRECATED_IN_CXX17 _LIBCPP_DEPRECATED
+      |                                         ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/__config:696:49: note: expanded from macro '_LIBCPP_DEPRECATED'
+  696 | #      define _LIBCPP_DEPRECATED __attribute__((__deprecated__))
+      |                                                 ^
+In file included from FileManager.cpp:13:
+../deps/include/sqlite_orm/sqlite_orm.h:19499:43: warning: 'codecvt_utf8_utf16<wchar_t>' is deprecated [-Wdeprecated-declarations]
+ 19499 |                 std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+       |                                           ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/codecvt:568:28: note: 'codecvt_utf8_utf16<wchar_t>' has been explicitly marked deprecated here
+  568 | class _LIBCPP_TEMPLATE_VIS _LIBCPP_DEPRECATED_IN_CXX17 codecvt_utf8_utf16 : public __codecvt_utf8_utf16<_Elem> {
+      |                            ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/__config:731:41: note: expanded from macro '_LIBCPP_DEPRECATED_IN_CXX17'
+  731 | #    define _LIBCPP_DEPRECATED_IN_CXX17 _LIBCPP_DEPRECATED
+      |                                         ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/__config:696:49: note: expanded from macro '_LIBCPP_DEPRECATED'
+  696 | #      define _LIBCPP_DEPRECATED __attribute__((__deprecated__))
+      |                                                 ^
+In file included from FileManager.cpp:13:
+../deps/include/sqlite_orm/sqlite_orm.h:19499:22: warning: 'wstring_convert<std::codecvt_utf8_utf16<wchar_t>>' is deprecated [-Wdeprecated-declarations]
+ 19499 |                 std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+       |                      ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/locale:3145:28: note: 'wstring_convert<std::codecvt_utf8_utf16<wchar_t>>' has been explicitly marked deprecated here
+ 3145 | class _LIBCPP_TEMPLATE_VIS _LIBCPP_DEPRECATED_IN_CXX17 wstring_convert {
+      |                            ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/__config:731:41: note: expanded from macro '_LIBCPP_DEPRECATED_IN_CXX17'
+  731 | #    define _LIBCPP_DEPRECATED_IN_CXX17 _LIBCPP_DEPRECATED
+      |                                         ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/__config:696:49: note: expanded from macro '_LIBCPP_DEPRECATED'
+  696 | #      define _LIBCPP_DEPRECATED __attribute__((__deprecated__))
+      |                                                 ^
+In file included from FileManager.cpp:13:
+../deps/include/sqlite_orm/sqlite_orm.h:19509:43: warning: 'codecvt_utf8_utf16<wchar_t>' is deprecated [-Wdeprecated-declarations]
+ 19509 |                 std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+       |                                           ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/codecvt:568:28: note: 'codecvt_utf8_utf16<wchar_t>' has been explicitly marked deprecated here
+  568 | class _LIBCPP_TEMPLATE_VIS _LIBCPP_DEPRECATED_IN_CXX17 codecvt_utf8_utf16 : public __codecvt_utf8_utf16<_Elem> {
+      |                            ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/__config:731:41: note: expanded from macro '_LIBCPP_DEPRECATED_IN_CXX17'
+  731 | #    define _LIBCPP_DEPRECATED_IN_CXX17 _LIBCPP_DEPRECATED
+      |                                         ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/__config:696:49: note: expanded from macro '_LIBCPP_DEPRECATED'
+  696 | #      define _LIBCPP_DEPRECATED __attribute__((__deprecated__))
+      |                                                 ^
+In file included from FileManager.cpp:13:
+../deps/include/sqlite_orm/sqlite_orm.h:19509:22: warning: 'wstring_convert<std::codecvt_utf8_utf16<wchar_t>>' is deprecated [-Wdeprecated-declarations]
+ 19509 |                 std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+       |                      ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/locale:3145:28: note: 'wstring_convert<std::codecvt_utf8_utf16<wchar_t>>' has been explicitly marked deprecated here
+ 3145 | class _LIBCPP_TEMPLATE_VIS _LIBCPP_DEPRECATED_IN_CXX17 wstring_convert {
+      |                            ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/__config:731:41: note: expanded from macro '_LIBCPP_DEPRECATED_IN_CXX17'
+  731 | #    define _LIBCPP_DEPRECATED_IN_CXX17 _LIBCPP_DEPRECATED
+      |                                         ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/__config:696:49: note: expanded from macro '_LIBCPP_DEPRECATED'
+  696 | #      define _LIBCPP_DEPRECATED __attribute__((__deprecated__))
+      |                                                 ^
+15 warnings generated.

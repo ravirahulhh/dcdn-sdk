@@ -4,28 +4,39 @@
 #include "BaseManager.h"
 #include "Common.h"
 #include "EventLoop.h"
+#include "MainManager.h"
 #include "util/HttpClient.h"
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
+#include <filesystem>
 #include <list>
+#include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
+#include <variant>
+#include <vector>
 
 NS_BEGIN(dcdn)
 
 enum class FileStatus { DOWNLOADING = 1, AVAILABLE = 2 };
 
-struct FileItem : BlockInfo {
+struct FileItem {
   uint64_t id;
   FileStatus status;
   std::string path;
-  uint64_t last_access; // 改名为更语义化的名称
+  uint64_t last_access;
   uint64_t last_report;
   std::string created_at;
+  std::string file_hash;
+  uint64_t block_start;
+  uint64_t block_end;
+  std::string block_hash;
 };
 
 // LRU缓存节点 - 统一管理访问记录和LRU信息
@@ -57,8 +68,7 @@ class StorageRef;
 class FileManager : public BaseManager, public EventLoop<FileManager> {
 public:
   using json = nlohmann::json;
-  FileManager(MainManager *man, const FileManagerOption &opt)
-      : BaseManager(man), mOpt(opt) {}
+  FileManager(MainManager *man, const FileManagerOption &opt);
   ~FileManager();
   const FileManagerOption &Option() const { return mOpt; }
 
@@ -102,12 +112,13 @@ private:
   void reportHaveFile(const FileItem &item);
   void reportRemoveFile(const FileItem &item);
 
-  // 定时任务
-  void runLRUThread();            // LRU线程函数
   void loadAccessRecordsFromDB(); // 从数据库加载文件访问记录
-  void runFlushThread();          // 刷新访问记录线程函数
-  void runReportThread();         // 定时上报文件线程函数
-  void runScanThread();           // 扫描清理孤立文件线程函数
+
+  // 定时任务
+  void runLRUThread();    // LRU淘汰线程函数
+  void runFlushThread();  // 刷新访问记录线程函数
+  void runReportThread(); // 定时上报文件线程函数
+  void runScanThread();   // 扫描清理文件，保持一致性，删除过期下载文件
   void
   scanAndCleanInconsistentFiles(); // 统一的文件系统与数据库一致性检查和清理
 
