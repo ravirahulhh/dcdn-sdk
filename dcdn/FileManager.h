@@ -4,6 +4,7 @@
 #include "BaseManager.h"
 #include "Common.h"
 #include "EventLoop.h"
+#include "JsonTypes.h"
 #include "MainManager.h"
 #include "util/HttpClient.h"
 #include <atomic>
@@ -109,7 +110,8 @@ private:
   void handleDownloadFileDone(std::shared_ptr<Event> evt);
   void handleDownloadFileFailed(std::shared_ptr<Event> evt);
 
-  void reportHaveFile(const FileItem &item);
+  void
+  reportHaveFiles(const std::vector<std::tuple<FileItem, std::string>> &files);
   void reportRemoveFile(const FileItem &item);
 
   void loadAccessRecordsFromDB(); // 从数据库加载文件访问记录

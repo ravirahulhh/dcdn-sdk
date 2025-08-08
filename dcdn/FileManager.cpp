@@ -22,34 +22,30 @@ using namespace sqlite_orm;
 
 // 为 FileStatus 枚举类型提供 sqlite_orm 类型映射
 namespace sqlite_orm {
-    template<>
-    struct type_printer<dcdn::FileStatus> : public integer_printer {};
-    
-    template<>
-    struct statement_binder<dcdn::FileStatus> {
-        int bind(sqlite3_stmt *stmt, int index, const dcdn::FileStatus &value) {
-            return statement_binder<int>().bind(stmt, index, static_cast<int>(value));
-        }
-    };
-    
-    template<>
-    struct field_printer<dcdn::FileStatus> {
-        std::string operator()(const dcdn::FileStatus &t) const {
-            return std::to_string(static_cast<int>(t));
-        }
-    };
-    
-    template<>
-    struct row_extractor<dcdn::FileStatus> {
-        dcdn::FileStatus extract(const char *row_value) {
-            return static_cast<dcdn::FileStatus>(std::atoi(row_value));
-        }
-        
-        dcdn::FileStatus extract(sqlite3_stmt *stmt, int columnIndex) {
-            return static_cast<dcdn::FileStatus>(sqlite3_column_int(stmt, columnIndex));
-        }
-    };
-}
+template <> struct type_printer<dcdn::FileStatus> : public integer_printer {};
+
+template <> struct statement_binder<dcdn::FileStatus> {
+  int bind(sqlite3_stmt *stmt, int index, const dcdn::FileStatus &value) {
+    return statement_binder<int>().bind(stmt, index, static_cast<int>(value));
+  }
+};
+
+template <> struct field_printer<dcdn::FileStatus> {
+  std::string operator()(const dcdn::FileStatus &t) const {
+    return std::to_string(static_cast<int>(t));
+  }
+};
+
+template <> struct row_extractor<dcdn::FileStatus> {
+  dcdn::FileStatus extract(const char *row_value) {
+    return static_cast<dcdn::FileStatus>(std::atoi(row_value));
+  }
+
+  dcdn::FileStatus extract(sqlite3_stmt *stmt, int columnIndex) {
+    return static_cast<dcdn::FileStatus>(sqlite3_column_int(stmt, columnIndex));
+  }
+};
+} // namespace sqlite_orm
 
 NS_BEGIN(dcdn)
 
@@ -685,28 +681,42 @@ void FileManager::removeLRUFiles(uint64_t current_size, uint64_t target_size) {
           << " bytes freed";
 }
 
-void FileManager::reportHaveFile(const FileItem &item) {
+void FileManager::reportHaveFiles(
+    const std::vector<std::tuple<FileItem, std::string>> &files) {
   if (mOpt.PCDNReportUrl.empty()) {
     return;
   }
 
-  try {
-    nlohmann::json j;
-    j["action"] = "have_file";
-    j["file_hash"] = item.file_hash;
-    j["block_hash"] = item.block_hash;
-    j["block_start"] = item.block_start;
-    j["block_end"] = item.block_end;
-    j["last_access"] = item.last_access;
-
-    std::string resp;
-    mClient.Post(mOpt.PCDNReportUrl.c_str(), j.dump(), resp,
-                 "application/json");
-    logDebug << "Successfully reported have file: " << item.file_hash
-             << " (block: " << item.block_start << "-" << item.block_end << ")";
-  } catch (const std::exception &e) {
-    logWarn << "Failed to report have file: " << e.what();
+  JsonReportFileInfo report;
+  std::unordered_map<std::string, JsonFileInfo> json_files;
+  for (const auto &file : files) {
+    const auto &item = std::get<0>(file);
+    const auto &url = std::get<1>(file);
+    if (item.block_hash.empty() || item.file_hash.empty()) {
+      logWarn << "File item has empty block or file hash, skipping report";
+      continue;
+    }
+    auto it = json_files.find(item.file_hash);
+    if (it != json_files.end()) {
+      // 如果文件已经存在，更新块信息
+      it->second.addBlock(item.block_start, item.block_end, item.block_hash);
+    } else {
+      // 创建新的文件信息
+      JsonFileInfo file_info(item.file_hash, url, 0);
+      file_info.addBlock(item.block_start, item.block_end, item.block_hash);
+      if (item.file_hash == item.block_hash) {
+        file_info.size = item.block_end - item.block_start;
+      }
+      json_files[item.file_hash] = file_info;
+    }
   }
+
+  for (const auto &pair : json_files) {
+    report.addFile(pair.second);
+  }
+  std::string resp;
+  mClient.Post(mOpt.PCDNReportUrl.c_str(), report.to_json_string(), resp,
+               "application/json");
 }
 
 void FileManager::reportRemoveFile(const FileItem &item) {
@@ -821,8 +831,16 @@ void FileManager::handleDownloadFileDone(std::shared_ptr<Event> evt) {
     logWarn << "Block hash is empty, cannot report file download completion";
     return;
   }
-  reportHaveFile(item);
-
+  try {
+    reportHaveFiles(std::vector<std::tuple<FileItem, std::string>>{
+        std::make_tuple(item, arg.url)});
+  } catch (const std::exception &e) {
+    logWarn << "Failed to report file download completion: " << e.what();
+    return;
+  } catch (...) {
+    logWarn << "Unknown exception occurred while reporting file download";
+    return;
+  }
   logInfo << "File download completed";
 }
 
@@ -1037,60 +1055,59 @@ void FileManager::runReportThread() {
         continue;
       }
 
-      try {
-        // 查询最久没有上报的文件，按last_report升序排列
-        // 如果last_report为空或0，则优先上报
-        auto files = db->stor.select(
-            columns(&FileItem::id, &FileItem::file_hash, &FileItem::block_hash,
-                    &FileItem::block_start, &FileItem::block_end,
-                    &FileItem::last_access),
-            where(c(&FileItem::status) == FileStatus::AVAILABLE),
-            order_by(&FileItem::last_report).asc(),
-            limit(mOpt.ReportBatchSize));
+      // 查询最久没有上报的文件，按last_report升序排列
+      // 如果last_report为空或0，则优先上报
+      auto files = db->stor.select(
+          columns(&FileItem::id, &FileItem::file_hash, &FileItem::block_hash,
+                  &FileItem::block_start, &FileItem::block_end,
+                  &FileItem::last_access),
+          where(c(&FileItem::status) == FileStatus::AVAILABLE),
+          order_by(&FileItem::last_report).asc(), limit(mOpt.ReportBatchSize));
 
-        if (files.empty()) {
-          logDebug << "No files to report";
-          continue;
-        }
-
-        logInfo << "Reporting " << files.size() << " files to PCDN server";
-
-        uint64_t current_time = getCurrentTimestamp();
-        uint64_t successful_reports = 0;
-
-        // 逐个上报文件
-        for (const auto &file : files) {
-          try {
-            FileItem item;
-            item.id = std::get<0>(file);
-            item.file_hash = std::get<1>(file);
-            item.block_hash = std::get<2>(file);
-            item.block_start = std::get<3>(file);
-            item.block_end = std::get<4>(file);
-            item.last_access = std::get<5>(file);
-
-            // 上报文件
-            reportHaveFile(item);
-
-            // 更新数据库中的last_report时间
-            db->stor.update_all(set(c(&FileItem::last_report) = current_time),
-                                where(c(&FileItem::id) == item.id));
-
-            successful_reports++;
-
-          } catch (const std::exception &e) {
-            logWarn << "Failed to report file ID " << std::get<0>(file) << ": "
-                    << e.what();
-          }
-        }
-
-        logInfo << "Successfully reported " << successful_reports << "/"
-                << files.size() << " files";
-
-      } catch (const std::exception &e) {
-        logWarn << "Failed to query files for reporting: " << e.what();
+      if (files.empty()) {
+        logDebug << "No files to report";
+        continue;
       }
 
+      logInfo << "Reporting " << files.size() << " files to PCDN server";
+      uint64_t successful_reports = 0;
+
+      // 批量上报文件
+      std::vector<std::tuple<FileItem, std::string>> files_to_report;
+      for (const auto &file : files) {
+        FileItem item;
+        item.id = std::get<0>(file);
+        item.file_hash = std::get<1>(file);
+        item.block_hash = std::get<2>(file);
+        item.block_start = std::get<3>(file);
+        item.block_end = std::get<4>(file);
+        files_to_report.push_back(std::tuple(item, ""));
+      }
+      try {
+        reportHaveFiles(files_to_report);
+      } catch (const std::exception &e) {
+        logWarn << "Failed to report files: " << e.what();
+        continue; // 上报失败，跳过本次循环
+      } catch (...) {
+        logWarn << "Unknown exception occurred during file reporting";
+        continue; // 上报失败，跳过本次循环
+      }
+
+      // 更新数据库中上报时间
+      uint64_t current_time = getCurrentTimestamp();
+      std::vector<uint64_t> file_ids;
+      for (const auto &file : files) {
+        file_ids.push_back(std::get<0>(file));
+      }
+      if (!file_ids.empty()) {
+        try {
+          db->stor.update_all(set(c(&FileItem::last_report) = current_time),
+                              where(in(&FileItem::id, file_ids)));
+          successful_reports += file_ids.size();
+        } catch (const std::exception &e) {
+          logWarn << "Failed to batch update last report time: " << e.what();
+        }
+      }
     } catch (const std::exception &e) {
       logWarn << "Report thread exception: " << e.what();
       // 发生异常时等待一段时间再重试，避免快速循环
@@ -1100,7 +1117,6 @@ void FileManager::runReportThread() {
       std::this_thread::sleep_for(std::chrono::seconds(10));
     }
   }
-
   logInfo << "Report thread stopped";
 }
 
@@ -1148,8 +1164,8 @@ void FileManager::scanFilesystemAndDatabase(
 
   auto db = getDB();
   if (!db) {
-    logWarn
-        << "Failed to get database connection for filesystem and database scan";
+    logWarn << "Failed to get database connection for filesystem and "
+               "database scan";
     return;
   }
 
