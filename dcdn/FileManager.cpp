@@ -84,6 +84,14 @@ FileManager::FileManager(MainManager *man, const FileManagerOption &opt)
   mLastFlushTime = std::chrono::steady_clock::now();
   mLastLRUCheckTime = std::chrono::steady_clock::now();
 
+  if (man->Option().WorkDir.empty()) {
+    throw std::runtime_error("Work directory is not set in MainManager");
+  }
+
+  if (opt.RootPath.empty()) {
+    throw std::runtime_error("Root path is not set in FileManagerOption");
+  }
+
   // check if database exists
   if (!std::filesystem::exists(dbPath())) {
     if (createTable() != ErrorCodeOk) {
@@ -723,19 +731,16 @@ void FileManager::reportRemoveFile(const FileItem &item) {
   if (mOpt.PCDNReportUrl.empty()) {
     return;
   }
-
-  try {
-    nlohmann::json j;
-    j["file_hash"] = item.file_hash;
-    j["block_start"] = item.block_start;
-    j["block_end"] = item.block_end;
-
-    std::string resp;
-    mClient.Post(mOpt.PCDNReportUrl.c_str(), j.dump(), resp,
-                 "application/json");
-  } catch (const std::exception &e) {
-    logWarn << "Failed to report remove file: " << e.what();
+  JsonReportFileInfo report;
+  JsonFileInfo file_info(item.file_hash, "", 0);
+  file_info.addBlock(item.block_start, item.block_end, item.block_hash);
+  if (item.file_hash == item.block_hash) {
+    file_info.size = item.block_end - item.block_start;
   }
+  report.delFile(file_info);
+  std::string resp;
+  mClient.Post(mOpt.PCDNReportUrl.c_str(), report.to_json_string(), resp,
+               "application/json");
 }
 
 void FileManager::handleDownloadFileDone(std::shared_ptr<Event> evt) {
@@ -937,7 +942,13 @@ void FileManager::handleRemoveFile(std::shared_ptr<Event> evt) {
       }
 
       // 上报移除文件
-      reportRemoveFile(item);
+      try {
+        reportRemoveFile(item);
+      } catch (const std::exception &e) {
+        logWarn << "Failed to report file removal: " << e.what();
+      } catch (...) {
+        logWarn << "Unknown exception occurred while reporting file removal";
+      }
 
       // 从LRU缓存和列表中删除
       {
