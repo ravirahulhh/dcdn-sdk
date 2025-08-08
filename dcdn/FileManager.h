@@ -49,7 +49,7 @@ struct FileManagerOption {
   uint32_t LRUCheckInterval = 300;         // LRU检查间隔(秒)
   uint32_t ReportInterval = 60 * 60;       // 文件上报间隔1小时
   uint32_t ReportBatchSize = 10;           // 每次上报的文件数量
-  uint32_t ScanInterval = 6 * 60 * 60;     // 扫描清理间隔6小时
+  uint32_t ScanInterval = 60 * 60;         // 扫描清理间隔1小时
   uint32_t DownloadTimeout = 30 * 60;      // 下载超时时间30分钟
 };
 
@@ -66,11 +66,7 @@ public:
   // Returns empty string if file not found
   std::string GetPathByBlockHash(const std::string &block_hash,
                                  bool need_report = false);
-  std::string NewDownloadPath(const FileDescriptor &file);
-
-  // LRU相关方法
-  void RecordFileAccess(uint64_t file_id, const std::string &file_path,
-                        uint64_t file_size);
+  std::string NewDownloadPath(const FileDescriptor &file, bool create);
 
   void FlushAccessRecords();
   void CheckAndEliminateFiles();
@@ -96,7 +92,6 @@ public:
 
 private:
   void run();
-  int init();
   std::shared_ptr<StorageRef> getDB();
   int createTable();
 
@@ -113,21 +108,25 @@ private:
   void runFlushThread();          // 刷新访问记录线程函数
   void runReportThread();         // 定时上报文件线程函数
   void runScanThread();           // 扫描清理孤立文件线程函数
-  // TODO: consider disk db inconsistent
-  void scanAndCleanInconsistentFiles(); // 统一的文件系统与数据库一致性检查和清理
-  
+  void
+  scanAndCleanInconsistentFiles(); // 统一的文件系统与数据库一致性检查和清理
+
   // 辅助方法：扫描文件系统和数据库，返回文件差异信息
   void scanFilesystemAndDatabase(
       std::vector<std::string> &filesystem_files,
-      std::unordered_map<std::string, std::tuple<uint64_t, std::string, uint64_t, uint64_t>> &db_files_map);
-  
+      std::unordered_map<std::string,
+                         std::tuple<uint64_t, std::string, uint64_t, uint64_t>>
+          &db_files_map);
+
   // 辅助方法：处理孤儿文件（在文件系统中但不在数据库中的文件）
   uint64_t cleanOrphanFiles(const std::vector<std::string> &orphan_files);
-  
+
   // 辅助方法：处理缺失文件（在数据库中但不在文件系统中的文件）
-  uint64_t cleanMissingFiles(const std::vector<std::tuple<uint64_t, std::string, std::string, uint64_t, uint64_t>> &missing_files);
-  
-  void cleanStaleDownloads();     // 清理过期的下载文件
+  uint64_t cleanMissingFiles(
+      const std::vector<std::tuple<uint64_t, std::string, std::string, uint64_t,
+                                   uint64_t>> &missing_files);
+
+  void cleanStaleDownloads(); // 清理过期的下载文件
 
   uint64_t getCurrentTimestamp() {
     return std::chrono::duration_cast<std::chrono::seconds>(
@@ -145,6 +144,8 @@ private:
 
   // LRU相关内部方法
   uint64_t calculateTotalStorageSize();
+  void recordFileAccess(uint64_t file_id, const std::string &file_path,
+                        uint64_t file_size);
   void removeLRUFiles(uint64_t current_size, uint64_t target_size);
 
   // db

@@ -4,6 +4,7 @@
 #include "SqliteOrmHelper.h"
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <sqlite3.h>
 #include <sqlite_orm/sqlite_orm.h>
 
@@ -58,7 +59,6 @@ FileManager::FileManager(MainManager *man, const FileManagerOption &opt)
     try {
       db->stor.sync_schema();
     } catch (...) {
-      // TODO:handle create db failed
       logError << "Failed to sync schema for files.db";
       throw std::runtime_error("Failed to sync schema for files.db");
     }
@@ -207,17 +207,14 @@ std::string FileManager::GetPathByBlockHash(const std::string &block_hash,
     if (!files.empty()) {
       auto &file = files[0];
       uint64_t file_id = std::get<0>(file);
-      std::string relative_file_path = std::get<1>(file);
+      std::string file_path = std::get<1>(file);
       uint64_t block_end = std::get<2>(file);
       uint64_t block_start = std::get<3>(file);
       uint64_t file_size = block_end - block_start;
 
       // 记录文件访问，使用文件ID
-      RecordFileAccess(file_id, relative_file_path, file_size);
-
-      std::filesystem::path file_path = mOpt.RootPath;
-      file_path.append(relative_file_path);
-      return file_path.string();
+      recordFileAccess(file_id, file_path, file_size);
+      return file_path;
     }
 
     return "";
@@ -227,15 +224,74 @@ std::string FileManager::GetPathByBlockHash(const std::string &block_hash,
   }
 }
 
-std::string FileManager::NewDownloadPath(const FileDescriptor &file) {
-  auto storage_path = tmpDir();
+std::string FileManager::NewDownloadPath(const FileDescriptor &file,
+                                         bool create) {
+
+  // check block start <= end
+  if (std::holds_alternative<BlockInfo>(file)) {
+    const auto &block = std::get<BlockInfo>(file);
+    if (block.block_start > block.block_end) {
+      logWarn << "Invalid block range for file: " << block.file_hash
+              << " start:" << block.block_start << " end:" << block.block_end;
+      return "";
+    }
+  }
+  auto tmp_path = tmpDir();
   std::string file_name = FileName(file);
-  storage_path.append(file_name);
-  return storage_path.string();
+  tmp_path.append(file_name);
+  if (create) {
+    {
+      std::lock_guard<std::mutex> lock(mFileOperationMutex);
+      if (!std::filesystem::exists(tmp_path)) {
+        std::ofstream ofs(tmp_path);
+        if (!ofs) {
+          logWarn << "Failed to create new download file: " << tmp_path;
+          return "";
+        }
+        ofs.close();
+      }
+      logInfo << "New download file created: " << tmp_path;
+      // 写入数据库
+      auto db = getDB();
+      if (!db) {
+        logWarn << "Failed to get database connection for new download file";
+        return "";
+      }
+      try {
+        FileItem item;
+        item.block_hash = std::holds_alternative<BlockInfo>(file)
+                              ? std::get<BlockInfo>(file).block_hash
+                              : "";
+        item.file_hash = std::holds_alternative<BlockInfo>(file)
+                             ? std::get<BlockInfo>(file).file_hash
+                             : "";
+        item.path = tmp_path.string();
+        item.status = FileStatus::DOWNLOADING;
+        item.block_start = std::holds_alternative<BlockInfo>(file)
+                               ? std::get<BlockInfo>(file).block_start
+                               : 0;
+        item.block_end = std::holds_alternative<BlockInfo>(file)
+                             ? std::get<BlockInfo>(file).block_end
+                             : 0;
+        item.last_access = getCurrentTimestamp();
+        item.last_report = 0;
+        if (item.block_start > item.block_end) {
+          logWarn << "Invalid block range for file: " << file_name;
+          return "";
+        }
+        db->stor.insert(item);
+      } catch (const std::exception &e) {
+        logWarn << "Failed to insert new download file into database: "
+                << e.what();
+        return "";
+      }
+    }
+  }
+  return tmp_path.string();
 }
 
 // LRU相关方法实现
-void FileManager::RecordFileAccess(uint64_t file_id,
+void FileManager::recordFileAccess(uint64_t file_id,
                                    const std::string &file_path,
                                    uint64_t file_size) {
   std::lock_guard<std::mutex> lock(mLRUMutex);
@@ -549,15 +605,11 @@ void FileManager::removeLRUFiles(uint64_t current_size, uint64_t target_size) {
       // 删除物理文件时加锁，防止与扫描操作冲突
       {
         std::lock_guard<std::mutex> file_lock(mFileOperationMutex);
-
-        std::filesystem::path full_path(mOpt.RootPath);
-        full_path.append(file_path);
-
-        if (std::filesystem::exists(full_path)) {
-          std::filesystem::remove(full_path);
+        if (std::filesystem::exists(file_path)) {
+          std::filesystem::remove(file_path);
           actual_freed += file_size;
           successful_removals++;
-          logInfo << "Removed LRU file: " << full_path
+          logInfo << "Removed LRU file: " << file_path
                   << " (size: " << file_size << " bytes)";
         }
       }
@@ -636,17 +688,215 @@ void FileManager::reportRemoveFile(const FileItem &item) {
 }
 
 void FileManager::handleDownloadFileDone(std::shared_ptr<Event> evt) {
-  // TODO: 实现下载完成处理逻辑
+  auto e = static_cast<ArgEvent<FileDownloadDoneArg> *>(evt.get());
+  if (!e) {
+    logWarn << "Invalid download file done event";
+    return;
+  }
+  auto &arg = e->Arg();
+
+  auto db = getDB();
+  if (!db) {
+    logWarn << "Failed to get database connection for removing download file";
+    return;
+  }
+
+  FileItem item;
+  {
+    // try move file from tmp to file dir
+    std::lock_guard<std::mutex> lock(mFileOperationMutex);
+    std::string tmp_file_path = arg.file_path;
+    // handle empty path or file not exists
+    if (tmp_file_path.empty() || !std::filesystem::exists(tmp_file_path)) {
+      logWarn << "Download file path is empty";
+      // delete from db
+      try {
+        db->stor.remove<FileItem>(
+            where(c(&FileItem::path) == tmp_file_path and
+                  c(&FileItem::status) == FileStatus::DOWNLOADING));
+      } catch (const std::exception &e) {
+        logWarn << "Failed to remove download file record: " << e.what();
+      } catch (...) {
+        logWarn
+            << "Unknown exception occurred while removing download file record";
+      }
+      return;
+    }
+
+    auto tmp_relative_path = std::filesystem::relative(tmp_file_path, tmpDir());
+    auto target_relative_path = tmp_relative_path;
+    std::filesystem::path target_path(fileDir());
+    target_path.append(target_relative_path.string());
+
+    if (std::filesystem::exists(target_path)) {
+      logWarn << "File already exists at target path: " << target_path;
+      return;
+    }
+
+    // move file to target path
+    try {
+      std::filesystem::create_directories(target_path.parent_path());
+      std::filesystem::rename(tmp_file_path, target_path);
+      logInfo << "Moved downloaded file to: " << target_path;
+    } catch (const std::exception &e) {
+      logWarn << "Failed to move downloaded file: " << e.what();
+      return;
+    }
+
+    try {
+      item.path = target_path.string();
+      item.status = FileStatus::AVAILABLE;
+      item.block_start = arg.block_start;
+      item.block_end = arg.block_end;
+      item.file_hash = arg.file_hash;
+      item.block_hash = arg.block_hash;
+      item.last_access = getCurrentTimestamp();
+      item.last_report = item.last_access;
+
+      // 根据下载时的path和status=Downloading选择记录并更新
+      db->stor.update_all(
+          set(c(&FileItem::status) = item.status,
+              c(&FileItem::block_start) = item.block_start,
+              c(&FileItem::block_end) = item.block_end,
+              c(&FileItem::file_hash) = item.file_hash,
+              c(&FileItem::block_hash) = item.block_hash,
+              c(&FileItem::last_access) = item.last_access,
+              c(&FileItem::last_report) = item.last_report),
+          where(c(&FileItem::path) == tmp_file_path and
+                c(&FileItem::status) == FileStatus::DOWNLOADING));
+
+    } catch (const std::exception &e) {
+      logWarn << "Failed to update download file record: " << e.what();
+      return;
+    } catch (...) {
+      logWarn
+          << "Unknown exception occurred while updating download file record";
+      return;
+    }
+  }
+
+  // 上报文件下载完成
+  if (item.block_hash.empty()) {
+    logWarn << "Block hash is empty, cannot report file download completion";
+    return;
+  }
+  reportHaveFile(item);
+
   logInfo << "File download completed";
 }
 
 void FileManager::handleDownloadFileFailed(std::shared_ptr<Event> evt) {
-  // TODO: 实现下载失败处理逻辑
+  auto e = static_cast<ArgEvent<FileDownloadFailedArg> *>(evt.get());
+  if (!e) {
+    logWarn << "Invalid download file failed event";
+    return;
+  }
+  auto descriptor = e->Arg().file;
+  std::string tmp_path_str = NewDownloadPath(descriptor, false);
+  if (tmp_path_str.empty()) {
+    logWarn << "Failed to create download path for file";
+    return;
+  }
+  std::filesystem::path tmp_file_path(tmp_path_str);
+  {
+    std::lock_guard<std::mutex> lock(mFileOperationMutex);
+    // 删除下载失败的文件
+
+    if (std::filesystem::exists(tmp_file_path)) {
+      std::filesystem::remove(tmp_file_path);
+      logInfo << "Removed failed download file: " << tmp_file_path;
+    } else {
+      logWarn << "File not found for removal: " << tmp_file_path;
+    }
+    // 删除数据库记录
+    auto db = getDB();
+    if (!db) {
+      logWarn
+          << "Failed to get database connection for removing failed download";
+      return;
+    }
+    try {
+      db->stor.remove<FileItem>(
+          where(c(&FileItem::path) == tmp_path_str and
+                c(&FileItem::status) == FileStatus::DOWNLOADING));
+    } catch (const std::exception &e) {
+      logWarn << "Failed to remove download file record: " << e.what();
+      return;
+    } catch (...) {
+      logWarn
+          << "Unknown exception occurred while removing download file record";
+      return;
+    }
+  }
+
   logWarn << "File download failed";
 }
 
 void FileManager::handleRemoveFile(std::shared_ptr<Event> evt) {
-  // TODO: 实现文件移除处理逻辑
+  auto e = static_cast<ArgEvent<RemoveFileArg> *>(evt.get());
+  if (!e || !e->Arg().block_hash.empty()) {
+    logWarn << "Invalid remove file event";
+    return;
+  }
+  std::string blockHash = e->Arg().block_hash;
+  auto db = getDB();
+  if (!db) {
+    logWarn << "Failed to get database connection for removing file";
+    return;
+  }
+  try {
+    // 查询要删除的文件记录
+    auto files = db->stor.select(
+        columns(&FileItem::id, &FileItem::file_hash, &FileItem::block_hash),
+        where(c(&FileItem::block_hash) == blockHash and
+              c(&FileItem::status) == FileStatus::AVAILABLE));
+
+    if (files.empty()) {
+      logWarn << "No files found for block hash: " << blockHash;
+      return;
+    }
+
+    for (const auto &file : files) {
+      FileItem item;
+      item.id = std::get<0>(file);
+      item.file_hash = std::get<1>(file);
+      item.block_hash = std::get<2>(file);
+
+      {
+        std::lock_guard<std::mutex> lock(mFileOperationMutex);
+        // 删除文件
+        std::filesystem::path file_path(mOpt.RootPath);
+        file_path.append(item.file_hash);
+        if (std::filesystem::exists(file_path)) {
+          std::filesystem::remove(file_path);
+          logInfo << "Removed file: " << file_path;
+        } else {
+          logWarn << "File not found for removal: " << file_path;
+        }
+        // 从数据库删除记录
+        db->stor.remove<FileItem>(item.id);
+      }
+
+      // 上报移除文件
+      reportRemoveFile(item);
+
+      // 从LRU缓存和列表中删除
+      {
+        std::lock_guard<std::mutex> lock(mLRUMutex);
+        auto it = mLRUCache.find(item.id);
+        if (it != mLRUCache.end()) {
+          mLRUList.erase(it->second.list_iter);
+          mLRUCache.erase(it);
+        }
+      }
+    }
+
+  } catch (const std::exception &e) {
+    logWarn << "Failed to remove file: " << e.what();
+  } catch (...) {
+    logWarn << "Unknown exception occurred while removing file";
+  }
+  // 发送日志信息
   logInfo << "File remove request received";
 }
 
@@ -881,13 +1131,11 @@ void FileManager::scanFilesystemAndDatabase(
     }
 
     try {
-      // 获取相对于根目录的路径
-      std::filesystem::path relative_path =
-          std::filesystem::relative(entry.path(), mOpt.RootPath);
-      filesystem_files.push_back(relative_path.string());
+      filesystem_files.push_back(entry.path().string());
     } catch (const std::exception &e) {
       logWarn << "Error processing file path " << entry.path() << ": "
               << e.what();
+      continue; // 跳过无法处理的文件
     }
   }
 
@@ -899,8 +1147,8 @@ void FileManager::scanFilesystemAndDatabase(
         where(c(&FileItem::status) == FileStatus::AVAILABLE));
 
     for (const auto &file : db_files) {
-      std::string path = std::get<1>(file);
       uint64_t id = std::get<0>(file);
+      std::string path = std::get<1>(file);
       std::string hash = std::get<2>(file);
       uint64_t block_start = std::get<3>(file);
       uint64_t block_end = std::get<4>(file);
@@ -935,21 +1183,16 @@ FileManager::cleanOrphanFiles(const std::vector<std::string> &orphan_files) {
     }
 
     try {
-      std::filesystem::path full_path(mOpt.RootPath);
-      full_path.append(orphan_file);
-
+      std::filesystem::path orphan_path(orphan_file);
       // 再次检查文件是否存在（可能被其他进程删除）
-      if (!std::filesystem::exists(full_path)) {
+      if (!std::filesystem::exists(orphan_path)) {
         logDebug << "Orphan file no longer exists, skipping: " << orphan_file;
         continue;
       }
-
       // 删除孤儿文件
-      std::filesystem::remove(full_path);
+      std::filesystem::remove(orphan_path);
       orphan_deleted_count++;
-
       logInfo << "Deleted orphan file: " << orphan_file;
-
     } catch (const std::filesystem::filesystem_error &e) {
       logWarn << "Failed to delete orphan file " << orphan_file << ": "
               << e.what();
@@ -986,7 +1229,7 @@ uint64_t FileManager::cleanMissingFiles(
   // 处理LRU缓存清理
   for (const auto &missing_file : missing_files) {
     uint64_t file_id = std::get<0>(missing_file);
-    std::string relative_path = std::get<1>(missing_file);
+    std::string missing_file_path = std::get<1>(missing_file);
     std::string file_hash = std::get<2>(missing_file);
     uint64_t block_start = std::get<3>(missing_file);
     uint64_t block_end = std::get<4>(missing_file);
@@ -996,13 +1239,13 @@ uint64_t FileManager::cleanMissingFiles(
     // 准备用于上报的文件信息
     FileItem missing_item;
     missing_item.id = file_id;
-    missing_item.path = relative_path;
+    missing_item.path = missing_file_path;
     missing_item.file_hash = file_hash;
     missing_item.block_start = block_start;
     missing_item.block_end = block_end;
     missing_files_for_report.push_back(missing_item);
 
-    logDebug << "Found missing file in database: " << relative_path
+    logDebug << "Found missing file in database: " << missing_file_path
              << " (ID: " << file_id << ")";
 
     // 从LRU缓存中删除该文件（如果存在）
@@ -1024,27 +1267,29 @@ uint64_t FileManager::cleanMissingFiles(
       // 使用 sqlite_orm 的批量删除：WHERE id IN (?, ?, ?, ...)
       // 这样只需要一次数据库操作就能删除所有记录
       db->stor.remove_all<FileItem>(where(in(&FileItem::id, missing_file_ids)));
-      
+
       // 由于 remove_all 不返回删除数量，我们假设全部删除成功
       // 如果需要精确计数，可以先查询符合条件的记录数量
       deleted_count = missing_file_ids.size();
-      
+
       logInfo << "Successfully removed " << deleted_count
               << " missing file records from database (batch operation)";
-              
+
     } catch (const std::exception &e) {
-      logWarn << "Batch delete failed, falling back to individual deletes: " << e.what();
-      
+      logWarn << "Batch delete failed, falling back to individual deletes: "
+              << e.what();
+
       // 如果批量删除失败，回退到逐个删除
       for (const auto &file_id : missing_file_ids) {
         try {
           db->stor.remove<FileItem>(file_id);
           deleted_count++;
         } catch (const std::exception &e) {
-          logWarn << "Failed to delete missing file record ID " << file_id << ": " << e.what();
+          logWarn << "Failed to delete missing file record ID " << file_id
+                  << ": " << e.what();
         }
       }
-      
+
       logInfo << "Successfully removed " << deleted_count
               << " missing file records from database (individual operations)";
     }
@@ -1201,20 +1446,16 @@ void FileManager::cleanStaleDownloads() {
           try {
             // 获取文件大小
             uint64_t file_size = std::filesystem::file_size(entry.path());
-
-            // 获取相对于tmp目录的路径
-            std::filesystem::path relative_path =
-                std::filesystem::relative(entry.path(), tmp_dir);
-            std::string relative_path_str = relative_path.string();
+            std::string file_path_str = entry.path().string();
             std::filesystem::remove(entry.path());
             deleted_count++;
             total_size_freed += file_size;
 
             // 记录需要从数据库中删除的文件
-            deleted_files_for_db.push_back(relative_path_str);
+            deleted_files_for_db.push_back(file_path_str);
 
             uint64_t stale_duration = durSinceLastWrite;
-            logInfo << "Deleted stale download file: " << relative_path_str
+            logInfo << "Deleted stale download file: " << file_path_str
                     << " (size: " << file_size
                     << " bytes, stale for: " << stale_duration << " seconds)";
 
@@ -1244,15 +1485,11 @@ void FileManager::cleanStaleDownloads() {
 
         for (const auto &file_path : deleted_files_for_db) {
           try {
-            // 构建完整的文件路径用于匹配
-            std::filesystem::path relative_path =
-                std::filesystem::relative(file_path, mOpt.RootPath);
-
             // 查询匹配的下载记录
             auto download_records = db->stor.select(
                 &FileItem::id,
                 where(c(&FileItem::status) == FileStatus::DOWNLOADING and
-                      c(&FileItem::path) == relative_path.string()));
+                      c(&FileItem::path) == file_path));
 
             // 删除找到的记录
             for (const auto &record_id : download_records) {
@@ -1260,8 +1497,7 @@ void FileManager::cleanStaleDownloads() {
               db_deleted_count++;
 
               logDebug << "Removed stale download record from database: "
-                       << relative_path.string() << " (ID: " << record_id
-                       << ")";
+                       << file_path << " (ID: " << record_id << ")";
             }
 
           } catch (const std::exception &e) {
