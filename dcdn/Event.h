@@ -1,7 +1,7 @@
 #ifndef _DCDN_SDK_EVENT_H_
 #define _DCDN_SDK_EVENT_H_
 
-#include "Common.h" // 为了使用FileDescriptor
+#include "Common.h"
 #include "common/Common.h"
 #include <string>
 #include <variant>
