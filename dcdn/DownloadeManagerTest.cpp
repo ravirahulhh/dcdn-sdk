@@ -15,8 +15,30 @@ int main() {
     opts.outputPath = "test.bin";
     opts.chunkSize = 10 *1024 * 1024;
 
+    // 下载整个文件
+    // FileDownloadOptions opt;
+    // opt.outputPath = "full.bin";
+    // mgr.addDownloadTask(url, "", opt);
 
-    // 这里换成你想下载的 HTTP 文件 URL
+    // 下载区间 [start, end]，并把结果写成一个小文件（相对偏移）：
+    // FileDownloadOptions opt;
+    // opt.outputPath = "chunk.bin";
+    // opt.hasRange = true;
+    // opt.rangeStart = 10 * 1024 * 1024ULL;
+    // opt.rangeEnd   = 20 * 1024 * 1024ULL - 1;
+    // opt.writeRangeToSeparateFile = true; // 默认即为 true
+    // mgr.addDownloadTask(url, "", opt);
+
+    // 下载区间 [start, EOF]（end 未知）：
+    // FileDownloadOptions opt;
+    // opt.outputPath = "tail.bin";
+    // opt.hasRange = true;
+    // opt.rangeStart = 100 * 1024 * 1024ULL;
+    // opt.rangeEnd   = SIZE_MAX; // 未知
+    // mgr.addDownloadTask(url, "", opt);
+
+
+    // 想下载的 HTTP 文件 URL
     std::string url = "https://hil-speed.hetzner.com/1GB.bin";
 
     // 添加下载任务
