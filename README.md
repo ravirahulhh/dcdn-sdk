@@ -7,3 +7,9 @@
 - 避免导出/public函数抛出异常
 - 使用clang-format格式化代码保持风格一致
 - 慎重引入新的第三方依赖
+
+# 编译示例
+mkdir build
+cd build 
+cmake ..
+make -j8
