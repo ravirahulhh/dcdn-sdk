@@ -16,7 +16,9 @@ struct EventType
         AsyncApiRequest = 1000,
 
         // FileManager
-        AddFile = 10000,
+        FileDownloadDone = 10000,
+        FileDownloadFailed = 10001,
+        RemoveFile = 10002,
 
         // UploadManager
         UploadMsg = 20000,
@@ -61,14 +63,17 @@ private:
     ArgType mArg;
 };
 
-struct AddFileArg
-{
-    std::string block_hash;
-    std::string file_hash;
-    std::string file_path;
-    size_t file_size;
-    size_t block_start;
-    size_t block_end;
+struct FileDownloadDoneArg : BlockInfo {
+  std::string url;
+  std::string file_path;
+};
+
+struct FileDownloadFailedArg {
+  FileDescriptor file;
+};
+
+struct RemoveFileArg {
+  std::string block_hash;
 };
 
 NS_END
