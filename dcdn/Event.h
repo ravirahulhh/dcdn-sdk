@@ -71,7 +71,7 @@ struct FileDownloadDoneArg: BlockInfo
 
 struct FileDownloadFailedArg
 {
-    FileDescriptor file;
+    std::string file_path;
 };
 
 struct RemoveFileArg

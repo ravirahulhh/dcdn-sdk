@@ -24,6 +24,7 @@
 #include "JsonTypes.h"
 #include "MainManager.h"
 #include "util/HttpClient.h"
+#include "util/uuid.h"
 
 NS_BEGIN(dcdn)
 
@@ -92,29 +93,10 @@ public:
     // Get file path by block hash
     // Returns empty string if file not found
     std::string GetPathByBlockHash(const std::string& block_hash, bool need_report = false);
-    std::string NewDownloadPath(const FileDescriptor& file, bool create);
+    std::string NewDownloadPath(uint64_t filesize);
 
     void FlushAccessRecords();
     void CheckAndEliminateFiles();
-
-public:
-    std::string FileName(const FileDescriptor& file)
-    {
-        if (std::holds_alternative<BlockInfo>(file)) {
-            const auto& block = std::get<BlockInfo>(file);
-            return "blk_" + block.file_hash + "_" + std::to_string(block.block_start) + "_" +
-                std::to_string(block.block_end);
-        } else if (std::holds_alternative<Url>(file)) {
-            std::string url = std::get<Url>(file);
-            for (auto& c : url) {
-                if (!std::isalnum(static_cast<unsigned char>(c))) {
-                    c = '_';
-                }
-            }
-            return "url_" + url;
-        }
-        return "";
-    }
 
 private:
     void run();
@@ -190,6 +172,11 @@ private:
         std::filesystem::path filesPath(mOpt.RootPath);
         filesPath.append("files");
         return filesPath;
+    }
+
+    std::string newFileName()
+    {
+        return generate_uuid_v4();
     }
 
 private:

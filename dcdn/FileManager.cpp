@@ -284,57 +284,42 @@ std::string FileManager::GetPathByBlockHash(const std::string& block_hash, bool 
     }
 }
 
-std::string FileManager::NewDownloadPath(const FileDescriptor& file, bool create)
+std::string FileManager::NewDownloadPath(uint64_t file_size)
 {
-    // check block start <= end
-    if (std::holds_alternative<BlockInfo>(file)) {
-        const auto& block = std::get<BlockInfo>(file);
-        if (block.block_start > block.block_end) {
-            logWarn << "Invalid block range for file: " << block.file_hash << " start:" << block.block_start
-                    << " end:" << block.block_end;
+    auto tmp_path = tmpDir();
+    std::string file_name = newFileName();
+    tmp_path.append(file_name);
+    {
+        std::lock_guard<std::mutex> lock(mFileOperationMutex);
+        if (!std::filesystem::exists(tmp_path)) {
+            std::ofstream ofs(tmp_path);
+            if (!ofs) {
+                logWarn << "Failed to create new download file: " << tmp_path;
+                return "";
+            }
+            ofs.close();
+        }
+        logInfo << "New download file created: " << tmp_path;
+        // Write to database
+        auto db = getDB();
+        if (!db) {
+            logWarn << "Failed to get database connection for new download file";
             return "";
         }
-    }
-    auto tmp_path = tmpDir();
-    std::string file_name = FileName(file);
-    tmp_path.append(file_name);
-    if (create) {
-        {
-            std::lock_guard<std::mutex> lock(mFileOperationMutex);
-            if (!std::filesystem::exists(tmp_path)) {
-                std::ofstream ofs(tmp_path);
-                if (!ofs) {
-                    logWarn << "Failed to create new download file: " << tmp_path;
-                    return "";
-                }
-                ofs.close();
-            }
-            logInfo << "New download file created: " << tmp_path;
-            // Write to database
-            auto db = getDB();
-            if (!db) {
-                logWarn << "Failed to get database connection for new download file";
+        try {
+            FileItem item;
+            item.path = tmp_path.string();
+            item.status = FileStatus::DOWNLOADING;
+            item.last_access = getCurrentTimestamp();
+            item.last_report = 0;
+            if (item.block_start > item.block_end) {
+                logWarn << "Invalid block range for file: " << file_name;
                 return "";
             }
-            try {
-                FileItem item;
-                item.block_hash = std::holds_alternative<BlockInfo>(file) ? std::get<BlockInfo>(file).block_hash : "";
-                item.file_hash = std::holds_alternative<BlockInfo>(file) ? std::get<BlockInfo>(file).file_hash : "";
-                item.path = tmp_path.string();
-                item.status = FileStatus::DOWNLOADING;
-                item.block_start = std::holds_alternative<BlockInfo>(file) ? std::get<BlockInfo>(file).block_start : 0;
-                item.block_end = std::holds_alternative<BlockInfo>(file) ? std::get<BlockInfo>(file).block_end : 0;
-                item.last_access = getCurrentTimestamp();
-                item.last_report = 0;
-                if (item.block_start > item.block_end) {
-                    logWarn << "Invalid block range for file: " << file_name;
-                    return "";
-                }
-                db->stor.insert(item);
-            } catch (const std::exception& e) {
-                logWarn << "Failed to insert new download file into database: " << e.what();
-                return "";
-            }
+            db->stor.insert(item);
+        } catch (const std::exception& e) {
+            logWarn << "Failed to insert new download file into database: " << e.what();
+            return "";
         }
     }
     return tmp_path.string();
@@ -848,16 +833,11 @@ void FileManager::handleDownloadFileDone(std::shared_ptr<Event> evt)
 void FileManager::handleDownloadFileFailed(std::shared_ptr<Event> evt)
 {
     auto e = static_cast<ArgEvent<FileDownloadFailedArg>*>(evt.get());
-    if (!e) {
+    if (!e || e->Arg().file_path.empty()) {
         logWarn << "Invalid download file failed event";
         return;
     }
-    auto descriptor = e->Arg().file;
-    std::string tmp_path_str = NewDownloadPath(descriptor, false);
-    if (tmp_path_str.empty()) {
-        logWarn << "Failed to create download path for file";
-        return;
-    }
+    std::string tmp_path_str = e->Arg().file_path;
     std::filesystem::path tmp_file_path(tmp_path_str);
     {
         std::lock_guard<std::mutex> lock(mFileOperationMutex);
