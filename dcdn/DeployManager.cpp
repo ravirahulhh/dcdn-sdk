@@ -36,10 +36,6 @@ DeployManager::~DeployManager() {
     mJobToTaskMap.clear();
 }
 
-void DeployManager::registerHandlers() {
-    // 事件处理器注册（如果需要扩展其他事件）
-}
-
 int DeployManager::createTable() {
     auto db = getDB();
     if (!db) {

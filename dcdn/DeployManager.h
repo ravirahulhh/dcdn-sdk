@@ -39,12 +39,6 @@ struct DeployTask {
     uint64_t update_time = 0;    // 更新时间戳
 };
 
-// DeployMsg事件参数（继承自BlockInfo）
-struct DeployMsgArg : BlockInfo {
-    std::string job_id;  // 部署任务唯一ID
-    std::string url;     // 下载URL
-};
-
 // 部署管理器类
 class DeployManager : public BaseManager, public EventLoop<DeployManager> {
 public:
