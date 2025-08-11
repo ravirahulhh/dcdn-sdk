@@ -73,57 +73,50 @@ int MainManager::init(const MainManagerOption& opt)
 
 MainManager::~MainManager() {}
 
-long MainManager::ApiPost(util::HttpClient& cli, const char* uri, json& arg, util::HttpResponse* resp)
+int MainManager::ApiPost(util::HttpClient& cli, const char* uri, json& arg, util::HttpResponse* resp)
 {
     std::string url = mCfg.ApiRootUrl();
     url += uri;
     util::HttpRequest req(url.c_str(), arg.dump(), "application/json");
-    long ret = cli.Do(req, resp);
+    int ret = cli.Do(req, resp);
     return ret;
 }
 
-long MainManager::ApiPost(util::HttpClient& cli, const char* uri, json& arg, json& result)
+int MainManager::ApiPost(util::HttpClient& cli, const char* uri, json& arg, json& result)
 {
     util::HttpResponse resp;
-    long code = ApiPost(cli, uri, arg, &resp);
-    if (code == 200) {
-        auto r = json::parse(resp.Body());
-        code = r["code"];
-        auto it = r.find("data");
-        if (it != r.end()) {
-            result = std::move(*it);
-        } else {
+    int ret = ApiPost(cli, uri, arg, &resp);
+    if (ret == ErrorCodeOk) {
+        try {
+            auto r = json::parse(resp.Body());
+            result = std::move(r);
+        } catch (std::exception& excp) {
             result.clear();
+            ret = ErrorCodeErr;
+        } catch (...) {
+            result.clear();
+            ret = ErrorCodeErr;
         }
-        return code;
     }
-    return -1;
+    return ErrorCodeOk;
 }
 
 void MainManager::login()
 {
-    try {
-        json msg;
-        msg["device_id"] = mOpt.DeviceId;
-        msg["apikey"] = mOpt.ApiKey;
+    json msg;
+    msg["device_id"] = mOpt.DeviceId;
+    msg["apikey"] = mOpt.ApiKey;
 
-        mApiClient->Post("/api/v1/login", msg, this, nullptr, nullptr);
-
-        json data;
-        long code = ApiPost(mClient, "/api/v1/login", msg, data);
-        if (code > 0) {
-            std::string peerId = data["peer_id"];
-            mCfg.SetPeerId(peerId);
-            std::string token = data["token"];
-            mCfg.SetToken(token);
-        } else {
-            logWarn << "login request fail code: " << code;
-        }
-    } catch (std::exception& excp) {
-        logWarn << "login exception: " << excp.what();
-    } catch (...) {
-        logWarn << "login unknown exception";
-    }
+    AsyncApiPost(nullptr, "/api/v1/login", msg, this,
+        [this](json& res) {
+            try {
+                auto data = res["data"];
+                std::string token = data["token"];
+                mCfg.SetToken(token);
+            } catch (std::exception& excp) {
+            } catch (...) {
+            }
+        }, nullptr);
 }
 
 void MainManager::run()

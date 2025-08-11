@@ -17,16 +17,18 @@ class ApiClient
 {
 public:
     using json = nlohmann::json;
+    using HttpRequest = util::HttpRequest;
+    using HttpResponse = util::HttpResponse;
 
 public:
     ApiClient(util::HttpDownloader* downloader): mDownloader(downloader) {}
-    template<class E, class Succ = void (*)(long, std::string&), class Fail = void (*)(long)>
-    int Post(const char* uri, json& arg, E* ev, Succ succ, Fail fail)
+    template<class E, class Succ = void (*)(HttpResponse&), class Fail = void (*)(long)>
+    int Do(void** reqId, HttpRequest&& req, E* ev, Succ succ, Fail fail)
     {
         auto task = std::make_shared<Task>();
         task->client = this;
         util::HttpDownloaderTaskOption opt;
-        opt.Request = std::make_shared<util::HttpRequest>(uri, arg.dump(), "application/json");
+        opt.Request = std::make_shared<util::HttpRequest>(std::move(req));
         opt.Notify = notify;
         opt.Receiver = task.get();
         auto t = mDownloader->CreateTask(&opt);
@@ -38,14 +40,22 @@ public:
         }
         task->task = t;
         mTasks[task.get()] = task;
+        if (reqId) {
+            *reqId = task.get();
+        }
+        mDownloader->AddTask(t);
         return ErrorCodeOk;
+    }
+    bool Cancel(void* reqId)
+    {
+        return removeTask((Task*)reqId);
     }
     void HandleAsyncApiRequestEvent(std::shared_ptr<Event> evt)
     {
         auto e = std::static_pointer_cast<ArgEvent<std::shared_ptr<Task>>>(evt);
         auto t = e->Arg();
         if (t->callback) {
-            t->callback->Do(t);
+            t->callback->Done(t);
         }
     }
 
@@ -56,7 +66,7 @@ private:
     public:
         virtual ~CallbackBase() {}
         virtual void PostEvent(std::shared_ptr<Task> t) = 0;
-        virtual void Do(std::shared_ptr<Task> t) = 0;
+        virtual void Done(std::shared_ptr<Task> t) = 0;
     };
     template<class E, class Succ, class Fail>
     class Callback: public CallbackBase
@@ -69,15 +79,39 @@ private:
             auto evt = std::make_shared<ArgEvent<std::shared_ptr<Task>>>(EventType::AsyncApiRequest, std::move(ct));
             mEv->PostEvent(evt);
         }
-        void Do(std::shared_ptr<Task> t)
+        void Done(std::shared_ptr<Task> t)
         {
+            logDebug << "AsyncApiPost done";
             if (t->task->IsCompleted()) {
-                if constexpr (!std::is_same_v<Succ, std::nullptr_t>) {
-                    mSucc(t->code, t->response);
+                if constexpr (std::is_invocable_r_v<void, Succ, HttpResponse&>) {
+                    auto ht = static_cast<util::HttpDownloaderTask*>(t->task.get());
+                    t->resp.SetStatus(ht->Code());
+                    mSucc(t->resp);
+                } else if constexpr (std::is_invocable_r_v<void, Succ, json&>) {
+                    auto ht = static_cast<util::HttpDownloaderTask*>(t->task.get());
+                    bool invalidJson = true;
+                    try {
+                        auto r = json::parse(t->resp.Body());
+                        invalidJson = false;
+                        mSucc(r);
+                    } catch (std::exception& excp) {
+                        logWarn << "ApiClient callback exception:" << excp.what();
+                    } catch (...) {
+                        logWarn << "ApiClient callback unknown exception" ;
+                    }
+                    if (invalidJson) {
+                        if constexpr (!std::is_same_v<Fail, std::nullptr_t>) {
+                            mFail(ErrorCodeErr);
+                        }
+                    }
+                } else if constexpr (std::is_same_v<Succ, std::nullptr_t>) {
+                    //do nothing
+                } else {
+                    static_assert("unsupported Succ type");
                 }
             } else {
                 if constexpr (!std::is_same_v<Fail, std::nullptr_t>) {
-                    mFail(t->code);
+                    mFail(ErrorCodeErr);
                 }
             }
         }
@@ -91,8 +125,7 @@ private:
     {
         ApiClient* client = nullptr;
         std::shared_ptr<util::DownloaderTask> task;
-        long code = 0;
-        std::string response;
+        HttpResponse resp;
         std::shared_ptr<CallbackBase> callback;
 
         Task() {}
@@ -101,9 +134,7 @@ private:
             client = oth.client;
             oth.client = nullptr;
             task = std::move(oth.task);
-            code = oth.code;
-            oth.code = 0;
-            response = std::move(oth.response);
+            resp = std::move(oth.resp);
             callback = std::move(oth.callback);
         }
     };
@@ -113,30 +144,29 @@ private:
         auto it = mTasks.find(t);
         return it == mTasks.end() ? nullptr : it->second;
     }
-    void removeTask(Task* t)
+    bool removeTask(Task* t)
     {
         std::unique_lock lck(mMtx);
-        mTasks.erase(t);
+        auto it = mTasks.find(t);
+        if (it == mTasks.end()) {
+            return false;
+        }
+        mTasks.erase(it);
+        return true;
     }
     static void notify(std::shared_ptr<util::DownloaderTask> t, void* userData)
     {
         Task* task = static_cast<Task*>(userData);
-        if (!task->task) {
-            task->task = t;
-        }
         for (auto data = t->Read(); data; data = data->Next()) {
-            task->response.append((const char*)data->Data(), data->Length());
+            task->resp.Body().append((const char*)data->Data(), data->Length());
         }
         if (t->IsEnd()) {
-            if (t->IsCompleted()) {
-                auto st = task->client->getTask(task);
-                if (st) {
-                    st->callback->PostEvent(st);
-                }
-            } else {
+            auto st = task->client->getTask(task);
+            if (st) {
+                st->callback->PostEvent(st);
+                task->client->removeTask(task);
             }
         }
-        task->client->removeTask(task);
     }
 
 private:
@@ -144,8 +174,6 @@ private:
     MainManager* mMan;
     util::HttpDownloader* mDownloader;
     std::unordered_map<Task*, std::shared_ptr<Task>> mTasks;
-    // std::unordered_map<util::HttpDownloaderTask*, std::shared_ptr<Task>>
-    // mDownloaderTasks;
 };
 
 NS_END
