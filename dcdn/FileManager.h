@@ -65,10 +65,10 @@ struct LRUNode
 struct FileManagerOption
 {
     std::string RootPath;
-    uint64_t MaxStorageSize = 20 * 1024 * 1024 * 1024; // 20GB
+    uint64_t MaxStorageSize = uint64_t(20) * 1024 * 1024 * 1024; // 20GB
     std::uint8_t LRUUpperBoundPercent = 90; // 90% of max storage size
     std::uint8_t LRUTargetPercent = 70; // 70% of max storage size
-    std::string PCDNReportUrl;
+    std::string PCDNReportUrl = "http://localhost:8080";
     uint32_t AccessRecordFlushInterval = 60; // Access record flush interval to database (seconds)
     uint32_t LRUCheckInterval = 300; // LRU check interval (seconds)
     uint32_t ReportInterval = 60 * 60; // File reporting interval, 1 hour
