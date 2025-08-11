@@ -324,9 +324,7 @@ void DeployManager::resubmitDownloadTasks() {
             opts.rangeEnd = task.block_end;
         }
 
-        // 重新提交下载任务
-        std::string verifyHash = !task.file_hash.empty() ? task.file_hash : task.block_hash;
-        std::string taskId = mDownloadMgr->addDownloadTask(task.url, verifyHash, opts);
+        std::string taskId = mDownloadMgr->addDownloadTask(task.url, task.file_hash, opts);
 
         if (taskId.empty()) {
             logWarn << "Failed to resubmit task " << task.job_id;
