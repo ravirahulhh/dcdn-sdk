@@ -3,18 +3,37 @@
 #include <thread>
 #include <chrono>
 
+#include <plog/Appenders/ConsoleAppender.h>
+#include <plog/Initializers/RollingFileInitializer.h>
+#include <plog/Log.h>
+
+#include <chrono>
+#include <condition_variable>
+#include <fstream>
+#include <iostream>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
 int main() {
+
+    // logger init
+    // static plog::ConsoleAppender<plog::TxtFormatter> consoleAppender;
+    // plog::Severity lvl = plog::debug;
+    // plog::init<DCDN_LOGGER_ID>(lvl, &consoleAppender);
+
     dcdn::DownloadManager mgr;
 
     // 配置为 HTTP_ONLY 策略，最大并发 4
     mgr.setStrategy(dcdn::DownloadStrategy::HTTP_ONLY);
-    mgr.setMaxConcurrentDownloads(4);
+    mgr.setMaxConcurrentDownloads(20);
 
     // 输出到本地 test.bin，内部并发分片大小 10MB (Preferred Chunk Size, 不一定严格遵守)
     dcdn::FileDownloadOptions opts;
     opts.outputPath = "test.bin";
     opts.chunkSize = 10 *1024 * 1024;
 
+    // 其他示例
     // 下载整个文件
     // FileDownloadOptions opt;
     // opt.outputPath = "full.bin";
@@ -22,7 +41,7 @@ int main() {
 
     // 下载区间 [start, end]，并把结果写成一个小文件（相对偏移）：
     // FileDownloadOptions opt;
-    // opt.outputPath = "chunk.bin";
+    // opt.outputPath = "chunk.bin";·
     // opt.hasRange = true;
     // opt.rangeStart = 10 * 1024 * 1024ULL;
     // opt.rangeEnd   = 20 * 1024 * 1024ULL - 1;
@@ -39,7 +58,8 @@ int main() {
 
 
     // 想下载的 HTTP 文件 URL
-    std::string url = "https://hil-speed.hetzner.com/1GB.bin";
+    // std::string url = "https://testfileorg.netwet.net/500MB-CZIPtestfile.org.zip";
+    std::string url = "https://hil-speed.hetzner.com/100MB.bin";
 
     // 添加下载任务
     std::string taskId = mgr.addDownloadTask(url, "", opts);

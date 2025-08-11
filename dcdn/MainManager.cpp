@@ -41,6 +41,7 @@ MainManager::MainManager(): BaseManager(this)
 
     mWebSkt = std::make_shared<WebSocketManager>(this);
     mWebRtc = std::make_shared<WebRtcManager>(this);
+    dcdn::FileManagerOption fmOpt; // TODO: load from configuration
     mFileMgr = std::make_shared<FileManager>(this, fileMgrOpt);
     mUploadMgr = std::make_shared<UploadManager>(this);
     // mDownloadMgr = std::make_shared<DownloadManager>(this);
