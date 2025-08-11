@@ -60,7 +60,7 @@ public:
      *   nullptr
      * *************************/
     template<class E, class Succ, class Fail>
-    int AsyncApiPost(void** reqId, const char* uri, const json& arg, E* ev, Succ succ, Fail fail)
+    int AsyncApiPost(void** reqId, const char* uri, json& arg, E* ev, Succ succ, Fail fail)
     {
         logDebug << "AsyncApiPost uri:" << uri;
         std::string url = mCfg.ApiRootUrl();
