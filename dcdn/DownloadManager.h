@@ -37,7 +37,7 @@ struct DownloadTask {
     std::string id;
     std::string url;
     std::string contentHash;
-    size_t totalSize = 0;
+    size_t totalSize = 0;  // 注意：这里表示"此次任务需下载的长度"（对区间下载是区间长度；对整文件是文件大小）
     size_t downloaded = 0;
     double speed = 0; // bytes/sec
     std::chrono::system_clock::time_point startTime;
@@ -46,7 +46,7 @@ struct DownloadTask {
     std::atomic<bool> cancelled{false};
     TaskStatus status = TaskStatus::Pending;
 
-    // 已下载区间，用于断点续传
+    // 已下载区间，用于断点续传（尚未实现合并逻辑，这里仅保留接口）
     std::vector<std::pair<size_t, size_t>> completedRanges;
 
     // copy assignment 
@@ -82,13 +82,25 @@ struct FileDownloadOptions {
     std::shared_ptr<std::ostream> outputStream;
     StreamCallback streamCallback;
     size_t chunkSize;
-    bool keepPartialOnCancel = false;  // 取消后是否保留半成品文件
 
-    FileDownloadOptions() : chunkSize(100*1024 * 1024) {} 
+    // 是否按区间下载
+    // 若 hasRange = true：
+    //   - rangeStart 有效；
+    //   - rangeEnd == SIZE_MAX 表示“到 EOF”
+    bool   hasRange = false;
+    size_t rangeStart = 0;
+    size_t rangeEnd   = SIZE_MAX; // inclusive；SIZE_MAX 表示未知结尾
+
+    // 写入策略：
+    //   - true  => 输出文件仅包含该区间内容，按相对偏移写入（0..length-1）
+    //   - false => 按绝对偏移写入（rangeStart..rangeEnd）；可能导致生成很大的稀疏文件
+    bool writeRangeToSeparateFile = true;
+
+    FileDownloadOptions() : chunkSize(1024 * 1024) {} // 默认1MB
 };
 
 // DownloadManager 职责: 任务编排器 + 状态管理器 + 断点续传控制器
-// 兼容三种策略（HTTP_ONLY / P2P_ONLY / HYBRID），
+// 兼容三种策略（HTTP_ONLY / P2P_ONLY / HYBRID）
 // 支持媒体流式读取、带宽比例控制、
 // 任务持久化以及进度合并
 class DownloadManager {
@@ -126,7 +138,7 @@ public:
     void setP2pBandwidthRatio(float ratio);  // 0.0-1.0
 
 private:
-    // 内部任务分片（持久化/统计用）
+    // 内部任务分片（持久化/统计用，当前未用）
     struct SubTask {
         size_t offset;
         size_t length;
@@ -135,7 +147,7 @@ private:
         int retryCount = 0;
     };
 
-    // 数据持久化助手
+    // 数据持久化助手（占位）
     class PersistenceHelper {
     public:
         explicit PersistenceHelper(const std::string& dbPath);
@@ -158,7 +170,7 @@ private:
     void removePersistedTask(const std::string& taskId);
     void updateTaskProgress(const std::string& taskId, size_t downloaded);
     void calculateSpeedLocked(DownloadTask& t,
-                                 std::chrono::system_clock::time_point now);
+                              std::chrono::system_clock::time_point now);
     void checkTaskCompletion(const std::string& taskId);
     void notifyBufferReady(const std::string& taskId, size_t start, size_t end);
 
@@ -166,8 +178,11 @@ private:
     void startP2pDownload(const std::string& taskId);
     void startHybridDownload(const std::string& taskId);
 
-    // 在探测到 Content-Length 后切片
-    void splitTask(const std::string& taskId, size_t totalSize);
+    // 在探测到 Content-Length 后 / 或已知范围时切分。
+    // totalSize：此次任务要下载的“长度”
+    // baseOffset：此次任务的“起始绝对偏移”（整文件为0；区间下载为 rangeStart）
+    void splitTask(const std::string& taskId, size_t totalSize, size_t baseOffset);
+
     void onSubTaskCompleted(const std::string& taskId, size_t subtaskIndex);
 
     // 成员变量
