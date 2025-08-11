@@ -63,17 +63,20 @@ private:
     ArgType mArg;
 };
 
-struct FileDownloadDoneArg : BlockInfo {
-  std::string url;
-  std::string file_path;
+struct FileDownloadDoneArg: BlockInfo
+{
+    std::string url;
+    std::string file_path;
 };
 
-struct FileDownloadFailedArg {
-  FileDescriptor file;
+struct FileDownloadFailedArg
+{
+    FileDescriptor file;
 };
 
-struct RemoveFileArg {
-  std::string block_hash;
+struct RemoveFileArg
+{
+    std::string block_hash;
 };
 
 NS_END
