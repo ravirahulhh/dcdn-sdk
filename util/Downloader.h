@@ -1,8 +1,11 @@
 #ifndef _DCDN_UTIL_DOWNLOADER_H_
 #define _DCDN_UTIL_DOWNLOADER_H_
 
+#include <any>
+#include <list>
 #include <string>
 #include <thread>
+#include <atomic>
 
 #include "common/Common.h"
 
