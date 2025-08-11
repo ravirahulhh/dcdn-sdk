@@ -29,6 +29,7 @@ libdcdnObjs = \
 			   DownloadTask.o \
 			   MainManager.o \
 			   dcdn.o \
+			   DownloadManager.o \
 
 
 testTargets = \

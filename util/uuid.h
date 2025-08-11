@@ -1,10 +1,13 @@
+#ifndef _DCDN_UTIL_UUID_H_
+#define _DCDN_UTIL_UUID_H_
+
 #include <iostream>
 #include <random>
 #include <sstream>
 #include <iomanip>
 #include <cstdint>
 
-std::string generate_uuid_v4() {
+inline std::string generate_uuid_v4() {
     static thread_local std::mt19937_64 gen(std::random_device{}());
     static thread_local std::uniform_int_distribution<uint64_t> dist(0, UINT64_MAX);
 
@@ -24,3 +27,7 @@ std::string generate_uuid_v4() {
 
     return oss.str();
 }
+
+
+
+#endif
