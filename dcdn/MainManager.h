@@ -39,8 +39,38 @@ public:
     {
         return mCfg;
     }
-    long ApiPost(util::HttpClient& cli, const char* uri, json& arg, util::HttpResponse* resp);
-    long ApiPost(util::HttpClient& cli, const char* uri, json& arg, json& result);
+
+    int ApiPost(util::HttpClient& cli, const char* uri, json& arg, util::HttpResponse* resp);
+    int ApiPost(util::HttpClient& cli, const char* uri, json& arg, json& result);
+
+    /**************************
+     *
+     * ev is one of below:
+     *   an EventLoop object: it must handle AsyncApiRequest Event,
+     *    the callback will run in the ev's thread
+     *   nullptr: the callback will run in the ApiClient's thread
+     *
+     * Succ is one of below:
+     *   void (*succ)(util::HttpResponse& resp)
+     *   void (*succ)(json& res)
+     *   nullptr
+     *
+     * Fail is one of below:
+     *   void (*fail)(int code)
+     *   nullptr
+     * *************************/
+    template<class E, class Succ, class Fail>
+    int AsyncApiPost(void** reqId, const char* uri, const json& arg, E* ev, Succ succ, Fail fail)
+    {
+        logDebug << "AsyncApiPost uri:" << uri;
+        std::string url = mCfg.ApiRootUrl();
+        url += uri;
+        return mApiClient->Do(reqId, {url, arg.dump(), "application/json"}, ev, succ, fail);
+    }
+    bool CancelAsyncApiPost(void* reqId)
+    {
+        return mApiClient->Cancel(reqId);
+    }
 
 private:
     void run();

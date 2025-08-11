@@ -202,10 +202,10 @@ private:
                     auto t = mCurlTasks[c];
                     if (res == CURLE_OK) {
                         t->setStatus(HttpDownloaderTask::Completed);
-                        logDebug << "task url:" << t->mOpt.Request->Url() << " completed";
                     } else {
                         t->setStatus(HttpDownloaderTask::Fail);
                     }
+                    logDebug << "task url:" << t->mOpt.Request->Url() << " complete: " << (res == CURLE_OK ? "succ" : "fail");
                 }
             }
 

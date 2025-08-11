@@ -365,11 +365,11 @@ public:
             curl_easy_cleanup(mCurl);
         }
     }
-    long Do(const HttpRequest& req, HttpResponse* resp)
+    int Do(const HttpRequest& req, HttpResponse* resp)
     {
         auto c = getCurl();
         if (!c) {
-            return -1;
+            return ErrorCodeErr;
         }
         curl_easy_setopt(c, CURLOPT_URL, req.Url().c_str());
         fill(c);
@@ -392,31 +392,26 @@ public:
         }
         auto res = curl_easy_perform(c);
         if (res != CURLE_OK) {
-            return -1;
+            return ErrorCodeErr;
         }
-        long code = 0;
-        curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
-        if (resp) {
-            resp->SetStatus(code);
-        }
-        return code;
+        return ErrorCodeOk;
     }
-    long Get(const char* url, std::string& response)
+    int Get(const char* url, std::string& response)
     {
         HttpRequest req(url);
         HttpResponse res;
         res.Headers().Set("*", "");
-        auto code = Do(req, &res);
+        int ret = Do(req, &res);
         response.swap(res.Body());
-        return code;
+        return ret;
     }
-    long Post(const char* url, const std::string& body, std::string& response, const char* contentType = nullptr)
+    int Post(const char* url, const std::string& body, std::string& response, const char* contentType = nullptr)
     {
         HttpRequest req(url, body, contentType);
         HttpResponse res;
-        auto code = Do(req, &res);
+        int ret = Do(req, &res);
         response.swap(res.Body());
-        return code;
+        return ret;
     }
 
 private:
