@@ -1,0 +1,6 @@
+#ifndef _DCDN_COMMON_VERSION_H_
+#define _DCDN_COMMON_VERSION_H_
+
+#define DCDN_VERSION 0x01000000
+
+#endif
