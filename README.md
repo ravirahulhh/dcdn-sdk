@@ -9,7 +9,10 @@
 - 慎重引入新的第三方依赖
 
 # 编译示例
+```bash
+# 假设当前在项目根目录
 mkdir build
 cd build 
 cmake ..
 make -j8
+```
