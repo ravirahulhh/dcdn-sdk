@@ -150,9 +150,7 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt) {
         opts.rangeEnd = task.block_end;
     }
 
-    // 优先使用file_hash作为校验，无则使用block_hash
-    std::string verifyHash = !task.file_hash.empty() ? task.file_hash : task.block_hash;
-    std::string taskId = mDownloadMgr->addDownloadTask(task.url, verifyHash, opts);
+    std::string taskId = mDownloadMgr->addDownloadTask(task.url, task.file_hash, opts);
 
     if (taskId.empty()) {
         logWarn << "Failed to create download task (job_id: " << arg.job_id << ")";
