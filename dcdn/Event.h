@@ -23,7 +23,7 @@ struct EventType
         // UploadManager
         UploadMsg = 20000,
 
-        // DownloadManager
+        // DeployManager
         DeployMsg = 30000,
 
         // WebSocketManager
@@ -79,6 +79,11 @@ struct RemoveFileArg
     std::string block_hash;
 };
 
+struct DeployMsgArg : BlockInfo
+{
+    std::string job_id;  // 部署任务唯一标识
+    std::string url;     // 下载URL
+};
 NS_END
 
 #endif
