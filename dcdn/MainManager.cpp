@@ -40,7 +40,7 @@ MainManager::MainManager(): BaseManager(this)
     mWebRtc = std::make_shared<WebRtcManager>(this);
     mFileMgr = std::make_shared<FileManager>(this);
     mUploadMgr = std::make_shared<UploadManager>(this);
-    mDownloadMgr = std::make_shared<DownloadManager>(this);
+    // mDownloadMgr = std::make_shared<DownloadManager>(this);
 
     registerHandler(EventType::AsyncApiRequest, &MainManager::handleAsyncApiRequestEvent);
     registerHandler(EventType::UploadMsg, &MainManager::handleUploadMsgEvent);
@@ -154,7 +154,7 @@ void MainManager::handleUploadMsgEvent(std::shared_ptr<Event> evt)
 void MainManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
 {
     if (mDownloadMgr) {
-        static_cast<DownloadManager*>(mDownloadMgr.get())->PostEvent(evt);
+        // static_cast<DownloadManager*>(mDownloadMgr.get())->PostEvent(evt);
     }
 }
 
