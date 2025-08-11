@@ -320,7 +320,8 @@ private:
     }
     void handleCancelTaskEvent(std::shared_ptr<Event> evt)
     {
-        auto t = std::any_cast<std::shared_ptr<HttpDownloaderTask>>(evt->second);
+        auto bt = std::any_cast<std::shared_ptr<DownloaderTask>>(evt->second);
+        auto t = std::dynamic_pointer_cast<HttpDownloaderTask>(bt);
         auto it = mTasks.find(t.get());
         if (it != mTasks.end()) {
             if (t->cancel()) {
@@ -331,7 +332,8 @@ private:
     }
     void handlePauseTaskEvent(std::shared_ptr<Event> evt)
     {
-        auto t = std::any_cast<std::shared_ptr<HttpDownloaderTask>>(evt->second);
+        auto bt = std::any_cast<std::shared_ptr<DownloaderTask>>(evt->second);
+        auto t = std::dynamic_pointer_cast<HttpDownloaderTask>(bt);
         auto it = mTasks.find(t.get());
         if (it != mTasks.end()) {
             if (t->pause()) {
@@ -345,7 +347,8 @@ private:
     }
     void handleResumeTaskEvent(std::shared_ptr<Event> evt)
     {
-        auto t = std::any_cast<std::shared_ptr<HttpDownloaderTask>>(evt->second);
+        auto bt = std::any_cast<std::shared_ptr<DownloaderTask>>(evt->second);
+        auto t = std::dynamic_pointer_cast<HttpDownloaderTask>(bt);
         auto it = mTasks.find(t.get());
         if (it != mTasks.end()) {
             if (t->resume()) {
