@@ -117,9 +117,9 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt) {
     DeployTask task;
     task.job_id = arg.job_id;
     task.file_hash = arg.file_hash;       // 来自BlockInfo的文件哈希
-    task.block_hash = arg.block_hash;     // 来自BlockInfo的区块哈希
-    task.block_start = arg.block_start;   // 来自BlockInfo的区块起始
-    task.block_end = arg.block_end;       // 来自BlockInfo的区块结束
+    task.block_hash = arg.block_info.hash;     // 来自BlockInfo的区块哈希
+    task.block_start = arg.block_info.start;   // 来自BlockInfo的区块起始
+    task.block_end = arg.block_info.end;       // 来自BlockInfo的区块结束
     task.url = arg.url;
     task.status = DeployStatus::DOWNLOADING;
     task.download_path = downloadPath;
@@ -197,9 +197,9 @@ void DeployManager::checkDownloadStatus() {
                 // 构建下载完成事件（匹配FileManager要求）
                 FileDownloadDoneArg doneArg;
                 doneArg.file_hash = task.file_hash;
-                doneArg.block_hash = task.block_hash;
-                doneArg.block_start = task.block_start;
-                doneArg.block_end = task.block_end;
+                doneArg.block_info.hash = task.block_hash;
+                doneArg.block_info.start = task.block_start;
+                doneArg.block_info.end = task.block_end;
                 doneArg.url = task.url;
                 doneArg.file_path = task.download_path;
 

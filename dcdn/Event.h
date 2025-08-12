@@ -81,10 +81,11 @@ struct RemoveFileArg
     std::string block_hash;
 };
 
-struct DeployMsgArg : BlockInfo
+struct DeployMsgArg
 {
     std::string job_id;  // 部署任务唯一标识
     std::string url;     // 下载URL
+    BlockInfo block_info;
 };
 NS_END
 
