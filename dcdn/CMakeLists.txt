@@ -19,7 +19,7 @@ add_library(dcdn  STATIC
     p2p_downloader.cpp
     p2p_single_task.cpp
     DownloadManager.cpp
-    
+    DeployManager.cpp
 )
 
 include_directories(
