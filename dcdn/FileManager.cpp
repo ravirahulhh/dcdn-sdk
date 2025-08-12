@@ -105,7 +105,7 @@ FileManager::FileManager(MainManager* man, const FileManagerOption& opt): BaseMa
 
     if (!std::filesystem::exists(man->Option().WorkDir)) {
         std::filesystem::create_directories(man->Option().WorkDir);
-        logInfo << "Created work directory";
+        logDebug << "Created work directory";
     }
 
     if (opt.RootPath.empty()) {
@@ -114,11 +114,11 @@ FileManager::FileManager(MainManager* man, const FileManagerOption& opt): BaseMa
 
     if (!std::filesystem::exists(opt.RootPath)) {
         std::filesystem::create_directories(opt.RootPath);
-        logInfo << "Created root directory: " << opt.RootPath;
+        logDebug << "Created root directory: " << opt.RootPath;
     }
 
     // check if database exists
-    logInfo << "FileManager init with db path: " << dbPath().string();
+    logDebug << "FileManager init with db path: " << dbPath().string();
     if (!std::filesystem::exists(dbPath())) {
         if (createTable() != ErrorCodeOk) {
             logError << "Failed to create files.db table";
@@ -134,6 +134,12 @@ FileManager::FileManager(MainManager* man, const FileManagerOption& opt): BaseMa
             throw std::runtime_error("Failed to sync schema for files.db");
         }
     }
+
+    // config db log
+    sqlite3_config(
+        SQLITE_CONFIG_LOG,
+        [](void*, int err_code, const char* msg) { std::cerr << "SQLite Error [" << err_code << "]: " << msg << "\n"; },
+        nullptr);
 
     // Load file access records from database to LRU cache
     loadAccessRecordsFromDB();
@@ -184,28 +190,28 @@ FileManager::~FileManager()
 
 void FileManager::run()
 {
-    logInfo << "FileManager running";
+    logDebug << "FileManager running";
     // check root dir exists
     if (!std::filesystem::exists(mOpt.RootPath)) {
         std::filesystem::create_directories(mOpt.RootPath);
-        logInfo << "Created root directory: " << mOpt.RootPath;
+        logDebug << "Created root directory: " << mOpt.RootPath;
     }
 
     if (!std::filesystem::exists(tmpDir())) {
         std::filesystem::create_directories(tmpDir());
-        logInfo << "Created tmp directory: " << tmpDir();
+        logDebug << "Created tmp directory: " << tmpDir();
     }
 
     if (!std::filesystem::exists(fileDir())) {
         std::filesystem::create_directories(fileDir());
-        logInfo << "Created file directory: " << fileDir();
+        logDebug << "Created file directory: " << fileDir();
     }
 
     while (true) {
         // Main loop only handles events, flush tasks are handled by separate threads
         waitAllEvents(std::chrono::milliseconds(1000));
     }
-    logInfo << "FileManager exit";
+    logDebug << "FileManager exit";
 }
 
 std::shared_ptr<StorageRef> FileManager::getDB()
@@ -270,7 +276,7 @@ std::string FileManager::GetPathByBlockHash(const std::string& block_hash, bool 
     }
 
     try {
-        // Use ORM query
+        std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
         auto files = db->stor.select(
             columns(&FileItem::id, &FileItem::path, &FileItem::block_end, &FileItem::block_start),
             where(c(&FileItem::block_hash) == block_hash and c(&FileItem::status) == FileStatus::AVAILABLE),
@@ -283,10 +289,16 @@ std::string FileManager::GetPathByBlockHash(const std::string& block_hash, bool 
             uint64_t block_end = std::get<2>(file);
             uint64_t block_start = std::get<3>(file);
             uint64_t file_size = block_end - block_start;
-
+            if (need_report) {
+                recordFileAccess(file_id, file_path, file_size);
+            }
             // Record file access, using file ID
-            recordFileAccess(file_id, file_path, file_size);
             return file_path;
+        } else {
+            if (need_report) {
+                logWarn << "File not found for block hash: " << block_hash;
+                reportRemoveFile({0, FileStatus::AVAILABLE, "", 0, 0, "", block_hash, 0, 0, ""});
+            }
         }
 
         return "";
@@ -296,13 +308,48 @@ std::string FileManager::GetPathByBlockHash(const std::string& block_hash, bool 
     }
 }
 
+std::optional<FileResourceInfo> FileManager::GetUploadFileResource(const std::string& file_hash, uint64_t min_start)
+{
+    auto db = getDB();
+    if (!db) {
+        return std::nullopt;
+    }
+
+    try {
+        std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
+        auto files = db->stor.select(
+            columns(&FileItem::id, &FileItem::path, &FileItem::block_start, &FileItem::block_end),
+            where(
+                c(&FileItem::file_hash) == file_hash and c(&FileItem::block_start) >= min_start and
+                c(&FileItem::status) == FileStatus::AVAILABLE),
+            order_by(&FileItem::block_end).desc(),
+            limit(1));
+
+        if (!files.empty()) {
+            auto& file = files[0];
+            uint64_t file_id = std::get<0>(file);
+            std::string file_path = std::get<1>(file);
+            uint64_t block_start = std::get<2>(file);
+            uint64_t block_end = std::get<3>(file);
+            uint64_t file_size = block_end - block_start;
+            recordFileAccess(file_id, file_path, file_size);
+            return FileResourceInfo{file_path, block_start};
+        }
+
+        return std::nullopt;
+    } catch (const std::exception& e) {
+        logWarn << "Failed to get file resource: " << e.what();
+        return std::nullopt;
+    }
+}
+
 std::string FileManager::NewDownloadPath(uint64_t file_size)
 {
     auto tmp_path = tmpDir();
     std::string file_name = newFileName();
     tmp_path.append(file_name);
     {
-        std::lock_guard<std::mutex> lock(mFileOperationMutex);
+        std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
         if (!std::filesystem::exists(tmp_path)) {
             std::ofstream ofs(tmp_path);
             if (!ofs) {
@@ -311,7 +358,7 @@ std::string FileManager::NewDownloadPath(uint64_t file_size)
             }
             ofs.close();
         }
-        logInfo << "New download file created: " << tmp_path;
+        logDebug << "New download file created: " << tmp_path;
         // Write to database
         auto db = getDB();
         if (!db) {
@@ -398,12 +445,13 @@ void FileManager::FlushAccessRecords()
 
     try {
         // Batch update file access times in database
+        std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
         for (const auto& node : dirty_nodes) {
             db->stor.update_all(
                 set(c(&FileItem::last_access) = node.last_access), where(c(&FileItem::id) == node.file_id));
         }
 
-        logInfo << "Flushed " << dirty_nodes.size() << " access records to database";
+        logDebug << "Flushed " << dirty_nodes.size() << " access records to database";
     } catch (const std::exception& e) {
         logWarn << "Failed to flush access records: " << e.what();
 
@@ -420,7 +468,7 @@ void FileManager::FlushAccessRecords()
 
 void FileManager::loadAccessRecordsFromDB()
 {
-    logInfo << "Loading file access records from database";
+    logDebug << "Loading file access records from database";
 
     auto db = getDB();
     if (!db) {
@@ -430,6 +478,7 @@ void FileManager::loadAccessRecordsFromDB()
 
     try {
         // Query all file records, sorted by last access time in descending order
+        std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
         auto files = db->stor.select(
             columns(
                 &FileItem::id, &FileItem::path, &FileItem::last_access, &FileItem::block_end, &FileItem::block_start),
@@ -467,7 +516,7 @@ void FileManager::loadAccessRecordsFromDB()
             loaded_count++;
         }
 
-        logInfo << "Loaded " << loaded_count << " file access records from database";
+        logDebug << "Loaded " << loaded_count << " file access records from database";
 
     } catch (const std::exception& e) {
         logWarn << "Failed to load access records from database: " << e.what();
@@ -485,6 +534,7 @@ uint64_t FileManager::calculateTotalStorageSize()
     try {
         // Calculate total size of all files
         // First get all file block information, then calculate sum
+        std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
         auto files = db->stor.select(columns(&FileItem::block_end, &FileItem::block_start));
 
         uint64_t total_size = 0;
@@ -506,15 +556,15 @@ void FileManager::CheckAndEliminateFiles()
 {
     uint64_t current_size = calculateTotalStorageSize();
     if (current_size == 0) {
-        logInfo << "No files to check for elimination, current size is 0";
+        logDebug << "No files to check for elimination, current size is 0";
         return;
     }
     uint64_t upper_bound = (mOpt.MaxStorageSize * mOpt.LRUUpperBoundPercent) / 100;
 
     if (current_size > upper_bound) {
         uint64_t target_size = (mOpt.MaxStorageSize * mOpt.LRUTargetPercent) / 100;
-        logInfo << "Storage size (" << current_size << ") exceeds upper bound (" << upper_bound
-                << "), starting LRU elimination to target size: " << target_size;
+        logDebug << "Storage size (" << current_size << ") exceeds upper bound (" << upper_bound
+                 << "), starting LRU elimination to target size: " << target_size;
 
         removeLRUFiles(current_size, target_size);
     }
@@ -548,6 +598,7 @@ void FileManager::removeLRUFiles(uint64_t current_size, uint64_t target_size)
                     try {
                         auto db = getDB();
                         if (db) {
+                            std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
                             auto result = db->stor.select(
                                 columns(&FileItem::block_end, &FileItem::block_start),
                                 where(c(&FileItem::id) == file_id),
@@ -578,12 +629,12 @@ void FileManager::removeLRUFiles(uint64_t current_size, uint64_t target_size)
     }
 
     if (files_to_remove.empty()) {
-        logInfo << "No files to remove for LRU elimination";
+        logDebug << "No files to remove for LRU elimination";
         return;
     }
 
-    logInfo << "Starting LRU elimination: " << files_to_remove.size() << " files selected, estimated " << size_to_free
-            << " bytes to free";
+    logDebug << "Starting LRU elimination: " << files_to_remove.size() << " files selected, estimated " << size_to_free
+             << " bytes to free";
 
     auto db = getDB();
     if (!db) {
@@ -615,6 +666,7 @@ void FileManager::removeLRUFiles(uint64_t current_size, uint64_t target_size)
                 try {
                     auto db = getDB();
                     if (db) {
+                        std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
                         auto result = db->stor.select(
                             columns(&FileItem::path, &FileItem::block_end, &FileItem::block_start),
                             where(c(&FileItem::id) == file_id),
@@ -640,18 +692,19 @@ void FileManager::removeLRUFiles(uint64_t current_size, uint64_t target_size)
 
             // Lock when deleting physical files to prevent conflicts with scan operations
             {
-                std::lock_guard<std::mutex> file_lock(mFileOperationMutex);
+                std::lock_guard<std::mutex> file_lockFOpt(mFileOperationMutex);
                 if (std::filesystem::exists(file_path)) {
                     std::filesystem::remove(file_path);
                     actual_freed += file_size;
                     successful_removals++;
-                    logInfo << "Removed LRU file: " << file_path << " (size: " << file_size << " bytes)";
+                    logDebug << "Removed LRU file: " << file_path << " (size: " << file_size << " bytes)";
                 }
             }
 
             // Delete record from database
             try {
                 if (db) {
+                    std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
                     db->stor.remove<FileItem>(file_id);
                 }
             } catch (const std::exception& e) {
@@ -673,12 +726,13 @@ void FileManager::removeLRUFiles(uint64_t current_size, uint64_t target_size)
         }
     }
 
-    logInfo << "LRU elimination completed: " << successful_removals << "/" << files_to_remove.size()
-            << " files removed, " << actual_freed << " bytes freed";
+    logDebug << "LRU elimination completed: " << successful_removals << "/" << files_to_remove.size()
+             << " files removed, " << actual_freed << " bytes freed";
 }
 
 void FileManager::reportHaveFiles(const std::vector<std::tuple<FileItem, std::string>>& files)
 {
+    logDebug << "Reporting have files, count: " << files.size();
     JsonReportFileInfo report;
     std::unordered_map<std::string, JsonFileInfo> json_files;
     for (const auto& file : files) {
@@ -713,6 +767,7 @@ void FileManager::reportHaveFiles(const std::vector<std::tuple<FileItem, std::st
 
 void FileManager::reportRemoveFile(const FileItem& item)
 {
+    logDebug << "Reporting remove file for block hash: " << item.block_hash << ", file hash: " << item.file_hash;
     JsonReportFileInfo report;
     JsonFileInfo file_info(item.file_hash, "", 0);
     file_info.addBlock(item.block_start, item.block_end, item.block_hash);
@@ -730,14 +785,11 @@ void FileManager::handleAsyncApiRequestEvent(std::shared_ptr<Event> evt) {}
 
 void FileManager::handleDownloadFileDone(std::shared_ptr<Event> evt)
 {
-    auto e = static_cast<ArgEvent<FileDownloadDoneArg>*>(evt.get());
-    if (!e) {
-        logWarn << "Invalid download file done event";
-        return;
-    }
-    auto& arg = e->Arg();
-
-    if (arg.block_info.hash.empty()) {
+    auto arg_evt = std::static_pointer_cast<ArgEvent<std::shared_ptr<FileDownloadDoneArg>>>(evt);
+    auto arg = arg_evt->Arg();
+    logDebug << "Handling download file done for block hash: " << arg->block_info.hash
+             << ", file path: " << arg->file_path;
+    if (arg->block_info.hash.empty()) {
         logWarn << "Block hash is empty, cannot handle download file done";
         return;
     }
@@ -748,17 +800,16 @@ void FileManager::handleDownloadFileDone(std::shared_ptr<Event> evt)
         return;
     }
 
-    FileItem item;
     {
         // try move file from tmp to file dir
-        std::lock_guard<std::mutex> lock(mFileOperationMutex);
-        std::string tmp_file_path = arg.file_path;
+        std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
+        std::string tmp_file_path = arg->file_path;
         // handle empty path or file not exists
         if (tmp_file_path.empty() || !std::filesystem::exists(tmp_file_path)) {
             logWarn << "Download file path is empty";
             // delete from db
             try {
-                db->stor.remove<FileItem>(
+                db->stor.remove_all<FileItem>(
                     where(c(&FileItem::path) == tmp_file_path and c(&FileItem::status) == FileStatus::DOWNLOADING));
             } catch (const std::exception& e) {
                 logWarn << "Failed to remove download file record: " << e.what();
@@ -769,8 +820,7 @@ void FileManager::handleDownloadFileDone(std::shared_ptr<Event> evt)
         }
 
         // target filename is block_hash
-        auto tmp_relative_path = std::filesystem::relative(tmp_file_path, tmpDir());
-        auto target_relative_path = std::filesystem::path(arg.block_info.hash);
+        auto target_relative_path = std::filesystem::path(arg->block_info.hash);
         std::filesystem::path target_path(fileDir());
         target_path.append(target_relative_path.string());
 
@@ -783,33 +833,38 @@ void FileManager::handleDownloadFileDone(std::shared_ptr<Event> evt)
         try {
             std::filesystem::create_directories(target_path.parent_path());
             std::filesystem::rename(tmp_file_path, target_path);
-            logInfo << "Moved downloaded file to: " << target_path;
+            logDebug << "Moved downloaded file to: " << target_path;
         } catch (const std::exception& e) {
             logWarn << "Failed to move downloaded file: " << e.what();
             return;
         }
 
         try {
-            item.path = target_path.string();
-            item.status = FileStatus::AVAILABLE;
-            item.block_start = arg.block_info.start;
-            item.block_end = arg.block_info.end;
-            item.file_hash = arg.file_hash;
-            item.block_hash = arg.block_info.hash;
-            item.last_access = getCurrentTimestamp();
-            item.last_report = item.last_access;
-
+            logDebug << "File download completed, updating database record for block hash: " << arg->block_info.hash
+                     << ", file hash: " << arg->file_hash;
             // Select and update records based on download path and status=Downloading
             db->stor.update_all(
-                set(c(&FileItem::status) = item.status,
-                    c(&FileItem::block_start) = item.block_start,
-                    c(&FileItem::block_end) = item.block_end,
-                    c(&FileItem::file_hash) = item.file_hash,
-                    c(&FileItem::block_hash) = item.block_hash,
-                    c(&FileItem::last_access) = item.last_access,
-                    c(&FileItem::last_report) = item.last_report),
+                set(c(&FileItem::status) = FileStatus::AVAILABLE,
+                    c(&FileItem::block_start) = arg->block_info.start,
+                    c(&FileItem::block_end) = arg->block_info.end,
+                    c(&FileItem::file_hash) = arg->file_hash,
+                    c(&FileItem::block_hash) = arg->block_info.hash,
+                    c(&FileItem::last_access) = getCurrentTimestamp(),
+                    c(&FileItem::last_report) = getCurrentTimestamp(),
+                    c(&FileItem::path) = target_path.string()),
                 where(c(&FileItem::path) == tmp_file_path and c(&FileItem::status) == FileStatus::DOWNLOADING));
 
+            // Get the file_id of the updated record
+            auto updated_files = db->stor.select(
+                &FileItem::id,
+                where(
+                    c(&FileItem::block_hash) == arg->block_info.hash and c(&FileItem::status) == FileStatus::AVAILABLE),
+                limit(1));
+
+            if (!updated_files.empty()) {
+                uint64_t updated_file_id = updated_files[0];
+                recordFileAccess(updated_file_id, target_path.string(), arg->block_info.end - arg->block_info.start);
+            }
         } catch (const std::exception& e) {
             logWarn << "Failed to update download file record: " << e.what();
             return;
@@ -820,12 +875,13 @@ void FileManager::handleDownloadFileDone(std::shared_ptr<Event> evt)
     }
 
     // Report file download completion
-    if (item.block_hash.empty()) {
-        logWarn << "Block hash is empty, cannot report file download completion";
-        return;
-    }
     try {
-        reportHaveFiles(std::vector<std::tuple<FileItem, std::string>>{std::make_tuple(item, arg.url)});
+        FileItem item;
+        item.block_hash = arg->block_info.hash;
+        item.file_hash = arg->file_hash;
+        item.block_start = arg->block_info.start;
+        item.block_end = arg->block_info.end;
+        reportHaveFiles(std::vector<std::tuple<FileItem, std::string>>{std::make_tuple(item, arg->url)});
     } catch (const std::exception& e) {
         logWarn << "Failed to report file download completion: " << e.what();
         return;
@@ -833,7 +889,7 @@ void FileManager::handleDownloadFileDone(std::shared_ptr<Event> evt)
         logWarn << "Unknown exception occurred while reporting file download";
         return;
     }
-    logInfo << "File download completed";
+    logDebug << "File download completed";
 }
 
 void FileManager::handleDownloadFileFailed(std::shared_ptr<Event> evt)
@@ -846,12 +902,12 @@ void FileManager::handleDownloadFileFailed(std::shared_ptr<Event> evt)
     std::string tmp_path_str = e->Arg().file_path;
     std::filesystem::path tmp_file_path(tmp_path_str);
     {
-        std::lock_guard<std::mutex> lock(mFileOperationMutex);
+        std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
         // Delete failed download file
 
         if (std::filesystem::exists(tmp_file_path)) {
             std::filesystem::remove(tmp_file_path);
-            logInfo << "Removed failed download file: " << tmp_file_path;
+            logDebug << "Removed failed download file: " << tmp_file_path;
         } else {
             logWarn << "File not found for removal: " << tmp_file_path;
         }
@@ -891,6 +947,7 @@ void FileManager::handleRemoveFile(std::shared_ptr<Event> evt)
     }
     try {
         // Query file records to delete
+        std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
         auto files = db->stor.select(
             columns(&FileItem::id, &FileItem::file_hash, &FileItem::block_hash),
             where(c(&FileItem::block_hash) == blockHash and c(&FileItem::status) == FileStatus::AVAILABLE));
@@ -907,13 +964,12 @@ void FileManager::handleRemoveFile(std::shared_ptr<Event> evt)
             item.block_hash = std::get<2>(file);
 
             {
-                std::lock_guard<std::mutex> lock(mFileOperationMutex);
                 // Delete file
                 std::filesystem::path file_path(mOpt.RootPath);
                 file_path.append(item.file_hash);
                 if (std::filesystem::exists(file_path)) {
                     std::filesystem::remove(file_path);
-                    logInfo << "Removed file: " << file_path;
+                    logDebug << "Removed file: " << file_path;
                 } else {
                     logWarn << "File not found for removal: " << file_path;
                 }
@@ -947,12 +1003,12 @@ void FileManager::handleRemoveFile(std::shared_ptr<Event> evt)
         logWarn << "Unknown exception occurred while removing file";
     }
     // Send log message
-    logInfo << "File remove request received";
+    logDebug << "File remove request received";
 }
 
 void FileManager::runLRUThread()
 {
-    logInfo << "LRU thread started";
+    logDebug << "LRU thread started";
 
     while (!mShouldStop) {
         try {
@@ -977,12 +1033,12 @@ void FileManager::runLRUThread()
         }
     }
 
-    logInfo << "LRU thread stopped";
+    logDebug << "LRU thread stopped";
 }
 
 void FileManager::runFlushThread()
 {
-    logInfo << "Flush thread started";
+    logDebug << "Flush thread started";
 
     while (!mShouldStop) {
         try {
@@ -1011,19 +1067,19 @@ void FileManager::runFlushThread()
     // Final flush before thread stops to ensure no data is lost
     try {
         FlushAccessRecords();
-        logInfo << "Final flush completed before thread exit";
+        logDebug << "Final flush completed before thread exit";
     } catch (const std::exception& e) {
         logWarn << "Final flush failed: " << e.what();
     } catch (...) {
         logWarn << "Final flush unknown exception";
     }
 
-    logInfo << "Flush thread stopped";
+    logDebug << "Flush thread stopped";
 }
 
 void FileManager::runReportThread()
 {
-    logInfo << "Report thread started";
+    logDebug << "Report thread started";
 
     while (!mShouldStop) {
         try {
@@ -1044,6 +1100,7 @@ void FileManager::runReportThread()
 
             // Query files that haven't been reported for the longest time, sorted by last_report in ascending order
             // If last_report is empty or 0, prioritize reporting
+            std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
             auto files = db->stor.select(
                 columns(
                     &FileItem::id,
@@ -1061,7 +1118,7 @@ void FileManager::runReportThread()
                 continue;
             }
 
-            logInfo << "Reporting " << files.size() << " files to PCDN server";
+            logDebug << "Reporting " << files.size() << " files to PCDN server";
             uint64_t successful_reports = 0;
 
             // Batch report files
@@ -1109,12 +1166,12 @@ void FileManager::runReportThread()
             std::this_thread::sleep_for(std::chrono::seconds(10));
         }
     }
-    logInfo << "Report thread stopped";
+    logDebug << "Report thread stopped";
 }
 
 void FileManager::runScanThread()
 {
-    logInfo << "Scan thread started";
+    logDebug << "Scan thread started";
 
     while (!mShouldStop) {
         try {
@@ -1141,7 +1198,7 @@ void FileManager::runScanThread()
         }
     }
 
-    logInfo << "Scan thread stopped";
+    logDebug << "Scan thread stopped";
 }
 
 void FileManager::scanFilesystemAndDatabase(
@@ -1161,7 +1218,7 @@ void FileManager::scanFilesystemAndDatabase(
     }
 
     // Lock for consistency scanning to prevent race conditions with file create/delete operations
-    std::lock_guard<std::mutex> file_lock(mFileOperationMutex);
+    std::lock_guard<std::mutex> file_lockFOpt(mFileOperationMutex);
 
     logDebug << "Acquiring file operation lock for filesystem and database scan";
 
@@ -1169,7 +1226,7 @@ void FileManager::scanFilesystemAndDatabase(
     std::filesystem::recursive_directory_iterator dir_iter(fileDir());
     for (const auto& entry : dir_iter) {
         if (mShouldStop) {
-            logInfo << "Filesystem scan interrupted by stop signal";
+            logDebug << "Filesystem scan interrupted by stop signal";
             return;
         }
 
@@ -1202,8 +1259,8 @@ void FileManager::scanFilesystemAndDatabase(
             db_files_map[path] = std::make_tuple(id, hash, block_start, block_end);
         }
 
-        logInfo << "Filesystem and database scan completed: found " << filesystem_files.size()
-                << " files in filesystem, " << db_files_map.size() << " files in database";
+        logDebug << "Filesystem and database scan completed: found " << filesystem_files.size()
+                 << " files in filesystem, " << db_files_map.size() << " files in database";
 
     } catch (const std::exception& e) {
         logWarn << "Failed to query database during scan: " << e.what();
@@ -1217,13 +1274,13 @@ uint64_t FileManager::cleanOrphanFiles(const std::vector<std::string>& orphan_fi
         return 0;
     }
 
-    logInfo << "Cleaning " << orphan_files.size() << " orphan files";
+    logDebug << "Cleaning " << orphan_files.size() << " orphan files";
 
     uint64_t orphan_deleted_count = 0;
 
     for (const auto& orphan_file : orphan_files) {
         if (mShouldStop) {
-            logInfo << "Orphan file cleanup interrupted by stop signal";
+            logDebug << "Orphan file cleanup interrupted by stop signal";
             break;
         }
 
@@ -1237,7 +1294,7 @@ uint64_t FileManager::cleanOrphanFiles(const std::vector<std::string>& orphan_fi
             // Delete orphan file
             std::filesystem::remove(orphan_path);
             orphan_deleted_count++;
-            logInfo << "Deleted orphan file: " << orphan_file;
+            logDebug << "Deleted orphan file: " << orphan_file;
         } catch (const std::filesystem::filesystem_error& e) {
             logWarn << "Failed to delete orphan file " << orphan_file << ": " << e.what();
         } catch (const std::exception& e) {
@@ -1245,7 +1302,7 @@ uint64_t FileManager::cleanOrphanFiles(const std::vector<std::string>& orphan_fi
         }
     }
 
-    logInfo << "Orphan file cleanup completed: deleted " << orphan_deleted_count << " files";
+    logDebug << "Orphan file cleanup completed: deleted " << orphan_deleted_count << " files";
 
     return orphan_deleted_count;
 }
@@ -1263,7 +1320,7 @@ uint64_t FileManager::cleanMissingFiles(
         return 0;
     }
 
-    logInfo << "Cleaning " << missing_files.size() << " missing file records";
+    logDebug << "Cleaning " << missing_files.size() << " missing file records";
 
     std::vector<uint64_t> missing_file_ids;
     std::vector<FileItem> missing_files_for_report;
@@ -1304,6 +1361,7 @@ uint64_t FileManager::cleanMissingFiles(
     // Batch delete missing file records from database
     uint64_t deleted_count = 0;
     if (!missing_file_ids.empty()) {
+        std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
         try {
             // Use sqlite_orm batch delete: WHERE id IN (?, ?, ?, ...)
             // This only requires one database operation to delete all records
@@ -1313,8 +1371,8 @@ uint64_t FileManager::cleanMissingFiles(
             // If precise counting is needed, query the number of matching records first
             deleted_count = missing_file_ids.size();
 
-            logInfo << "Successfully removed " << deleted_count
-                    << " missing file records from database (batch operation)";
+            logDebug << "Successfully removed " << deleted_count
+                     << " missing file records from database (batch operation)";
 
         } catch (const std::exception& e) {
             logWarn << "Batch delete failed, falling back to individual deletes: " << e.what();
@@ -1329,13 +1387,13 @@ uint64_t FileManager::cleanMissingFiles(
                 }
             }
 
-            logInfo << "Successfully removed " << deleted_count
-                    << " missing file records from database (individual operations)";
+            logDebug << "Successfully removed " << deleted_count
+                     << " missing file records from database (individual operations)";
         }
     }
 
     // Report deleted files (if report URL configured)
-    logInfo << "Reporting " << missing_files_for_report.size() << " removed files to PCDN server";
+    logDebug << "Reporting " << missing_files_for_report.size() << " removed files to PCDN server";
     uint64_t reported_count = 0;
     for (const auto& missing_file : missing_files_for_report) {
         try {
@@ -1346,14 +1404,15 @@ uint64_t FileManager::cleanMissingFiles(
         }
     }
 
-    logInfo << "Successfully reported " << reported_count << "/" << missing_files_for_report.size() << " removed files";
+    logDebug << "Successfully reported " << reported_count << "/" << missing_files_for_report.size()
+             << " removed files";
 
     return deleted_count;
 }
 
 void FileManager::scanAndCleanInconsistentFiles()
 {
-    logInfo << "Starting unified file system and database consistency check";
+    logDebug << "Starting unified file system and database consistency check";
 
     auto db = getDB();
     if (!db) {
@@ -1402,7 +1461,7 @@ void FileManager::scanAndCleanInconsistentFiles()
             }
         }
 
-        logInfo << "Found " << orphan_files.size() << " orphan files and " << missing_files.size() << " missing files";
+        logDebug << "Found " << orphan_files.size() << " orphan files and " << missing_files.size() << " missing files";
 
         // Handle orphan files (in filesystem but not in database)
         uint64_t orphan_deleted_count = cleanOrphanFiles(orphan_files);
@@ -1410,9 +1469,9 @@ void FileManager::scanAndCleanInconsistentFiles()
         // Handle missing files (in database but not in filesystem)
         uint64_t missing_deleted_count = cleanMissingFiles(missing_files);
 
-        logInfo << "Unified consistency check completed: processed " << filesystem_files.size() << " filesystem files, "
-                << db_files_map.size() << " database files, deleted " << orphan_deleted_count << " orphan files and "
-                << missing_deleted_count << " missing file records";
+        logDebug << "Unified consistency check completed: processed " << filesystem_files.size()
+                 << " filesystem files, " << db_files_map.size() << " database files, deleted " << orphan_deleted_count
+                 << " orphan files and " << missing_deleted_count << " missing file records";
 
     } catch (const std::exception& e) {
         logWarn << "Failed to perform unified consistency check: " << e.what();
@@ -1421,7 +1480,7 @@ void FileManager::scanAndCleanInconsistentFiles()
 
 void FileManager::cleanStaleDownloads()
 {
-    logInfo << "Starting cleanup of stale download files";
+    logDebug << "Starting cleanup of stale download files";
 
     std::filesystem::path tmp_dir = tmpDir();
 
@@ -1452,7 +1511,7 @@ void FileManager::cleanStaleDownloads()
 
         for (const auto& entry : dir_iter) {
             if (mShouldStop) {
-                logInfo << "Stale download cleanup interrupted by stop signal";
+                logDebug << "Stale download cleanup interrupted by stop signal";
                 break;
             }
 
@@ -1483,8 +1542,8 @@ void FileManager::cleanStaleDownloads()
                         deleted_files_for_db.push_back(file_path_str);
 
                         uint64_t stale_duration = durSinceLastWrite;
-                        logInfo << "Deleted stale download file: " << file_path_str << " (size: " << file_size
-                                << " bytes, stale for: " << stale_duration << " seconds)";
+                        logDebug << "Deleted stale download file: " << file_path_str << " (size: " << file_size
+                                 << " bytes, stale for: " << stale_duration << " seconds)";
 
                     } catch (const std::filesystem::filesystem_error& e) {
                         logWarn << "Failed to delete stale download file " << entry.path() << ": " << e.what();
@@ -1510,6 +1569,7 @@ void FileManager::cleanStaleDownloads()
 
                 for (const auto& file_path : deleted_files_for_db) {
                     try {
+                        std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
                         // Query matching download records
                         auto download_records = db->stor.select(
                             &FileItem::id,
@@ -1530,7 +1590,7 @@ void FileManager::cleanStaleDownloads()
                 }
 
                 if (db_deleted_count > 0) {
-                    logInfo << "Removed " << db_deleted_count << " stale download records from database";
+                    logDebug << "Removed " << db_deleted_count << " stale download records from database";
                 }
 
             } catch (const std::exception& e) {
@@ -1538,10 +1598,10 @@ void FileManager::cleanStaleDownloads()
             }
         }
 
-        logInfo << "Stale download cleanup completed: scanned " << scanned_count << " files, found " << stale_count
-                << " stale files, "
-                << "deleted " << deleted_count << " files, "
-                << "freed " << total_size_freed << " bytes";
+        logDebug << "Stale download cleanup completed: scanned " << scanned_count << " files, found " << stale_count
+                 << " stale files, "
+                 << "deleted " << deleted_count << " files, "
+                 << "freed " << total_size_freed << " bytes";
 
     } catch (const std::exception& e) {
         logWarn << "Failed to clean stale download files: " << e.what();

@@ -18,10 +18,6 @@
 
 NS_BEGIN(dcdn)
 
-// 前向声明，避免编译错误
-class FileManager;
-class DownloadManager;
-
 struct MainManagerOption
 {
     std::string WorkDir;
@@ -29,7 +25,7 @@ struct MainManagerOption
     std::string ApiKey;
 };
 
-class MainManager : public BaseManager, public EventLoop<MainManager>
+class MainManager: public BaseManager, public EventLoop<MainManager>
 {
 public:
     using json = nlohmann::json;
@@ -78,15 +74,8 @@ public:
         return mApiClient->Cancel(reqId);
     }
 
-    std::shared_ptr<FileManager> getFileManager() const
-    {
-        return std::dynamic_pointer_cast<FileManager>(mFileMgr);
-    }
-
-    std::shared_ptr<DownloadManager> getDownloadManager() const
-    {
-        return std::dynamic_pointer_cast<DownloadManager>(mDownloadMgr);
-    }
+    std::shared_ptr<BaseManager> getFileManager() const;
+    std::shared_ptr<BaseManager> getDownloadManager() const;
 
 private:
     void run();
