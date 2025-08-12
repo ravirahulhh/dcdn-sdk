@@ -13,13 +13,14 @@ add_library(dcdn  STATIC
     UploadManager.cpp	
     WebSocketManager.cpp
     Config.cpp		
+    EventLoop.cpp
     # HttpDownloader.cpp	
     MainManagerTest.cpp	
     WebRtcManager.cpp
     p2p_downloader.cpp
     p2p_single_task.cpp
     DownloadManager.cpp
-    DeployManager.cpp
+    # DeployManager.cpp
 )
 
 include_directories(

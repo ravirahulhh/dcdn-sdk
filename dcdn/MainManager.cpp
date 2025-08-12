@@ -45,7 +45,7 @@ MainManager::MainManager(): BaseManager(this)
     dcdn::FileManagerOption fmOpt; // TODO: load from configuration
     mFileMgr = std::make_shared<FileManager>(this, fileMgrOpt);
     mUploadMgr = std::make_shared<UploadManager>(this);
-    mDeployMgr = std::make_shared<DeployManager>(this);
+    // mDeployMgr = std::make_shared<DeployManager>(this);
     // mDownloadMgr = std::make_shared<DownloadManager>(this);
 
     RegisterGlobalHandler(
