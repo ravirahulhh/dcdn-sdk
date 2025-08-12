@@ -9,6 +9,7 @@
 #include "UploadManager.h"
 #include "WebRtcManager.h"
 #include "WebSocketManager.h"
+#include "DeployManager.h"
 #include "util/HttpDownloader.h"
 
 NS_BEGIN(dcdn)

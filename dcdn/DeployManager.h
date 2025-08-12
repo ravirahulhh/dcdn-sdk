@@ -5,106 +5,40 @@
 #include "EventLoop.h"
 #include "FileManager.h"
 #include "DownloadManager.h"
-#include "util/HttpDownloader.h"
-#include "common/Common.h"  // 包含BlockInfo定义
+#include "common/Common.h" // 包含BlockInfo定义
 #include <sqlite_orm/sqlite_orm.h>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
 #include <chrono>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <filesystem>
 
 NS_BEGIN(dcdn)
 
-// 部署任务状态枚举
 enum class DeployStatus {
-    PENDING = 0,       // 待处理
-    DOWNLOADING = 1,   // 下载中
-    COMPLETED = 2,     // 完成
-    FAILED = 3         // 失败
+    PENDING = 0,
+    DOWNLOADING = 1,
+    COMPLETED = 2,
+    FAILED = 3
 };
 
-// 部署任务数据结构（与BlockInfo字段对应）
 struct DeployTask {
-    std::string job_id;          // 服务端任务唯一标识（主键）
-    std::string file_hash;       // 文件整体哈希（对应BlockInfo::file_hash）
-    std::string url;             // 下载URL
-    uint64_t block_start = 0;    // 区块起始位置（对应BlockInfo::block_start）
-    uint64_t block_end = 0;      // 区块结束位置（对应BlockInfo::block_end）
-    std::string block_hash;      // 区块哈希（对应BlockInfo::block_hash）
-    DeployStatus status = DeployStatus::PENDING;  // 任务状态
-    std::string download_path;   // 下载文件路径
-    uint64_t create_time = 0;    // 创建时间戳
-    uint64_t update_time = 0;    // 更新时间戳
+    std::string job_id;
+    std::string file_hash;
+    std::string url;
+    uint64_t block_start = 0;
+    uint64_t block_end = 0;
+    std::string block_hash;
+    DeployStatus status = DeployStatus::PENDING;
+    std::string download_path;
+    uint64_t create_time = 0;
+    uint64_t update_time = 0;
 };
 
-// 部署管理器类
-class DeployManager : public BaseManager, public EventLoop<DeployManager> {
-public:
-    using json = nlohmann::json;
-    explicit DeployManager(MainManager* man);
-    ~DeployManager() override;
-
-private:
-    // 事件处理函数注册（友元声明）
-    friend class EventLoop<DeployManager>;
-
-    // 数据库初始化
-    int createTable();
-
-    // 获取数据库连接
-    std::shared_ptr<StorageRef> getDB();
-
-    // 主循环逻辑
-    void run() override;
-
-    // 处理部署任务事件
-    void handleDeployMsgEvent(std::shared_ptr<Event> evt);
-
-    // 检查下载状态
-    void checkDownloadStatus();
-
-    // 保存部署任务到数据库
-    bool saveDeployTask(const DeployTask& task);
-
-    // 更新任务状态
-    bool updateDeployTaskStatus(const std::string& job_id, DeployStatus status);
-
-    // 加载所有下载中任务
-    std::vector<DeployTask> loadDownloadingTasks();
-
-    // 重启时重新提交任务
-    void resubmitDownloadTasks();
-
-    // 向服务端上报结果
-    void reportToServer(const std::string& job_id, bool success);
-
-    // 获取当前时间戳（秒）
-    uint64_t getCurrentTimestamp() {
-        return std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::system_clock::now().time_since_epoch()
-        ).count();
-    }
-
-private:
-    // 数据库路径
-    std::filesystem::path dbPath() const {
-        std::filesystem::path dbFile(mMan->Option().WorkDir);
-        dbFile.append("deploy.db");
-        return dbFile;
-    }
-
-private:
-    std::shared_ptr<StorageRef> mDB;                  // 数据库连接
-    std::shared_ptr<FileManager> mFileMgr;            // 文件管理器实例
-    std::shared_ptr<DownloadManager> mDownloadMgr;    // 下载管理器实例
-    util::HttpClient mClient;                         // HTTP客户端（用于上报）
-    std::mutex mTaskMutex;                            // 任务映射表锁
-    std::unordered_map<std::string, std::string> mJobToTaskMap;  // job_id -> 下载任务ID
-};
-
-// 数据库表映射（sqlite_orm）
+// sqlite_orm 存储映射
 inline auto makeDeployStorage(const std::string& filename) {
     using namespace sqlite_orm;
     return make_storage(
@@ -126,8 +60,53 @@ inline auto makeDeployStorage(const std::string& filename) {
 }
 
 using DeployStorage = decltype(makeDeployStorage(""));
-using DeployStorageRef = std::shared_ptr<DeployStorage>;
+using DeployStoragePtr = std::shared_ptr<DeployStorage>;
+
+class DeployManager : public BaseManager, public EventLoop<DeployManager> {
+public:
+    using json = nlohmann::json;
+
+    explicit DeployManager(MainManager* man);
+    ~DeployManager() override;
+
+private:
+    friend class EventLoop<DeployManager>;
+
+    int createTable();
+    DeployStoragePtr getDB();
+
+    void run() override;
+    void handleDeployMsgEvent(std::shared_ptr<Event> evt);
+    void checkDownloadStatus();
+
+    bool saveDeployTask(const DeployTask& task);
+    bool updateDeployTaskStatus(const std::string& job_id, DeployStatus status);
+    std::vector<DeployTask> loadDownloadingTasks();
+    void resubmitDownloadTasks();
+
+    void reportToServer(const std::string& job_id, bool success);
+
+    uint64_t getCurrentTimestamp() const {
+        return std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count();
+    }
+
+    std::filesystem::path dbPath() const {
+        std::filesystem::path dbFile(mMan->Option().WorkDir);
+        dbFile.append("deploy.db");
+        return dbFile;
+    }
+
+private:
+    DeployStoragePtr mDB;
+    std::shared_ptr<FileManager> mFileMgr;
+    std::shared_ptr<DownloadManager> mDownloadMgr;
+    util::HttpClient mClient;
+    std::mutex mTaskMutex;
+    std::unordered_map<std::string, std::string> mJobToTaskMap;
+};
 
 NS_END
 
-#endif  // _DCDN_SDK_DEPLOY_MANAGER_H_
+#endif // _DCDN_SDK_DEPLOY_MANAGER_H_

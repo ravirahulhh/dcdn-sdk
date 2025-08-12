@@ -31,7 +31,7 @@ libdcdnObjs = \
 			   MainManager.o \
 			   dcdn.o \
 			   DownloadManager.o \
-
+			   DeployManager.o \
 
 testTargets = \
 			  MainTest \

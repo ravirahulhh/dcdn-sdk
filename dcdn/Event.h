@@ -84,6 +84,7 @@ struct RemoveFileArg
 struct DeployMsgArg
 {
     std::string job_id;  // 部署任务唯一标识
+    std::string file_hash;
     std::string url;     // 下载URL
     BlockInfo block_info;
 };
