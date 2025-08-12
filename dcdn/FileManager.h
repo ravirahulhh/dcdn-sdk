@@ -95,7 +95,7 @@ public:
     // Get file path by block hash
     // Returns empty string if file not found
     std::string GetPathByBlockHash(const std::string& block_hash, bool need_report = false);
-    std::optional<FileResourceInfo> GetFileResource(const std::string& file_hash, uint64_t min_start);
+    std::optional<FileResourceInfo> GetUploadFileResource(const std::string& file_hash, uint64_t min_start);
     std::string NewDownloadPath(uint64_t filesize);
 
     void FlushAccessRecords();

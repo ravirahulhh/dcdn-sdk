@@ -308,7 +308,7 @@ std::string FileManager::GetPathByBlockHash(const std::string& block_hash, bool 
     }
 }
 
-std::optional<FileResourceInfo> FileManager::GetFileResource(const std::string& file_hash, uint64_t min_start)
+std::optional<FileResourceInfo> FileManager::GetUploadFileResource(const std::string& file_hash, uint64_t min_start)
 {
     auto db = getDB();
     if (!db) {
