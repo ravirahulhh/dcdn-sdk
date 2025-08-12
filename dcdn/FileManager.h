@@ -74,6 +74,12 @@ struct FileManagerOption
     uint32_t DownloadTimeout = 30 * 60; // Download timeout, 30 minutes
 };
 
+struct FileResourceInfo
+{
+    std::string path;
+    uint64_t start;
+};
+
 class StorageRef;
 class FileManager: public BaseManager, public EventLoop<FileManager>
 {
@@ -89,6 +95,7 @@ public:
     // Get file path by block hash
     // Returns empty string if file not found
     std::string GetPathByBlockHash(const std::string& block_hash, bool need_report = false);
+    std::optional<FileResourceInfo> GetFileResource(const std::string& file_hash, uint64_t min_start);
     std::string NewDownloadPath(uint64_t filesize);
 
     void FlushAccessRecords();
