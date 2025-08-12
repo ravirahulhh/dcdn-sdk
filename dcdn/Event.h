@@ -63,10 +63,12 @@ private:
     ArgType mArg;
 };
 
-struct FileDownloadDoneArg: BlockInfo
+struct FileDownloadDoneArg
 {
     std::string url;
     std::string file_path;
+    std::string file_hash;
+    BlockInfo block_info;
 };
 
 struct FileDownloadFailedArg

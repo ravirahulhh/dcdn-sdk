@@ -1,5 +1,6 @@
 #include "FileManager.h"
 
+#include <plog/Initializers/RollingFileInitializer.h>
 #include <sqlite3.h>
 #include <sqlite_orm/sqlite_orm.h>
 
@@ -17,6 +18,7 @@
 #include <variant>
 #include <vector>
 
+#include "ApiClient.h"
 #include "Event.h"
 #include "MainManager.h"
 #include "SqliteOrmHelper.h"
@@ -69,8 +71,6 @@ auto createFileStorage(const std::string& filename)
 {
     auto storage = make_storage(
         filename,
-        make_unique_index(
-            "idx_unique", &FileItem::file_hash, &FileItem::file_hash, &FileItem::block_start, &FileItem::block_end),
         make_index("idx_file_start", &FileItem::file_hash, &FileItem::block_start),
         make_index("idx_last_report", &FileItem::last_report),
         make_table(
@@ -103,11 +103,22 @@ FileManager::FileManager(MainManager* man, const FileManagerOption& opt): BaseMa
         throw std::runtime_error("Work directory is not set in MainManager");
     }
 
+    if (!std::filesystem::exists(man->Option().WorkDir)) {
+        std::filesystem::create_directories(man->Option().WorkDir);
+        logInfo << "Created work directory";
+    }
+
     if (opt.RootPath.empty()) {
         throw std::runtime_error("Root path is not set in FileManagerOption");
     }
 
+    if (!std::filesystem::exists(opt.RootPath)) {
+        std::filesystem::create_directories(opt.RootPath);
+        logInfo << "Created root directory: " << opt.RootPath;
+    }
+
     // check if database exists
+    logInfo << "FileManager init with db path: " << dbPath().string();
     if (!std::filesystem::exists(dbPath())) {
         if (createTable() != ErrorCodeOk) {
             logError << "Failed to create files.db table";
@@ -130,6 +141,7 @@ FileManager::FileManager(MainManager* man, const FileManagerOption& opt): BaseMa
     registerHandler(EventType::FileDownloadDone, &FileManager::handleDownloadFileDone);
     registerHandler(EventType::FileDownloadFailed, &FileManager::handleDownloadFileFailed);
     registerHandler(EventType::RemoveFile, &FileManager::handleRemoveFile);
+    registerHandler(EventType::AsyncApiRequest, &FileManager::handleAsyncApiRequestEvent);
 
     // Start LRU thread
     mLRUThread = std::thread(&FileManager::runLRUThread, this);
@@ -233,8 +245,7 @@ int FileManager::createTable()
         block_end INTEGER,
         last_access INTEGER,
         last_report INTEGER,
-        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(block_hash, file_hash, block_start, block_end)
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_file_start ON files(file_hash, block_start);
         CREATE INDEX IF NOT EXISTS idx_last_access ON files(last_access);
@@ -242,6 +253,7 @@ int FileManager::createTable()
     )";
     rc = sqlite3_exec(db, sql, nullptr, 0, &errMsg);
     if (rc != SQLITE_OK) {
+        throw std::runtime_error("Failed to create files table: " + std::string(errMsg));
         logWarn << "create table(files) err:" << errMsg;
         sqlite3_free(errMsg);
         sqlite3_close(db);
@@ -312,10 +324,6 @@ std::string FileManager::NewDownloadPath(uint64_t file_size)
             item.status = FileStatus::DOWNLOADING;
             item.last_access = getCurrentTimestamp();
             item.last_report = 0;
-            if (item.block_start > item.block_end) {
-                logWarn << "Invalid block range for file: " << file_name;
-                return "";
-            }
             db->stor.insert(item);
         } catch (const std::exception& e) {
             logWarn << "Failed to insert new download file into database: " << e.what();
@@ -671,10 +679,6 @@ void FileManager::removeLRUFiles(uint64_t current_size, uint64_t target_size)
 
 void FileManager::reportHaveFiles(const std::vector<std::tuple<FileItem, std::string>>& files)
 {
-    if (mOpt.PCDNReportUrl.empty()) {
-        return;
-    }
-
     JsonReportFileInfo report;
     std::unordered_map<std::string, JsonFileInfo> json_files;
     for (const auto& file : files) {
@@ -702,15 +706,13 @@ void FileManager::reportHaveFiles(const std::vector<std::tuple<FileItem, std::st
     for (const auto& pair : json_files) {
         report.addFile(pair.second);
     }
-    std::string resp;
-    mClient.Post(mOpt.PCDNReportUrl.c_str(), report.to_json_string(), resp, "application/json");
+    MainManager::json msg;
+    msg["changes"] = report.to_json();
+    mMan->AsyncApiPost(nullptr, "/api/v1/update_file_info", msg, this, nullptr, nullptr);
 }
 
 void FileManager::reportRemoveFile(const FileItem& item)
 {
-    if (mOpt.PCDNReportUrl.empty()) {
-        return;
-    }
     JsonReportFileInfo report;
     JsonFileInfo file_info(item.file_hash, "", 0);
     file_info.addBlock(item.block_start, item.block_end, item.block_hash);
@@ -719,8 +721,12 @@ void FileManager::reportRemoveFile(const FileItem& item)
     }
     report.delFile(file_info);
     std::string resp;
-    mClient.Post(mOpt.PCDNReportUrl.c_str(), report.to_json_string(), resp, "application/json");
+    MainManager::json msg;
+    msg["changes"] = report.to_json();
+    mMan->AsyncApiPost(nullptr, "/api/v1/update_file_info", msg, this, nullptr, nullptr);
 }
+
+void FileManager::handleAsyncApiRequestEvent(std::shared_ptr<Event> evt) {}
 
 void FileManager::handleDownloadFileDone(std::shared_ptr<Event> evt)
 {
@@ -731,7 +737,7 @@ void FileManager::handleDownloadFileDone(std::shared_ptr<Event> evt)
     }
     auto& arg = e->Arg();
 
-    if (arg.block_hash.empty()) {
+    if (arg.block_info.hash.empty()) {
         logWarn << "Block hash is empty, cannot handle download file done";
         return;
     }
@@ -764,7 +770,7 @@ void FileManager::handleDownloadFileDone(std::shared_ptr<Event> evt)
 
         // target filename is block_hash
         auto tmp_relative_path = std::filesystem::relative(tmp_file_path, tmpDir());
-        auto target_relative_path = std::filesystem::path(arg.block_hash);
+        auto target_relative_path = std::filesystem::path(arg.block_info.hash);
         std::filesystem::path target_path(fileDir());
         target_path.append(target_relative_path.string());
 
@@ -786,10 +792,10 @@ void FileManager::handleDownloadFileDone(std::shared_ptr<Event> evt)
         try {
             item.path = target_path.string();
             item.status = FileStatus::AVAILABLE;
-            item.block_start = arg.block_start;
-            item.block_end = arg.block_end;
+            item.block_start = arg.block_info.start;
+            item.block_end = arg.block_info.end;
             item.file_hash = arg.file_hash;
-            item.block_hash = arg.block_hash;
+            item.block_hash = arg.block_info.hash;
             item.last_access = getCurrentTimestamp();
             item.last_report = item.last_access;
 
@@ -1027,11 +1033,6 @@ void FileManager::runReportThread()
                     lock, std::chrono::seconds(mOpt.ReportInterval), [this] { return mShouldStop.load(); })) {
                 // Awakened by stop signal
                 break;
-            }
-
-            // Skip reporting if no report URL configured
-            if (mOpt.PCDNReportUrl.empty()) {
-                continue;
             }
 
             // Query files that haven't been reported for the longest time from database
@@ -1334,22 +1335,18 @@ uint64_t FileManager::cleanMissingFiles(
     }
 
     // Report deleted files (if report URL configured)
-    if (!mOpt.PCDNReportUrl.empty()) {
-        logInfo << "Reporting " << missing_files_for_report.size() << " removed files to PCDN server";
-
-        uint64_t reported_count = 0;
-        for (const auto& missing_file : missing_files_for_report) {
-            try {
-                reportRemoveFile(missing_file);
-                reported_count++;
-            } catch (const std::exception& e) {
-                logWarn << "Failed to report removed file " << missing_file.path << ": " << e.what();
-            }
+    logInfo << "Reporting " << missing_files_for_report.size() << " removed files to PCDN server";
+    uint64_t reported_count = 0;
+    for (const auto& missing_file : missing_files_for_report) {
+        try {
+            reportRemoveFile(missing_file);
+            reported_count++;
+        } catch (const std::exception& e) {
+            logWarn << "Failed to report removed file " << missing_file.path << ": " << e.what();
         }
-
-        logInfo << "Successfully reported " << reported_count << "/" << missing_files_for_report.size()
-                << " removed files";
     }
+
+    logInfo << "Successfully reported " << reported_count << "/" << missing_files_for_report.size() << " removed files";
 
     return deleted_count;
 }
