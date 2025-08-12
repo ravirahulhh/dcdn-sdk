@@ -334,6 +334,10 @@ std::optional<FileResourceInfo> FileManager::GetUploadFileResource(const std::st
             uint64_t file_size = block_end - block_start;
             recordFileAccess(file_id, file_path, file_size);
             return FileResourceInfo{file_path, block_start};
+        } else {
+            // Report file index service remove all files with this file_hash
+            // even if node still have some blocks of this file
+            reportRemoveFile({0, FileStatus::AVAILABLE, "", 0, 0, "", file_hash, 0, 0, ""});
         }
 
         return std::nullopt;
