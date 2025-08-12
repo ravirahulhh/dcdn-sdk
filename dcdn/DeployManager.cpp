@@ -116,7 +116,7 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt) {
     // 构建部署任务
     DeployTask task;
     task.job_id = arg.job_id;
-    task.file_hash = arg.file_hash;       // 来自BlockInfo的文件哈希
+    task.file_hash = arg.file_hash;
     task.block_hash = arg.block_info.hash;     // 来自BlockInfo的区块哈希
     task.block_start = arg.block_info.start;   // 来自BlockInfo的区块起始
     task.block_end = arg.block_info.end;       // 来自BlockInfo的区块结束
