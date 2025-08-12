@@ -1,16 +1,49 @@
 #include "DeployManager.h"
 #include "MainManager.h"
 #include "Event.h"
-#include <plog/Log.h> // 你的日志库
+#include <plog/Log.h>
 #include <filesystem>
 #include <chrono>
 #include <thread>
 
+// ==== sqlite_orm 与 DeployStatus 枚举映射适配 START ====
+namespace sqlite_orm {
+
+template<>
+struct type_printer<dcdn::DeployStatus> : public integer_printer {};
+
+template<>
+struct statement_binder<dcdn::DeployStatus> {
+    int bind(sqlite3_stmt* stmt, int index, const dcdn::DeployStatus& value) {
+        return statement_binder<int>().bind(stmt, index, static_cast<int>(value));
+    }
+};
+
+template<>
+struct field_printer<dcdn::DeployStatus> {
+    std::string operator()(const dcdn::DeployStatus& t) const {
+        return std::to_string(static_cast<int>(t));
+    }
+};
+
+template<>
+struct row_extractor<dcdn::DeployStatus> {
+    static dcdn::DeployStatus extract(const char* row_value) {
+        return static_cast<dcdn::DeployStatus>(std::atoi(row_value));
+    }
+    static dcdn::DeployStatus extract(sqlite3_stmt* stmt, int columnIndex) {
+        return static_cast<dcdn::DeployStatus>(sqlite3_column_int(stmt, columnIndex));
+    }
+};
+
+} // namespace sqlite_orm
+// ==== sqlite_orm 与 DeployStatus 枚举映射适配 END ====
+
 NS_BEGIN(dcdn)
 
 DeployManager::DeployManager(MainManager* man) : BaseManager(man) {
-    mFileMgr = man->mFileMgr;
-    mDownloadMgr = man->mDownloadMgr;
+    mFileMgr = man->getFileManager();
+    mDownloadMgr = man->getDownloadManager();
 
     if (!mFileMgr) {
         LOGW << "FileManager instance is null in DeployManager";
@@ -190,8 +223,7 @@ void DeployManager::checkDownloadStatus() {
                 doneArg.url = task.url;
                 doneArg.file_path = task.download_path;
 
-                // 这里模拟封装事件
-                mFileMgr->PostEvent(std::make_shared<ArgEvent<FileDownloadDoneArg>>(EventType::FileDownloadDone, doneArg));
+                mFileMgr->PostEvent(std::make_shared<ArgEvent<FileDownloadDoneArg>>(EventType::FileDownloadDone, std::move(doneArg)));
 
                 updateDeployTaskStatus(task.job_id, DeployStatus::COMPLETED);
 
@@ -209,7 +241,7 @@ void DeployManager::checkDownloadStatus() {
                 FileDownloadFailedArg failArg;
                 failArg.file_path = task.download_path;
 
-                mFileMgr->PostEvent(std::make_shared<ArgEvent<FileDownloadFailedArg>>(EventType::FileDownloadFailed, failArg));
+                mFileMgr->PostEvent(std::make_shared<ArgEvent<FileDownloadFailedArg>>(EventType::FileDownloadFailed, std::move(failArg)));
 
                 updateDeployTaskStatus(task.job_id, DeployStatus::FAILED);
 

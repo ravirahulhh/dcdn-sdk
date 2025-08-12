@@ -18,8 +18,7 @@
 
 NS_BEGIN(dcdn)
 
-enum class DeployStatus {
-    PENDING = 0,
+enum class DeployStatus : int{
     DOWNLOADING = 1,
     COMPLETED = 2,
     FAILED = 3
@@ -32,7 +31,7 @@ struct DeployTask {
     uint64_t block_start = 0;
     uint64_t block_end = 0;
     std::string block_hash;
-    DeployStatus status = DeployStatus::PENDING;
+    DeployStatus status = DeployStatus::DOWNLOADING;
     std::string download_path;
     uint64_t create_time = 0;
     uint64_t update_time = 0;

@@ -18,6 +18,10 @@
 
 NS_BEGIN(dcdn)
 
+// 前向声明，避免编译错误
+class FileManager;
+class DownloadManager;
+
 struct MainManagerOption
 {
     std::string WorkDir;
@@ -25,7 +29,7 @@ struct MainManagerOption
     std::string ApiKey;
 };
 
-class MainManager: public BaseManager, public EventLoop<MainManager>
+class MainManager : public BaseManager, public EventLoop<MainManager>
 {
 public:
     using json = nlohmann::json;
@@ -58,7 +62,8 @@ public:
      * Fail is one of below:
      *   void (*fail)(int code)
      *   nullptr
-     * *************************/
+     *
+     *************************/
     template<class E, class Succ, class Fail>
     int AsyncApiPost(void** reqId, const char* uri, json& arg, E* ev, Succ succ, Fail fail)
     {
@@ -67,9 +72,20 @@ public:
         url += uri;
         return mApiClient->Do(reqId, {url, arg.dump(), "application/json"}, ev, succ, fail);
     }
+
     bool CancelAsyncApiPost(void* reqId)
     {
         return mApiClient->Cancel(reqId);
+    }
+
+    std::shared_ptr<FileManager> getFileManager() const
+    {
+        return std::dynamic_pointer_cast<FileManager>(mFileMgr);
+    }
+
+    std::shared_ptr<DownloadManager> getDownloadManager() const
+    {
+        return std::dynamic_pointer_cast<DownloadManager>(mDownloadMgr);
     }
 
 private:
