@@ -1,37 +1,49 @@
 #include "DeployManager.h"
-#include "MainManager.h"
-#include "Event.h"
+
 #include <plog/Log.h>
-#include <filesystem>
+
 #include <chrono>
+#include <filesystem>
 #include <thread>
+
+#include "Event.h"
+#include "MainManager.h"
 
 // ==== sqlite_orm 与 DeployStatus 枚举映射适配 START ====
 namespace sqlite_orm {
 
 template<>
-struct type_printer<dcdn::DeployStatus> : public integer_printer {};
+struct type_printer<dcdn::DeployStatus>: public integer_printer
+{
+};
 
 template<>
-struct statement_binder<dcdn::DeployStatus> {
-    int bind(sqlite3_stmt* stmt, int index, const dcdn::DeployStatus& value) {
+struct statement_binder<dcdn::DeployStatus>
+{
+    int bind(sqlite3_stmt* stmt, int index, const dcdn::DeployStatus& value)
+    {
         return statement_binder<int>().bind(stmt, index, static_cast<int>(value));
     }
 };
 
 template<>
-struct field_printer<dcdn::DeployStatus> {
-    std::string operator()(const dcdn::DeployStatus& t) const {
+struct field_printer<dcdn::DeployStatus>
+{
+    std::string operator()(const dcdn::DeployStatus& t) const
+    {
         return std::to_string(static_cast<int>(t));
     }
 };
 
 template<>
-struct row_extractor<dcdn::DeployStatus> {
-    static dcdn::DeployStatus extract(const char* row_value) {
+struct row_extractor<dcdn::DeployStatus>
+{
+    static dcdn::DeployStatus extract(const char* row_value)
+    {
         return static_cast<dcdn::DeployStatus>(std::atoi(row_value));
     }
-    static dcdn::DeployStatus extract(sqlite3_stmt* stmt, int columnIndex) {
+    static dcdn::DeployStatus extract(sqlite3_stmt* stmt, int columnIndex)
+    {
         return static_cast<dcdn::DeployStatus>(sqlite3_column_int(stmt, columnIndex));
     }
 };
@@ -41,9 +53,10 @@ struct row_extractor<dcdn::DeployStatus> {
 
 NS_BEGIN(dcdn)
 
-DeployManager::DeployManager(MainManager* man) : BaseManager(man) {
-    mFileMgr = man->getFileManager();
-    mDownloadMgr = man->getDownloadManager();
+DeployManager::DeployManager(MainManager* man): BaseManager(man)
+{
+    mFileMgr = std::dynamic_pointer_cast<FileManager>(man->getFileManager());
+    mDownloadMgr = std::dynamic_pointer_cast<DownloadManager>(man->getDownloadManager());
 
     if (!mFileMgr) {
         LOGW << "FileManager instance is null in DeployManager";
@@ -63,12 +76,14 @@ DeployManager::DeployManager(MainManager* man) : BaseManager(man) {
     resubmitDownloadTasks();
 }
 
-DeployManager::~DeployManager() {
+DeployManager::~DeployManager()
+{
     std::lock_guard<std::mutex> lock(mTaskMutex);
     mJobToTaskMap.clear();
 }
 
-int DeployManager::createTable() {
+int DeployManager::createTable()
+{
     auto db = getDB();
     if (!db) {
         LOGE << "Failed to get database connection";
@@ -84,7 +99,8 @@ int DeployManager::createTable() {
     }
 }
 
-DeployStoragePtr DeployManager::getDB() {
+DeployStoragePtr DeployManager::getDB()
+{
     if (!mDB) {
         try {
             auto storage = std::make_shared<DeployStorage>(makeDeployStorage(dbPath().string()));
@@ -97,7 +113,8 @@ DeployStoragePtr DeployManager::getDB() {
     return mDB;
 }
 
-void DeployManager::run() {
+void DeployManager::run()
+{
     LOGI << "DeployManager started";
     while (true) {
         checkDownloadStatus();
@@ -106,7 +123,8 @@ void DeployManager::run() {
     LOGI << "DeployManager stopped";
 }
 
-void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt) {
+void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
+{
     LOGI << "Received DeployMsg event";
 
     auto* e = static_cast<ArgEvent<DeployMsgArg>*>(evt.get());
@@ -188,7 +206,8 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt) {
     LOGI << "Deploy task initialized (job_id: " << arg.job_id << ", task_id: " << taskId << ")";
 }
 
-void DeployManager::checkDownloadStatus() {
+void DeployManager::checkDownloadStatus()
+{
     auto tasks = loadDownloadingTasks();
     if (tasks.empty()) {
         return;
@@ -223,7 +242,8 @@ void DeployManager::checkDownloadStatus() {
                 doneArg.url = task.url;
                 doneArg.file_path = task.download_path;
 
-                mFileMgr->PostEvent(std::make_shared<ArgEvent<FileDownloadDoneArg>>(EventType::FileDownloadDone, std::move(doneArg)));
+                mFileMgr->PostEvent(
+                    std::make_shared<ArgEvent<FileDownloadDoneArg>>(EventType::FileDownloadDone, std::move(doneArg)));
 
                 updateDeployTaskStatus(task.job_id, DeployStatus::COMPLETED);
 
@@ -241,7 +261,9 @@ void DeployManager::checkDownloadStatus() {
                 FileDownloadFailedArg failArg;
                 failArg.file_path = task.download_path;
 
-                mFileMgr->PostEvent(std::make_shared<ArgEvent<FileDownloadFailedArg>>(EventType::FileDownloadFailed, std::move(failArg)));
+                mFileMgr->PostEvent(
+                    std::make_shared<ArgEvent<FileDownloadFailedArg>>(
+                        EventType::FileDownloadFailed, std::move(failArg)));
 
                 updateDeployTaskStatus(task.job_id, DeployStatus::FAILED);
 
@@ -264,9 +286,11 @@ void DeployManager::checkDownloadStatus() {
     }
 }
 
-bool DeployManager::saveDeployTask(const DeployTask& task) {
+bool DeployManager::saveDeployTask(const DeployTask& task)
+{
     auto db = getDB();
-    if (!db) return false;
+    if (!db)
+        return false;
 
     try {
         db->replace(task);
@@ -277,19 +301,17 @@ bool DeployManager::saveDeployTask(const DeployTask& task) {
     }
 }
 
-bool DeployManager::updateDeployTaskStatus(const std::string& job_id, DeployStatus status) {
+bool DeployManager::updateDeployTaskStatus(const std::string& job_id, DeployStatus status)
+{
     auto db = getDB();
-    if (!db) return false;
+    if (!db)
+        return false;
 
     try {
         using namespace sqlite_orm;
         db->update_all(
-            set(
-                c(&DeployTask::status) = status,
-                c(&DeployTask::update_time) = getCurrentTimestamp()
-            ),
-            where(c(&DeployTask::job_id) == job_id)
-        );
+            set(c(&DeployTask::status) = status, c(&DeployTask::update_time) = getCurrentTimestamp()),
+            where(c(&DeployTask::job_id) == job_id));
         return true;
     } catch (const std::exception& e) {
         LOGE << "Update task status failed (job_id: " << job_id << "): " << e.what();
@@ -297,22 +319,23 @@ bool DeployManager::updateDeployTaskStatus(const std::string& job_id, DeployStat
     }
 }
 
-std::vector<DeployTask> DeployManager::loadDownloadingTasks() {
+std::vector<DeployTask> DeployManager::loadDownloadingTasks()
+{
     auto db = getDB();
-    if (!db) return {};
+    if (!db)
+        return {};
 
     try {
         using namespace sqlite_orm;
-        return db->get_all<DeployTask>(
-            where(c(&DeployTask::status) == DeployStatus::DOWNLOADING)
-        );
+        return db->get_all<DeployTask>(where(c(&DeployTask::status) == DeployStatus::DOWNLOADING));
     } catch (const std::exception& e) {
         LOGE << "Load downloading tasks failed: " << e.what();
         return {};
     }
 }
 
-void DeployManager::resubmitDownloadTasks() {
+void DeployManager::resubmitDownloadTasks()
+{
     LOGI << "Resubmitting incomplete deploy tasks";
     if (!mFileMgr || !mDownloadMgr) {
         LOGW << "Core managers unavailable, skip task resubmission";
@@ -351,7 +374,8 @@ void DeployManager::resubmitDownloadTasks() {
     }
 }
 
-void DeployManager::reportToServer(const std::string& job_id, bool success) {
+void DeployManager::reportToServer(const std::string& job_id, bool success)
+{
     auto mainMgr = MainManager::Singlet();
     if (!mainMgr) {
         LOGW << "MainManager instance is null, cannot report job " << job_id;
@@ -368,10 +392,7 @@ void DeployManager::reportToServer(const std::string& job_id, bool success) {
         json event;
         event["peer_id"] = peer_id;
         event["type"] = "deploy_result";
-        event["kvs"] = {
-            {"job_id", job_id},
-            {"code", success ? "0" : "1"}
-        };
+        event["kvs"] = {{"job_id", job_id}, {"code", success ? "0" : "1"}};
 
         json request;
         request["events"] = {event};

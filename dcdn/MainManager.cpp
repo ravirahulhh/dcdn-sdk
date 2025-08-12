@@ -169,14 +169,14 @@ void MainManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
     }
 }
 
-std::shared_ptr<FileManager> MainManager::getFileManager() const
+std::shared_ptr<BaseManager> MainManager::getFileManager() const
 {
-    return std::dynamic_pointer_cast<FileManager>(mFileMgr);
+    return mFileMgr;
 }
 
-std::shared_ptr<DownloadManager> MainManager::getDownloadManager() const
+std::shared_ptr<BaseManager> MainManager::getDownloadManager() const
 {
-    return std::dynamic_pointer_cast<DownloadManager>(mDownloadMgr);
+    return mDownloadMgr;
 }
 
 NS_END
