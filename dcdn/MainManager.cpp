@@ -44,6 +44,7 @@ MainManager::MainManager(): BaseManager(this)
     dcdn::FileManagerOption fmOpt; // TODO: load from configuration
     mFileMgr = std::make_shared<FileManager>(this, fileMgrOpt);
     mUploadMgr = std::make_shared<UploadManager>(this);
+    mDeployMgr = std::make_shared<DeployManager>(this);
     // mDownloadMgr = std::make_shared<DownloadManager>(this);
 
     RegisterGlobalHandler(EventType::AsyncApiRequest,
@@ -155,8 +156,8 @@ void MainManager::handleUploadMsgEvent(std::shared_ptr<Event> evt)
 
 void MainManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
 {
-    if (mDownloadMgr) {
-        // static_cast<DownloadManager*>(mDownloadMgr.get())->PostEvent(evt);
+    if (mDeployMgr) {
+        static_cast<DeployManager*>(mDeployMgr.get())->PostEvent(evt);
     }
 }
 

@@ -204,7 +204,7 @@ void DeployManager::checkDownloadStatus() {
                 doneArg.file_path = task.download_path;
 
                 // 通知FileManager处理完成文件
-                postEvent(EventType::FileDownloadDone, doneArg);
+                mFileMgr->postEvent(EventType::FileDownloadDone, doneArg);
 
                 // 更新任务状态并清理映射
                 updateDeployTaskStatus(task.job_id, DeployStatus::COMPLETED);
@@ -225,7 +225,7 @@ void DeployManager::checkDownloadStatus() {
                 failArg.file_path = task.download_path;
 
                 // 通知FileManager处理失败文件
-                postEvent(EventType::FileDownloadFailed, failArg);
+                 mFileMgr->postEvent(EventType::FileDownloadFailed, failArg);
 
                 // 更新任务状态并清理映射
                 updateDeployTaskStatus(task.job_id, DeployStatus::FAILED);
@@ -343,14 +343,27 @@ void DeployManager::reportToServer(const std::string& job_id, bool success) {
         logWarn << "MainManager instance is null, cannot report job " << job_id;
         return;
     }
-
     try {
         json report;
-        report["job_id"] = job_id;
-        report["code"] = success ? 1 : -1;  // 1:成功，-1:失败
+        std::string peer_id = mMan->Cfg().PeerId();
+        if (peer_id.empty()) {
+            logWarn << "peer_id is empty, using default";
+            peer_id = "unknown_peer";
+        }
+
+        json event;
+        event["peer_id"] = peer_id;
+        event["type"] = "deploy_result";
+        event["kvs"] = {
+            {"job_id", job_id},
+            {"code", success ? "0" : "1"},
+        };
+
+        json request;
+        request["events"] = {event};
 
         json response;
-        long httpCode = mainMgr->ApiPost(mClient, "/api/v1/deploy/report", report, response);
+        long httpCode = mainMgr->ApiPost(mClient, "/api/v1/report_event", report, response);
         if (httpCode != 200) {
             logWarn << "Report failed for job " << job_id << " (HTTP code: " << httpCode << ")";
         } else {

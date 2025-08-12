@@ -112,6 +112,7 @@ private:
     std::shared_ptr<BaseManager> mFileMgr;
     std::shared_ptr<BaseManager> mUploadMgr;
     std::shared_ptr<BaseManager> mDownloadMgr;
+    std::shared_ptr<BaseManager> mDeployMgr;
 };
 
 NS_END
