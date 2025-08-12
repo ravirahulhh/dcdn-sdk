@@ -21,6 +21,7 @@ libTargets = \
 libdcdnObjs = \
 			   Cert.o \
 			   Config.o \
+			   EventLoop.o \
 			   WebSocketManager.o \
 			   WebRtcManager.o \
 			   FileManager.o \

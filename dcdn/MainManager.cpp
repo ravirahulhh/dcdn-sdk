@@ -46,7 +46,12 @@ MainManager::MainManager(): BaseManager(this)
     mUploadMgr = std::make_shared<UploadManager>(this);
     // mDownloadMgr = std::make_shared<DownloadManager>(this);
 
-    registerHandler(EventType::AsyncApiRequest, &MainManager::handleAsyncApiRequestEvent);
+    RegisterGlobalHandler(EventType::AsyncApiRequest,
+            [](std::shared_ptr<Event> evt, void* userData) {
+                auto cli = static_cast<ApiClient*>(userData);
+                cli->HandleAsyncApiRequestEvent(evt);
+            }, mApiClient.get());
+
     registerHandler(EventType::UploadMsg, &MainManager::handleUploadMsgEvent);
     registerHandler(EventType::DeployMsg, &MainManager::handleDeployMsgEvent);
 }
