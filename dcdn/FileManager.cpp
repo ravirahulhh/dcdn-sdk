@@ -276,7 +276,7 @@ std::string FileManager::GetPathByBlockHash(const std::string& block_hash, bool 
     }
 
     try {
-        std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
+        std::lock_guard<std::mutex> lockFOpt(mFileDBOptMutex);
         auto files = db->stor.select(
             columns(&FileItem::id, &FileItem::path, &FileItem::block_end, &FileItem::block_start),
             where(c(&FileItem::block_hash) == block_hash and c(&FileItem::status) == FileStatus::AVAILABLE),
@@ -316,7 +316,7 @@ std::optional<FileResourceInfo> FileManager::GetUploadFileResource(const std::st
     }
 
     try {
-        std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
+        std::lock_guard<std::mutex> lockFOpt(mFileDBOptMutex);
         auto files = db->stor.select(
             columns(&FileItem::id, &FileItem::path, &FileItem::block_start, &FileItem::block_end),
             where(
@@ -353,7 +353,7 @@ std::string FileManager::NewDownloadPath(uint64_t file_size)
     std::string file_name = newFileName();
     tmp_path.append(file_name);
     {
-        std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
+        std::lock_guard<std::mutex> lockFOpt(mFileDBOptMutex);
         if (!std::filesystem::exists(tmp_path)) {
             std::ofstream ofs(tmp_path);
             if (!ofs) {
@@ -449,7 +449,7 @@ void FileManager::FlushAccessRecords()
 
     try {
         // Batch update file access times in database
-        std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
+        std::lock_guard<std::mutex> lockFOpt(mFileDBOptMutex);
         for (const auto& node : dirty_nodes) {
             db->stor.update_all(
                 set(c(&FileItem::last_access) = node.last_access), where(c(&FileItem::id) == node.file_id));
@@ -482,7 +482,7 @@ void FileManager::loadAccessRecordsFromDB()
 
     try {
         // Query all file records, sorted by last access time in descending order
-        std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
+        std::lock_guard<std::mutex> lockFOpt(mFileDBOptMutex);
         auto files = db->stor.select(
             columns(
                 &FileItem::id, &FileItem::path, &FileItem::last_access, &FileItem::block_end, &FileItem::block_start),
@@ -538,7 +538,7 @@ uint64_t FileManager::calculateTotalStorageSize()
     try {
         // Calculate total size of all files
         // First get all file block information, then calculate sum
-        std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
+        std::lock_guard<std::mutex> lockFOpt(mFileDBOptMutex);
         auto files = db->stor.select(columns(&FileItem::block_end, &FileItem::block_start));
 
         uint64_t total_size = 0;
@@ -602,7 +602,7 @@ void FileManager::removeLRUFiles(uint64_t current_size, uint64_t target_size)
                     try {
                         auto db = getDB();
                         if (db) {
-                            std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
+                            std::lock_guard<std::mutex> lockFOpt(mFileDBOptMutex);
                             auto result = db->stor.select(
                                 columns(&FileItem::block_end, &FileItem::block_start),
                                 where(c(&FileItem::id) == file_id),
@@ -670,7 +670,7 @@ void FileManager::removeLRUFiles(uint64_t current_size, uint64_t target_size)
                 try {
                     auto db = getDB();
                     if (db) {
-                        std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
+                        std::lock_guard<std::mutex> lockFOpt(mFileDBOptMutex);
                         auto result = db->stor.select(
                             columns(&FileItem::path, &FileItem::block_end, &FileItem::block_start),
                             where(c(&FileItem::id) == file_id),
@@ -696,7 +696,7 @@ void FileManager::removeLRUFiles(uint64_t current_size, uint64_t target_size)
 
             // Lock when deleting physical files to prevent conflicts with scan operations
             {
-                std::lock_guard<std::mutex> file_lockFOpt(mFileOperationMutex);
+                std::lock_guard<std::mutex> file_lockFOpt(mFileDBOptMutex);
                 if (std::filesystem::exists(file_path)) {
                     std::filesystem::remove(file_path);
                     actual_freed += file_size;
@@ -708,7 +708,7 @@ void FileManager::removeLRUFiles(uint64_t current_size, uint64_t target_size)
             // Delete record from database
             try {
                 if (db) {
-                    std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
+                    std::lock_guard<std::mutex> lockFOpt(mFileDBOptMutex);
                     db->stor.remove<FileItem>(file_id);
                 }
             } catch (const std::exception& e) {
@@ -806,7 +806,7 @@ void FileManager::handleDownloadFileDone(std::shared_ptr<Event> evt)
 
     {
         // try move file from tmp to file dir
-        std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
+        std::lock_guard<std::mutex> lockFOpt(mFileDBOptMutex);
         std::string tmp_file_path = arg->file_path;
         // handle empty path or file not exists
         if (tmp_file_path.empty() || !std::filesystem::exists(tmp_file_path)) {
@@ -906,7 +906,7 @@ void FileManager::handleDownloadFileFailed(std::shared_ptr<Event> evt)
     std::string tmp_path_str = e->Arg().file_path;
     std::filesystem::path tmp_file_path(tmp_path_str);
     {
-        std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
+        std::lock_guard<std::mutex> lockFOpt(mFileDBOptMutex);
         // Delete failed download file
 
         if (std::filesystem::exists(tmp_file_path)) {
@@ -951,7 +951,7 @@ void FileManager::handleRemoveFile(std::shared_ptr<Event> evt)
     }
     try {
         // Query file records to delete
-        std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
+        std::lock_guard<std::mutex> lockFOpt(mFileDBOptMutex);
         auto files = db->stor.select(
             columns(&FileItem::id, &FileItem::file_hash, &FileItem::block_hash),
             where(c(&FileItem::block_hash) == blockHash and c(&FileItem::status) == FileStatus::AVAILABLE));
@@ -1104,7 +1104,7 @@ void FileManager::runReportThread()
 
             // Query files that haven't been reported for the longest time, sorted by last_report in ascending order
             // If last_report is empty or 0, prioritize reporting
-            std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
+            std::lock_guard<std::mutex> lockFOpt(mFileDBOptMutex);
             auto files = db->stor.select(
                 columns(
                     &FileItem::id,
@@ -1222,7 +1222,7 @@ void FileManager::scanFilesystemAndDatabase(
     }
 
     // Lock for consistency scanning to prevent race conditions with file create/delete operations
-    std::lock_guard<std::mutex> file_lockFOpt(mFileOperationMutex);
+    std::lock_guard<std::mutex> file_lockFOpt(mFileDBOptMutex);
 
     logDebug << "Acquiring file operation lock for filesystem and database scan";
 
@@ -1365,7 +1365,7 @@ uint64_t FileManager::cleanMissingFiles(
     // Batch delete missing file records from database
     uint64_t deleted_count = 0;
     if (!missing_file_ids.empty()) {
-        std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
+        std::lock_guard<std::mutex> lockFOpt(mFileDBOptMutex);
         try {
             // Use sqlite_orm batch delete: WHERE id IN (?, ?, ?, ...)
             // This only requires one database operation to delete all records
@@ -1573,7 +1573,7 @@ void FileManager::cleanStaleDownloads()
 
                 for (const auto& file_path : deleted_files_for_db) {
                     try {
-                        std::lock_guard<std::mutex> lockFOpt(mFileOperationMutex);
+                        std::lock_guard<std::mutex> lockFOpt(mFileDBOptMutex);
                         // Query matching download records
                         auto download_records = db->stor.select(
                             &FileItem::id,

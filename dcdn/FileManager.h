@@ -196,7 +196,7 @@ private:
     // File operation synchronization lock - prevents race conditions between file create/delete and scan cleanup
     // This lock protects: 1. Orphan file scanning and deletion 2. LRU file deletion 3. Expired download file cleanup
     // Ensures no concurrent file create/delete operations during filesystem state scanning
-    std::mutex mFileOperationMutex;
+    std::mutex mFileDBOptMutex;
 
     // Timer-related
     std::chrono::steady_clock::time_point mLastFlushTime;
