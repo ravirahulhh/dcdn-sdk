@@ -191,8 +191,8 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
         opts.rangeEnd = task.block_end;
     }
 
-    std::string taskId = mDownloadMgr->addDownloadTask(task.url, task.file_hash, opts);
-    if (taskId.empty()) {
+    uint64_t taskId  = mDownloadMgr->addDownloadTask(task.url, task.file_hash, opts);
+    if (taskId == 0) {
         LOGW << "Failed to create download task (job_id: " << arg.job_id << ")";
         updateDeployTaskStatus(arg.job_id, DeployStatus::FAILED);
         reportToServer(arg.job_id, false);
@@ -219,7 +219,7 @@ void DeployManager::checkDownloadStatus()
     }
 
     for (const auto& task : tasks) {
-        std::string taskId;
+        uint64_t taskId = 0;
         {
             std::lock_guard<std::mutex> lock(mTaskMutex);
             auto it = mJobToTaskMap.find(task.job_id);
@@ -362,8 +362,8 @@ void DeployManager::resubmitDownloadTasks()
             opts.rangeEnd = task.block_end;
         }
 
-        std::string taskId = mDownloadMgr->addDownloadTask(task.url, task.file_hash, opts);
-        if (taskId.empty()) {
+        uint64_t taskId = mDownloadMgr->addDownloadTask(task.url, task.file_hash, opts);
+        if (taskId == 0) {
             LOGW << "Failed to resubmit task " << task.job_id;
             updateDeployTaskStatus(task.job_id, DeployStatus::FAILED);
         } else {

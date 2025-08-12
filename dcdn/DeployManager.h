@@ -103,7 +103,7 @@ private:
     std::shared_ptr<DownloadManager> mDownloadMgr;
     util::HttpClient mClient;
     std::mutex mTaskMutex;
-    std::unordered_map<std::string, std::string> mJobToTaskMap;
+    std::unordered_map<std::string, uint64_t> mJobToTaskMap;
 };
 
 NS_END
