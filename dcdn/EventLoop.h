@@ -12,8 +12,17 @@
 
 NS_BEGIN(dcdn)
 
+class BaseEventLoop
+{
+public:
+    typedef void (*GlobalHandler)(std::shared_ptr<Event> evt, void* userData);
+    void RegisterGlobalHandler(int etype, GlobalHandler hdlr, void* userData);
+protected:
+    void globalHandle(std::shared_ptr<Event> evt);
+};
+
 template<class T>
-class EventLoop
+class EventLoop: public BaseEventLoop
 {
 public:
     typedef void (T::*Handler)(std::shared_ptr<Event> evt);
@@ -34,13 +43,7 @@ protected:
     {
         auto evt = takeEvent(duration);
         if (evt) {
-            auto it = mHandlers.find(evt->Type());
-            if (it != mHandlers.end()) {
-                try {
-                    (static_cast<T*>(this)->*(it->second))(evt);
-                } catch (...) {
-                }
-            }
+            handle(evt);
         }
     }
     void waitAllEvents(std::chrono::milliseconds duration)
@@ -49,13 +52,7 @@ protected:
         while (!evts.empty()) {
             auto evt = evts.front();
             evts.pop_front();
-            auto it = mHandlers.find(evt->Type());
-            if (it != mHandlers.end()) {
-                try {
-                    (static_cast<T*>(this)->*(it->second))(evt);
-                } catch (...) {
-                }
-            }
+            handle(evt);
         }
     }
     std::shared_ptr<Event> takeEvent(std::chrono::milliseconds duration)
@@ -89,6 +86,21 @@ protected:
         return evts;
     }
 
+    void handle(std::shared_ptr<Event> evt)
+    {
+        auto it = mHandlers.find(evt->Type());
+        if (it != mHandlers.end()) {
+            try {
+                (static_cast<T*>(this)->*(it->second))(evt);
+            } catch (std::exception& excp) {
+                logWarn << "handle event:" << evt->Type() << " exception:" << excp.what();
+            } catch (...) {
+                logWarn << "handle event:" << evt->Type() << " unknown exception";
+            }
+        } else {
+            globalHandle(evt);
+        }
+    }
 private:
     std::mutex mMtx;
     std::condition_variable mCv;
