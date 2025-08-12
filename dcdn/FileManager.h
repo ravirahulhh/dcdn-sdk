@@ -28,9 +28,6 @@
 
 NS_BEGIN(dcdn)
 
-using Url = std::string;
-using FileDescriptor = std::variant<BlockInfo, Url>;
-
 enum class FileStatus
 {
     DOWNLOADING = 1,
@@ -46,8 +43,8 @@ struct FileItem
     uint64_t last_report;
     std::string created_at;
     std::string file_hash;
-    uint64_t block_start;
-    uint64_t block_end;
+    uint64_t block_start = 0;
+    uint64_t block_end = 0;
     std::string block_hash;
 };
 
@@ -69,7 +66,6 @@ struct FileManagerOption
     uint64_t MaxStorageSize = uint64_t(20) * 1024 * 1024 * 1024; // 20GB
     std::uint8_t LRUUpperBoundPercent = 90; // 90% of max storage size
     std::uint8_t LRUTargetPercent = 70; // 70% of max storage size
-    std::string PCDNReportUrl = "http://localhost:8080";
     uint32_t AccessRecordFlushInterval = 60; // Access record flush interval to database (seconds)
     uint32_t LRUCheckInterval = 300; // LRU check interval (seconds)
     uint32_t ReportInterval = 60 * 60; // File reporting interval, 1 hour
@@ -179,10 +175,11 @@ private:
         return generate_uuid_v4();
     }
 
+    void handleAsyncApiRequestEvent(std::shared_ptr<Event> evt);
+
 private:
     FileManagerOption mOpt;
     std::shared_ptr<StorageRef> mDB;
-    util::HttpClient mClient;
 
     // LRU-related member variables - using file ID as key
     std::mutex mLRUMutex;
