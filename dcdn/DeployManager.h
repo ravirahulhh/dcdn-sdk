@@ -49,7 +49,6 @@ public:
 private:
     // 事件处理函数注册（友元声明）
     friend class EventLoop<DeployManager>;
-    void registerHandlers();
 
     // 数据库初始化
     int createTable();
