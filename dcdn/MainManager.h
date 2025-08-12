@@ -29,7 +29,7 @@ struct MainManagerOption
     std::string ApiKey;
 };
 
-class MainManager : public BaseManager, public EventLoop<MainManager>
+class MainManager: public BaseManager, public EventLoop<MainManager>
 {
 public:
     using json = nlohmann::json;
@@ -78,15 +78,8 @@ public:
         return mApiClient->Cancel(reqId);
     }
 
-    std::shared_ptr<FileManager> getFileManager() const
-    {
-        return std::dynamic_pointer_cast<FileManager>(mFileMgr);
-    }
-
-    std::shared_ptr<DownloadManager> getDownloadManager() const
-    {
-        return std::dynamic_pointer_cast<DownloadManager>(mDownloadMgr);
-    }
+    std::shared_ptr<FileManager> getFileManager() const;
+    std::shared_ptr<DownloadManager> getDownloadManager() const;
 
 private:
     void run();

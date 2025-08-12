@@ -4,12 +4,12 @@
 
 #include <filesystem>
 
+#include "DeployManager.h"
 #include "DownloadManager.h"
 #include "FileManager.h"
 #include "UploadManager.h"
 #include "WebRtcManager.h"
 #include "WebSocketManager.h"
-#include "DeployManager.h"
 #include "util/HttpDownloader.h"
 
 NS_BEGIN(dcdn)
@@ -48,11 +48,13 @@ MainManager::MainManager(): BaseManager(this)
     mDeployMgr = std::make_shared<DeployManager>(this);
     // mDownloadMgr = std::make_shared<DownloadManager>(this);
 
-    RegisterGlobalHandler(EventType::AsyncApiRequest,
-            [](std::shared_ptr<Event> evt, void* userData) {
-                auto cli = static_cast<ApiClient*>(userData);
-                cli->HandleAsyncApiRequestEvent(evt);
-            }, mApiClient.get());
+    RegisterGlobalHandler(
+        EventType::AsyncApiRequest,
+        [](std::shared_ptr<Event> evt, void* userData) {
+            auto cli = static_cast<ApiClient*>(userData);
+            cli->HandleAsyncApiRequestEvent(evt);
+        },
+        mApiClient.get());
 
     registerHandler(EventType::UploadMsg, &MainManager::handleUploadMsgEvent);
     registerHandler(EventType::DeployMsg, &MainManager::handleDeployMsgEvent);
@@ -115,7 +117,11 @@ void MainManager::login()
     msg["device_id"] = mOpt.DeviceId;
     msg["apikey"] = mOpt.ApiKey;
 
-    AsyncApiPost(nullptr, "/api/v1/login", msg, this,
+    AsyncApiPost(
+        nullptr,
+        "/api/v1/login",
+        msg,
+        this,
         [this](json& res) {
             try {
                 auto data = res["data"];
@@ -124,7 +130,8 @@ void MainManager::login()
             } catch (std::exception& excp) {
             } catch (...) {
             }
-        }, nullptr);
+        },
+        nullptr);
 }
 
 void MainManager::run()
@@ -160,6 +167,16 @@ void MainManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
     if (mDeployMgr) {
         static_cast<DeployManager*>(mDeployMgr.get())->PostEvent(evt);
     }
+}
+
+std::shared_ptr<FileManager> MainManager::getFileManager() const
+{
+    return std::dynamic_pointer_cast<FileManager>(mFileMgr);
+}
+
+std::shared_ptr<DownloadManager> MainManager::getDownloadManager() const
+{
+    return std::dynamic_pointer_cast<DownloadManager>(mDownloadMgr);
 }
 
 NS_END
