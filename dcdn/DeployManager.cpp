@@ -90,9 +90,7 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt) {
         return;
     }
 
-    // 校验下载源（URL必须存在，哈希至少存在一个）
-    bool hasValidHash = !arg.file_hash.empty() || !arg.block_hash.empty();
-    if (!hasValidHash || arg.url.empty()) {
+    if (arg.file_hash.empty() || arg.url.empty()) {
         logWarn << "DeployMsg invalid: missing url or hash (job_id: " << arg.job_id << ")";
         reportToServer(arg.job_id, false);
         return;
