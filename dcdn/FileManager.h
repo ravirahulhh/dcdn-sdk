@@ -105,6 +105,7 @@ public:
 private:
     void run();
     std::shared_ptr<StorageRef> getDB();
+    int initDB();
     int createTable();
 
     void handleRemoveFile(std::shared_ptr<Event> evt);

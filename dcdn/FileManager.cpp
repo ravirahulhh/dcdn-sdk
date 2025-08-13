@@ -132,6 +132,10 @@ int FileManager::Init(const FileManagerOption& opt)
     }
 
     logDebug << "FileManager init with db path: " << dbPath().string();
+    if (initDB() != 0) {
+        logError << "Failed to initialize database";
+        return -1;
+    }
     if (auto db = getDB()) {
         try {
             db->stor.sync_schema();
@@ -229,18 +233,26 @@ void FileManager::run()
 
 std::shared_ptr<StorageRef> FileManager::getDB()
 {
+    return mDB;
+}
+
+int FileManager::initDB()
+{
     if (!mDB) {
         try {
             std::filesystem::path dbFile(mMan->Option().WorkDir);
             dbFile.append("files.db");
             mDB = std::make_shared<StorageRef>(dbFile);
+            return 0;
         } catch (std::exception& excp) {
             logWarn << "create config.db exception: " << excp.what();
+            return -1;
         } catch (...) {
             logWarn << "create config.db unknown exception";
+            return -1;
         }
     };
-    return mDB;
+    return 0;
 }
 
 int FileManager::createTable()
@@ -758,10 +770,17 @@ void FileManager::reportHaveFiles(const std::vector<std::tuple<FileItem, std::st
             logWarn << "File item has empty block or file hash, skipping report";
             continue;
         }
+        if (item.blockStart > item.blockEnd) {
+            logWarn << "Invalid block range for file item, skipping report";
+            continue;
+        }
         auto it = jsonFiles.find(item.fileHash);
         if (it != jsonFiles.end()) {
             // If file already exists, update block information
             it->second.addBlock(item.blockStart, item.blockEnd, item.blockHash);
+            if (item.fileHash == item.blockHash) {
+                it->second.size = item.blockEnd - item.blockStart;
+            }
         } else {
             // Create new file information
             JsonFileInfo fileInfo(item.fileHash, url, 0);
