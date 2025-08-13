@@ -69,23 +69,27 @@ NS_BEGIN(dcdn)
 
 auto createFileStorage(const std::string& filename)
 {
-    auto storage = make_storage(
-        filename,
-        make_index("idx_file_start", &FileItem::fileHash, &FileItem::blockStart),
-        make_index("idx_last_report", &FileItem::lastReport),
-        make_table(
-            "files",
-            make_column("id", &FileItem::id, primary_key().autoincrement()),
-            make_column("blockHash", &FileItem::blockHash),
-            make_column("fileHash", &FileItem::fileHash),
-            make_column("filePath", &FileItem::path),
-            make_column("status", &FileItem::status),
-            make_column("blockStart", &FileItem::blockStart),
-            make_column("blockEnd", &FileItem::blockEnd),
-            make_column("lastAccess", &FileItem::lastAccess),
-            make_column("lastReport", &FileItem::lastReport),
-            make_column("createdAt", &FileItem::createdAt, default_value("currentTimeSTAMP"))));
-    return storage;
+    try {
+        auto storage = make_storage(
+            filename,
+            make_index("idx_file_start", &FileItem::fileHash, &FileItem::blockStart),
+            make_index("idx_last_report", &FileItem::lastReport),
+            make_table(
+                "files",
+                make_column("id", &FileItem::id, primary_key().autoincrement()),
+                make_column("block_hash", &FileItem::blockHash),
+                make_column("file_hash", &FileItem::fileHash),
+                make_column("file_path", &FileItem::path),
+                make_column("status", &FileItem::status),
+                make_column("block_start", &FileItem::blockStart),
+                make_column("block_end", &FileItem::blockEnd),
+                make_column("last_access", &FileItem::lastAccess),
+                make_column("last_report", &FileItem::lastReport),
+                make_column("created_at", &FileItem::createdAt, default_value("currentTimeSTAMP"))));
+        return storage;
+    } catch (const std::exception& e) {
+        logWarn << "Failed to create file storage: " << e.what();
+    }
 }
 
 class StorageRef: public StorageRefImpl<createFileStorage>
@@ -268,15 +272,15 @@ int FileManager::createTable()
     const char* sql = R"(
         CREATE TABLE IF NOT EXISTS files (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        blockHash TEXT NOT NULL,
-        fileHash TEXT NOT NULL,
-        filePath TEXT NOT NULL,
+        block_hash TEXT NOT NULL,
+        file_hash TEXT NOT NULL,
+        file_path TEXT NOT NULL,
         status INTEGER NOT NULL DEFAULT 1,
-        blockStart INTEGER,
-        blockEnd INTEGER,
-        lastAccess INTEGER,
-        lastReport INTEGER,
-        create_time DATETIME DEFAULT currentTimeSTAMP
+        block_start INTEGER,
+        block_end INTEGER,
+        last_access INTEGER,
+        last_report INTEGER,
+        create_at DATETIME DEFAULT currentTimeSTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_file_start ON files(fileHash, blockStart);
         CREATE INDEX IF NOT EXISTS idx_last_access ON files(lastAccess);
@@ -861,6 +865,15 @@ void FileManager::handleDownloadFileDone(std::shared_ptr<Event> evt)
         if (std::filesystem::exists(targetPath)) {
             logWarn << "File already exists at target path: " << targetPath;
             std::filesystem::remove(tmpFilePath); // Clean up temp file
+            // delete from db
+            try {
+                db->stor.remove_all<FileItem>(
+                    where(c(&FileItem::path) == tmpFilePath and c(&FileItem::status) == FileStatus::DOWNLOADING));
+            } catch (const std::exception& e) {
+                logWarn << "Failed to remove download file record: " << e.what();
+            } catch (...) {
+                logWarn << "Unknown exception occurred while removing download file record";
+            }
             return;
         }
 
