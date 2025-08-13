@@ -132,6 +132,10 @@ int FileManager::Init(const FileManagerOption& opt)
     }
 
     logDebug << "FileManager init with db path: " << dbPath().string();
+    if (initDB() != 0) {
+        logError << "Failed to initialize database";
+        return -1;
+    }
     if (auto db = getDB()) {
         try {
             db->stor.sync_schema();
@@ -229,18 +233,26 @@ void FileManager::run()
 
 std::shared_ptr<StorageRef> FileManager::getDB()
 {
+    return mDB;
+}
+
+int FileManager::initDB()
+{
     if (!mDB) {
         try {
             std::filesystem::path dbFile(mMan->Option().WorkDir);
             dbFile.append("files.db");
             mDB = std::make_shared<StorageRef>(dbFile);
+            return 0;
         } catch (std::exception& excp) {
             logWarn << "create config.db exception: " << excp.what();
+            return -1;
         } catch (...) {
             logWarn << "create config.db unknown exception";
+            return -1;
         }
     };
-    return mDB;
+    return 0;
 }
 
 int FileManager::createTable()
