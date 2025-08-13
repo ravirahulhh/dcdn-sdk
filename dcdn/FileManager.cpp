@@ -131,6 +131,7 @@ int FileManager::Init(const FileManagerOption& opt)
         }
     }
 
+    logDebug << "FileManager init with db path: " << dbPath().string();
     if (auto db = getDB()) {
         try {
             db->stor.sync_schema();
@@ -140,19 +141,16 @@ int FileManager::Init(const FileManagerOption& opt)
         }
     }
 
-    // config db log
-    sqlite3_config(
-        SQLITE_CONFIG_LOG,
-        [](void*, int err_code, const char* msg) { std::cerr << "SQLite Error [" << err_code << "]: " << msg << "\n"; },
-        nullptr);
-
     // Load file access records from database to LRU cache
+    logDebug << "Loading file access records from database";
     loadAccessRecordsFromDB();
 
+    logDebug << "Registering event handlers";
     registerHandler(EventType::FileDownloadDone, &FileManager::handleDownloadFileDone);
     registerHandler(EventType::FileDownloadFailed, &FileManager::handleDownloadFileFailed);
     registerHandler(EventType::RemoveFile, &FileManager::handleRemoveFile);
     registerHandler(EventType::AsyncApiRequest, &FileManager::handleAsyncApiRequestEvent);
+    return 0;
 }
 
 FileManager::~FileManager()

@@ -63,7 +63,7 @@ struct LRUNode
 struct FileManagerOption
 {
     std::string RootPath;
-    uint64_t MaxStorageSize = 1000; // 20GB
+    uint64_t MaxStorageSize = uint64_t(20) * 1024 * 1024 * 1024; // 20GB
     std::uint8_t LRUUpperBoundPercent = 90; // 90% of max storage size
     std::uint8_t LRUTargetPercent = 70; // 70% of max storage size
     uint32_t AccessRecordFlushInterval = 3; // Access record flush interval to database (seconds)
