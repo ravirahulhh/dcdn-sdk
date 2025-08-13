@@ -41,7 +41,8 @@ MainManager::MainManager(): BaseManager(this)
     mWebSkt = std::make_shared<WebSocketManager>(this);
     mWebRtc = std::make_shared<WebRtcManager>(this);
     mFileMgr = std::make_shared<FileManager>(this);
-    mUploadMgr = std::make_shared<UploadManager>(this);
+    mUploadMgr = std::make_shared<UploadManager>(
+        this, static_cast<FileManager*>(mFileMgr.get()), static_cast<WebRtcManager*>(mFileMgr.get())->Cert());
     mDeployMgr = std::make_shared<DeployManager>(this);
     mDownloadMgr = std::make_shared<dcdn::DownloadManager>();
 
@@ -85,7 +86,7 @@ int MainManager::init(const MainManagerOption& opt)
     }
 
     DeployManagerOption deployOpt;
-    deployOpt.fileMgr = std::dynamic_pointer_cast<FileManager>(this->getFileManager());
+    deployOpt.fileMgr = std::dynamic_pointer_cast<FileManager>(this->GetFileManager());
     deployOpt.downloadMgr = std::dynamic_pointer_cast<DownloadManager>(this->getDownloadManager());
 
     // 调用 DeployManager 的 Init 方法
@@ -154,8 +155,8 @@ void MainManager::run()
     logInfo << "MainManager running";
     mHttpDownloader->Start();
     login();
-    mWebRtc->Start();
-    mWebSkt->Start();
+    // mWebRtc->Start();
+    // mWebSkt->Start();
     mFileMgr->Start();
     mUploadMgr->Start();
     mDeployMgr->Start();
@@ -185,7 +186,7 @@ void MainManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
     }
 }
 
-std::shared_ptr<BaseManager> MainManager::getFileManager() const
+std::shared_ptr<BaseManager> MainManager::GetFileManager() const
 {
     return mFileMgr;
 }

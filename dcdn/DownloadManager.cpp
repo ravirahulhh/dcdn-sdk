@@ -111,8 +111,7 @@ static void CoreNotifyCallback(std::shared_ptr<dcdn::util::DownloaderTask> task,
 static uint64_t genTaskId()
 {
     static std::atomic<uint64_t> cnt{0};
-    static const uint64_t base =
-        static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+    static const uint64_t base = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
     return base + cnt++;
 }
 
@@ -455,7 +454,7 @@ DownloadManager::DownloadManager()
                         q.push_front(CoreContext::Range{missStart, missEnd});
                     }
                     logWarn << "子任务 " << active.index << " 短读, got=" << got << " < need=" << active.length
-                              << ", 回填缺口: [" << missStart << ", " << missEnd << "]" << std::endl;
+                            << ", 回填缺口: [" << missStart << ", " << missEnd << "]" << std::endl;
                     // 清理 tasksByPtr/downloaderByTaskId，
                     {
                         std::lock_guard<std::mutex> l(core->mtx);
@@ -493,9 +492,9 @@ DownloadManager::DownloadManager()
 
                     if (!active.isProbe && active.length > 0) {
                         logInfo << "子任务 " << active.index << " 结束, start: " << active.offset
-                                  << ", end: " << (active.offset + active.length - 1) << ", actually got: " << actualGot
-                                  << ", expect length: " << active.length
-                                  << (endByLength && !isEnd ? " (size-guard)" : "") << std::endl;
+                                << ", end: " << (active.offset + active.length - 1) << ", actually got: " << actualGot
+                                << ", expect length: " << active.length
+                                << (endByLength && !isEnd ? " (size-guard)" : "") << std::endl;
                     } else {
                         logInfo << "子任务 " << active.index << " 结束 (probe)" << std::endl;
                     }
@@ -503,7 +502,7 @@ DownloadManager::DownloadManager()
                     // debug
                     if (actualGot != active.length) {
                         logInfo << "####子任务 " << active.index << " 不完整结束, actually got: " << actualGot
-                                  << ", expect length: " << active.length << " isEnd flag : " << isEnd << std::endl;
+                                << ", expect length: " << active.length << " isEnd flag : " << isEnd << std::endl;
                     }
                 }
 
@@ -552,7 +551,7 @@ DownloadManager::DownloadManager()
 
                                     httpDownloader_->AddTask(sub);
                                     logInfo << "子任务 " << idx << " 续排, start: " << r.start << ", end: " << r.end
-                                              << std::endl;
+                                            << std::endl;
                                 } else {
                                     logInfo << "ERROR 创建子任务失败" << std::endl;
                                 }
@@ -677,7 +676,7 @@ uint64_t DownloadManager::addDownloadTask(
                     std::lock_guard<std::mutex> lk(tasksMutex_);
                     tasks_[task.id].totalSize = length;
                     // 在split Task之前，避免split 之后，把 Completed 覆盖回 Running
-                    tasks_[task.id].status = TaskStatus::Running; 
+                    tasks_[task.id].status = TaskStatus::Running;
                 }
                 // 如果按相对写入，预分配的大小应该是 length；绝对写入的话会非常大，不建议
                 splitTask(task.id, length, userStart);
@@ -1076,7 +1075,7 @@ void DownloadManager::splitTask(uint64_t taskId, size_t totalSize, size_t baseOf
     }
 
     logInfo << "[Split] Task " << taskId << " split into " << ranges.size()
-              << " ranges, total bytes = " << (absEnd - rangeStart + 1) << " chunkSize = " << chunk << std::endl;
+            << " ranges, total bytes = " << (absEnd - rangeStart + 1) << " chunkSize = " << chunk << std::endl;
 
     // 并发启动
     const size_t canLaunch = std::min(ranges.size(), maxConcurrent_);
@@ -1186,4 +1185,3 @@ bool DownloadManager::maybeFinalizeTask_(uint64_t taskId)
     }
     return true;
 }
-

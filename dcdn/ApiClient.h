@@ -97,7 +97,7 @@ private:
                     } catch (std::exception& excp) {
                         logWarn << "ApiClient callback exception:" << excp.what();
                     } catch (...) {
-                        logWarn << "ApiClient callback unknown exception" ;
+                        logWarn << "ApiClient callback unknown exception";
                     }
                     if (invalidJson) {
                         if constexpr (!std::is_same_v<Fail, std::nullptr_t>) {
@@ -105,7 +105,7 @@ private:
                         }
                     }
                 } else if constexpr (std::is_same_v<Succ, std::nullptr_t>) {
-                    //do nothing
+                    // do nothing
                 } else {
                     static_assert("unsupported Succ type");
                 }

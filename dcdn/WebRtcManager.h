@@ -26,6 +26,11 @@ public:
 public:
     WebRtcManager(MainManager* man);
 
+    CertificatePair Cert() const
+    {
+        return mCert;
+    }
+
 private:
     void run();
     void runGather();

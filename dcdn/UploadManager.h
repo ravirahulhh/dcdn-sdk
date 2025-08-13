@@ -1,19 +1,176 @@
 #ifndef _DCDN_SDK_UPLOAD_MANAGER_H_
 #define _DCDN_SDK_UPLOAD_MANAGER_H_
 
-#include "BaseManager.h"
-#include "EventLoop.h"
+#include <rtc/rtc.hpp>
+
+#include <condition_variable>
+#include <fstream>
+#include <mutex>
+#include <queue>
+#include <thread>
+#include <unordered_map>
+#include <vector>
+
+#include "Cert.h"
+#include "FileManager.h"
+#include "MainManager.h"
 
 NS_BEGIN(dcdn)
+
+class TokenBucket
+{
+public:
+    TokenBucket(): mLastTime(now()) {}
+
+    size_t Consume(size_t tokens)
+    {
+        std::unique_lock<std::mutex> lock(mMutex);
+        auto rate = MainManager::Singlet()->Cfg().UploadRate();
+        refreshTokens(rate);
+
+        size_t availableTokens = static_cast<size_t>(mTokens);
+        size_t tokensToConsume = std::min(tokens, availableTokens);
+
+        if (tokensToConsume > 0) {
+            mTokens -= tokensToConsume;
+        }
+
+        return tokensToConsume;
+    }
+
+private:
+    void refreshTokens(uint64_t rate)
+    {
+        auto currentTime = now();
+        double elapsed = currentTime - mLastTime;
+        mLastTime = currentTime;
+
+        mTokens += elapsed * rate;
+        if (mTokens > 2 * rate) {
+            mTokens = 2 * rate;
+        }
+    }
+
+    static double now()
+    {
+        return std::chrono::duration_cast<std::chrono::microseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+                   .count() /
+            1000000.0;
+    }
+
+private:
+    std::mutex mMutex;
+    double mTokens;
+    double mLastTime;
+};
+
+using TokenBucketPtr = std::shared_ptr<TokenBucket>;
+
+struct UploadFileTask
+{
+    std::string PeerID;
+    std::string FileHash;
+    std::string FilePath;
+    size_t Offset;
+    size_t Len;
+    std::string IceUfrag;
+    std::string IcePwd;
+    std::string RemoteSdp;
+
+    std::string label;
+    std::shared_ptr<rtc::PeerConnection> pc;
+    std::shared_ptr<rtc::DataChannel> dc;
+
+    enum State
+    {
+        Init,
+        Pending,
+        Running,
+        Paused,
+        Failed,
+        Cancelled,
+        Completed,
+    };
+    std::mutex stateMutex;
+    State state;
+
+    size_t bytesSent = 0;
+    std::ifstream file;
+
+    UploadFileTask(
+        const std::string& PeerID,
+        const std::string& FileHash,
+        uint64_t offset,
+        uint64_t len,
+        const std::string& IceUfrag,
+        const std::string& IcePwd,
+        const std::string& RemoteSdp)
+    {
+        state = Init;
+        this->PeerID = PeerID;
+        this->FileHash = FileHash;
+        this->Offset = offset;
+        this->Len = len;
+        this->IceUfrag = IceUfrag;
+        this->IcePwd = IcePwd;
+        this->RemoteSdp = RemoteSdp;
+        this->label = FileHash + "-" + std::to_string(offset) + "-" + std::to_string(len);
+    }
+
+    std::string Label()
+    {
+        return label;
+    }
+
+    State GetState()
+    {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        return state;
+    }
+
+    void SetState(State newState)
+    {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        state = newState;
+    }
+};
+
+using UploadFileTaskPtr = std::shared_ptr<UploadFileTask>;
 
 class UploadManager: public BaseManager, public EventLoop<UploadManager>
 {
 public:
-    UploadManager(MainManager* man);
+    UploadManager(MainManager* man, FileManager* mf, CertificatePair cert);
+    ~UploadManager();
+
+    void Start(bool detach = true);
+    std::shared_ptr<std::thread> Thread()
+    {
+        return mThread;
+    }
+
+public:
+    void run();
+    void stop();
+    void processTasks();
+    void setupPeerConnection(UploadFileTaskPtr task);
+    void handleDataChannel(std::shared_ptr<rtc::DataChannel> dc, UploadFileTaskPtr task);
+    void handleUploadMsgEvent(std::shared_ptr<Event> evt);
 
 private:
-    void run();
-    void handleUploadMsgEvent(std::shared_ptr<Event> evt);
+    FileManager* mFileMgr;
+    CertificatePair mCert;
+    TokenBucketPtr mTokenBucket;
+
+    std::mutex mLabelTaskMapMutex;
+    std::unordered_map<std::string, UploadFileTaskPtr> mLabelTaskMap;
+    std::mutex mTaskMutex;
+    std::queue<UploadFileTaskPtr> mTaskQueue;
+    std::condition_variable mTaskCond;
+
+    std::atomic<bool> mStopFlag{false};
+    std::shared_ptr<std::thread> mThread;
 };
 
 NS_END

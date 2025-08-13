@@ -1,5 +1,6 @@
-#include <unordered_map>
 #include "EventLoop.h"
+
+#include <unordered_map>
 
 NS_BEGIN(dcdn)
 
@@ -23,6 +24,5 @@ void BaseEventLoop::globalHandle(std::shared_ptr<Event> evt)
         }
     }
 }
-
 
 NS_END
