@@ -860,6 +860,7 @@ void FileManager::handleDownloadFileDone(std::shared_ptr<Event> evt)
 
         if (std::filesystem::exists(targetPath)) {
             logWarn << "File already exists at target path: " << targetPath;
+            std::filesystem::remove(tmpFilePath); // Clean up temp file
             return;
         }
 
