@@ -45,6 +45,7 @@ MainManager::MainManager(): BaseManager(this)
         this, static_cast<FileManager*>(mFileMgr.get()), static_cast<WebRtcManager*>(mFileMgr.get())->Cert());
     mDeployMgr = std::make_shared<DeployManager>(this);
     mDownloadMgr = std::make_shared<dcdn::DownloadManager>();
+    mDownloadMgr->SetMaxConcurrentDownloads(1);
 
     RegisterGlobalHandler(
         EventType::AsyncApiRequest,

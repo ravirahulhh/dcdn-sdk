@@ -7,7 +7,7 @@
 int main(int argc, char* argv[])
 {
     dcdn::MainManagerOption opt;
-    opt.WorkDir = "/Users/lixiang/Documents/work/code/c/dcdn-sdk-inner/dcdn/data";
+    opt.WorkDir = "./data";
     int ret = dcdn::MainManager::Init(opt);
     if (ret != 1) {
         logError << "Init MainManager fail";
