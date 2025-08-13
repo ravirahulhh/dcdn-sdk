@@ -18,6 +18,7 @@ std::atomic<MainManager*> MainManager::singlet = nullptr;
 
 int MainManager::Init(const MainManagerOption& opt)
 {
+    std::filesystem::create_directories(opt.WorkDir);
     std::filesystem::path logFile(opt.WorkDir);
     logFile.append("dcdn.log");
     plog::init<DCDN_LOGGER_ID>(plog::debug, logFile.c_str());
