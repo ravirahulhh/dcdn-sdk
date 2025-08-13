@@ -402,11 +402,6 @@ void DeployManager::resubmitDownloadTasks()
 
 void DeployManager::reportToServer(const std::string& job_id, bool success)
 {
-    auto mainMgr = MainManager::Singlet();
-    if (!mainMgr) {
-        LOGW << "MainManager instance is null, cannot report job " << job_id;
-        return;
-    }
     try {
         json event;
         event["type"] = "deploy_result";
