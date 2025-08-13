@@ -17,8 +17,8 @@ add_library(dcdn  STATIC
     # HttpDownloader.cpp	
     MainManagerTest.cpp	
     WebRtcManager.cpp
-    p2p_downloader.cpp
-    p2p_single_task.cpp
+    P2PDownloader.cpp
+    P2PSingleTask.cpp
     DownloadManager.cpp
     DeployManager.cpp
 )

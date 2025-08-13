@@ -17,6 +17,7 @@
 
 namespace dcdn {
 
+// 下载策略
 enum class DownloadStrategy
 {
     HTTP_ONLY, // 仅使用 HTTP 下载
@@ -24,6 +25,7 @@ enum class DownloadStrategy
     HYBRID // 混合模式（HTTP + P2P）
 };
 
+// 任务状态
 enum class TaskStatus
 {
     Pending, // 等待开始
@@ -34,83 +36,84 @@ enum class TaskStatus
     Cancelled // 已取消
 };
 
-// 表示使用方提交的一个总的下载任务
+// 表示使用方提交的一个总的下载任务（公有成员：首字母大写驼峰）
 struct DownloadTask
 {
-    uint64_t id = 0; // 任务 ID（唯一标识）
-    std::string url; // 下载 URL
-    std::string contentHash; // 内容哈希（可选）
-    size_t totalSize = 0; // 此次任务需下载的总长度（区间下载为区间长度；整文件为文件大小）
-    size_t downloaded = 0; // 已下载字节数
-    double speed = 0; // 下载速度（bytes/sec）
-    std::chrono::system_clock::time_point startTime; // 任务开始时间
-    std::chrono::system_clock::time_point lastUpdate; // 上次进度更新时间
-    std::atomic<bool> paused{false}; // 是否暂停
-    std::atomic<bool> cancelled{false}; // 是否取消
-    TaskStatus status = TaskStatus::Pending; // 当前任务状态
+    uint64_t Id = 0;                 // 任务 ID（唯一标识）
+    std::string Url;                 // 下载 URL
+    std::string ContentHash;         // 内容哈希（可选）
+    size_t TotalSize = 0;            // 此次任务需下载的总长度（区间下载为区间长度；整文件为文件大小）
+    size_t Downloaded = 0;           // 已下载字节数
+    double Speed = 0;                // 下载速度（bytes/sec）
+    std::chrono::system_clock::time_point StartTime;   // 任务开始时间
+    std::chrono::system_clock::time_point LastUpdate;  // 上次进度更新时间
+    std::atomic<bool> Paused{false};    // 是否暂停
+    std::atomic<bool> Cancelled{false}; // 是否取消
+    TaskStatus Status = TaskStatus::Pending;  // 当前任务状态
 
     // 已下载的区间（用于断点续传；尚未实现区间合并逻辑，这里仅保留接口）
-    std::vector<std::pair<size_t, size_t>> completedRanges;
+    std::vector<std::pair<size_t, size_t>> CompletedRanges;
 
+    // 赋值与构造
     DownloadTask& operator=(const DownloadTask& other)
     {
-        id = other.id;
-        url = other.url;
-        contentHash = other.contentHash;
-        totalSize = other.totalSize;
-        downloaded = other.downloaded;
-        speed = other.speed;
-        startTime = other.startTime;
-        lastUpdate = other.lastUpdate;
-        paused = other.paused.load();
-        cancelled = other.cancelled.load();
-        status = other.status;
-        completedRanges = other.completedRanges;
+        Id = other.Id;
+        Url = other.Url;
+        ContentHash = other.ContentHash;
+        TotalSize = other.TotalSize;
+        Downloaded = other.Downloaded;
+        Speed = other.Speed;
+        StartTime = other.StartTime;
+        LastUpdate = other.LastUpdate;
+        Paused = other.Paused.load();
+        Cancelled = other.Cancelled.load();
+        Status = other.Status;
+        CompletedRanges = other.CompletedRanges;
         return *this;
     }
 
-    DownloadTask(const DownloadTask& other)
-    {
-        *this = other;
-    }
-
+    DownloadTask(const DownloadTask& other) { *this = other; }
     DownloadTask() {}
 
-    std::string serialize() const;
-    static DownloadTask deserialize(const std::string& data);
+    // 按需持久化的序列化接口
+    std::string Serialize() const;
+    static DownloadTask Deserialize(const std::string& data);
 };
 
+// 回调定义（类型名保持不变；参数名不受命名规范强制要求）
 using StreamCallback = std::function<void(const char* data, size_t size, size_t offset)>;
 using BufferReadyCallback = std::function<void(uint64_t taskId, size_t start, size_t end)>;
 
-// 文件下载选项
+// 文件下载选项（公有成员：首字母大写驼峰）
 struct FileDownloadOptions
 {
-    std::string outputPath; // 输出文件路径
-    std::shared_ptr<std::ostream> outputStream; // 输出流（可替代 outputPath）
-    StreamCallback streamCallback; // 流式回调（数据到达时调用）
-    size_t chunkSize; // 分片大小（默认 10MB）
+    std::string OutputPath;                     // 输出文件路径
+    std::shared_ptr<std::ostream> OutputStream; // 输出流（可替代 OutputPath）
+    StreamCallback StreamCb;                    // 流式回调（数据到达时调用）
+    size_t ChunkSize;                           // 分片大小（默认 10MB）
 
     // 是否按区间下载
-    // 若 hasRange = true：
-    //   - rangeStart 有效；
-    //   - rangeEnd == SIZE_MAX 表示下载到 EOF
-    bool hasRange = false;
-    size_t rangeStart = 0;
-    size_t rangeEnd = SIZE_MAX; // inclusive；SIZE_MAX 表示未知结尾
+    // 若 HasRange = true：
+    //   - RangeStart 有效；
+    //   - RangeEnd == SIZE_MAX 表示下载到 EOF
+    bool HasRange = false;
+    size_t RangeStart = 0;
+    size_t RangeEnd = SIZE_MAX;                 // inclusive；SIZE_MAX 表示未知结尾
 
     // 写入策略：
     //   - true  => 输出文件仅包含该区间内容，按相对偏移写入（0..length-1）
-    //   - false => 按绝对偏移写入（rangeStart..rangeEnd）；可能导致生成稀疏文件
-    bool writeRangeToSeparateFile = true;
+    //   - false => 按绝对偏移写入（RangeStart..RangeEnd）；可能导致生成稀疏文件
+    bool WriteRangeToSeparateFile = true;
 
     // 下载策略
-    DownloadStrategy strategy = DownloadStrategy::HTTP_ONLY;
+    DownloadStrategy Strategy = DownloadStrategy::HTTP_ONLY;
 
     FileDownloadOptions()
-        : chunkSize(10 * 1024 * 1024), rangeStart(0), rangeEnd(SIZE_MAX), strategy(DownloadStrategy::HTTP_ONLY)
-    {
-    }
+        : ChunkSize(10 * 1024 * 1024),
+          RangeStart(0),
+          RangeEnd(SIZE_MAX),
+          Strategy(DownloadStrategy::HTTP_ONLY)
+    {}
 };
 
 // DownloadManager 职责:
@@ -125,43 +128,44 @@ public:
     explicit DownloadManager();
     ~DownloadManager();
 
-    // 配置
-    void setStrategy(DownloadStrategy strategy);
-    void setMaxConcurrentDownloads(size_t max);
-    void setPersistPath(const std::string& path);
+    // ===== 配置（public 函数：首字母大写驼峰） =====
+        // 配置
+    void SetStrategy(DownloadStrategy strategy);
+    void SetMaxConcurrentDownloads(size_t max);
+    void SetPersistPath(const std::string& path);
 
-    // 任务管理，返回任务 ID
-    uint64_t addDownloadTask(
+    // ===== 任务管理：返回任务 ID =====
+    uint64_t AddDownloadTask(
         const std::string& url,
         const std::string& contentHash = "",
         const FileDownloadOptions& options = {});
-    bool cancelDownloadTask(uint64_t taskId);
-    bool pauseDownloadTask(uint64_t taskId);
-    bool resumeDownloadTask(uint64_t taskId);
+    bool CancelDownloadTask(uint64_t taskId);
+    bool PauseDownloadTask(uint64_t taskId);
+    bool ResumeDownloadTask(uint64_t taskId);
 
-    // 状态查询
-    DownloadTask getTaskStatus(uint64_t taskId) const;
-    std::vector<DownloadTask> getAllTasks() const;
-    double getOverallSpeed() const;
+    // ===== 状态查询 =====
+    DownloadTask GetTaskStatus(uint64_t taskId) const;
+    std::vector<DownloadTask> GetAllTasks() const;
+    double GetOverallSpeed() const;
 
-    // 流式播放支持
-    void setBufferReadyCallback(uint64_t taskId, BufferReadyCallback callback);
-    void removeBufferReadyCallback(uint64_t taskId);
-    std::vector<std::pair<size_t, size_t>> getAvailableRanges(uint64_t taskId) const;
+    // ===== 流式播放支持 =====
+    void SetBufferReadyCallback(uint64_t taskId, BufferReadyCallback callback);
+    void RemoveBufferReadyCallback(uint64_t taskId);
+    std::vector<std::pair<size_t, size_t>> GetAvailableRanges(uint64_t taskId) const;
 
-    // 带宽控制
-    void setHttpBandwidthRatio(float ratio); // 0.0-1.0
-    void setP2pBandwidthRatio(float ratio); // 0.0-1.0
+    // ===== 带宽控制 =====
+    void SetHttpBandwidthRatio(float ratio); // 0.0-1.0
+    void SetP2pBandwidthRatio(float ratio);  // 0.0-1.0
 
 private:
-    // 内部任务分片（持久化/统计用）
+    // 内部任务分片（持久化/统计用；内部结构名与成员保留小驼峰风格以便区分）
     struct SubTask
     {
-        size_t offset; // 分片起始偏移
-        size_t length; // 分片长度
-        std::shared_ptr<void> downloaderTask; // 分片对应的下载任务对象
-        bool completed = false; // 分片是否完成
-        int retryCount = 0; // 重试次数
+        size_t offset;                         // 分片起始偏移
+        size_t length;                         // 分片长度
+        std::shared_ptr<void> downloaderTask;  // 分片对应的下载任务对象
+        bool completed = false;                // 分片是否完成
+        int retryCount = 0;                    // 重试次数
     };
 
     // 数据持久化助手
@@ -178,11 +182,11 @@ private:
         bool loadSubTasks(uint64_t taskId, std::vector<SubTask>& subtasks);
 
     private:
-        sqlite3* db_;
-        std::mutex dbMutex_;
+        sqlite3* mDb = nullptr;
+        std::mutex mDbMutex;
     };
 
-    // 内部工具方法
+    // ===== 内部工具方法（private：首字母小写驼峰） =====
     void loadPersistedTasks();
     void persistTask(const DownloadTask& task);
     void removePersistedTask(uint64_t taskId);
@@ -197,27 +201,29 @@ private:
 
     // 在探测到 Content-Length 后 / 或已知范围时进行分片调度
     // totalSize：此次任务要下载的长度
-    // baseOffset：此次任务的起始绝对偏移（整文件为0；区间下载为 rangeStart）
+    // baseOffset：此次任务的起始绝对偏移（整文件为0；区间下载为 RangeStart）
     void splitTask(uint64_t taskId, size_t totalSize, size_t baseOffset);
 
-    bool maybeFinalizeTask_(uint64_t taskId); // 幂等完成判定
+    bool maybeFinalizeTask(uint64_t taskId); // 幂等完成判定（去掉尾随下划线以符合规范）
 
-    DownloadStrategy strategy_ = DownloadStrategy::HTTP_ONLY;
-    size_t maxConcurrent_ = 4;
-    std::string persistPath_;
+private:
+    // ===== 私有成员变量（m + 首字母大写驼峰） =====
+    DownloadStrategy mStrategy = DownloadStrategy::HTTP_ONLY;
+    size_t mMaxConcurrent = 4;
+    std::string mPersistPath;
 
-    std::unique_ptr<download::P2PDownloader> p2pDownloader_;
-    std::unique_ptr<util::HttpDownloader> httpDownloader_;
-    std::unique_ptr<PersistenceHelper> dbHelper_;
+    std::unique_ptr<download::P2PDownloader> mP2pDownloader;
+    std::unique_ptr<util::HttpDownloader> mHttpDownloader;
+    std::unique_ptr<PersistenceHelper> mDbHelper;
 
-    mutable std::mutex tasksMutex_;
-    std::unordered_map<uint64_t, DownloadTask> tasks_; // 所有任务信息
-    std::unordered_map<uint64_t, std::vector<SubTask>> subTasks_; // 任务的分片信息
-    std::unordered_map<uint64_t, FileDownloadOptions> taskOptions_; // 每个任务的下载选项
-    std::unordered_map<uint64_t, BufferReadyCallback> bufferCallbacks_; // 缓存就绪回调
+    mutable std::mutex mTasksMutex;
+    std::unordered_map<uint64_t, DownloadTask> mTasks;               // 所有任务信息
+    std::unordered_map<uint64_t, std::vector<SubTask>> mSubTasks;    // 任务的分片信息
+    std::unordered_map<uint64_t, FileDownloadOptions> mTaskOptions;  // 每个任务的下载选项
+    std::unordered_map<uint64_t, BufferReadyCallback> mBufferCallbacks; // 缓存就绪回调
 
-    float httpBandwidthRatio_ = 0.5f; // HTTP 带宽占比
-    float p2pBandwidthRatio_ = 0.5f; // P2P 带宽占比
+    float mHttpBandwidthRatio = 0.5f; // HTTP 带宽占比
+    float mP2pBandwidthRatio = 0.5f;  // P2P 带宽占比
 };
 
 } // namespace dcdn

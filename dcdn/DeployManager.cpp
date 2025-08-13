@@ -207,14 +207,14 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
     }
 
     FileDownloadOptions opts;
-    opts.outputPath = downloadPath;
+    opts.OutputPath = downloadPath;
     if (task.blockStart > 0 || task.blockEnd > 0) {
-        opts.hasRange = true;
-        opts.rangeStart = task.blockStart;
-        opts.rangeEnd = task.blockEnd;
+        opts.HasRange = true;
+        opts.RangeStart = task.blockStart;
+        opts.RangeEnd = task.blockEnd;
     }
 
-    uint64_t taskId = mDownloadMgr->addDownloadTask(task.url, task.fileHash, opts);
+    uint64_t taskId = mDownloadMgr->AddDownloadTask(task.url, task.fileHash, opts);
     if (taskId == 0) {
         LOGW << "Failed to create download task (jobId: " << arg.jobId << ")";
         updateDeployTaskStatus(arg.jobId, DeployStatus::FAILED);
@@ -253,9 +253,9 @@ void DeployManager::checkDownloadStatus()
             taskId = it->second;
         }
 
-        auto downloadStatus = mDownloadMgr->getTaskStatus(taskId);
+        auto downloadStatus = mDownloadMgr->GetTaskStatus(taskId);
 
-        switch (downloadStatus.status) {
+        switch (downloadStatus.Status) {
             case TaskStatus::Completed: {
                 FileDownloadDoneArg doneArg;
                 doneArg.fileHash = task.fileHash;

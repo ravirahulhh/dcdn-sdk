@@ -152,15 +152,15 @@ static void runAsyncOnCore(CoreContext* core, std::function<void()> fn)
 ////////////////////////
 // DownloadTask 序列化 (简单实现)
 ////////////////////////
-std::string DownloadTask::serialize() const
+std::string DownloadTask::Serialize() const
 {
     std::ostringstream ss;
-    ss << id << "|" << url << "|" << contentHash << "|" << totalSize << "|" << downloaded << "|"
-       << static_cast<int>(status);
+    ss << Id << "|" << Url << "|" << ContentHash << "|" << TotalSize << "|" << Downloaded << "|"
+       << static_cast<int>(Status);
     return ss.str();
 }
 
-DownloadTask DownloadTask::deserialize(const std::string& data)
+DownloadTask DownloadTask::Deserialize(const std::string& data)
 {
     DownloadTask task;
     std::istringstream ss(data);
@@ -169,21 +169,21 @@ DownloadTask DownloadTask::deserialize(const std::string& data)
         return task;
     // 解析 uint64_t id
     try {
-        task.id = static_cast<uint64_t>(std::stoull(token));
+        task.Id = static_cast<uint64_t>(std::stoull(token));
     } catch (...) {
-        task.id = 0;
+        task.Id = 0;
     }
-    std::getline(ss, task.url, '|');
-    std::getline(ss, task.contentHash, '|');
+    std::getline(ss, task.Url, '|');
+    std::getline(ss, task.ContentHash, '|');
     if (!std::getline(ss, token, '|'))
         return task;
-    task.totalSize = static_cast<size_t>(std::stoull(token));
+    task.TotalSize = static_cast<size_t>(std::stoull(token));
     if (!std::getline(ss, token, '|'))
         return task;
-    task.downloaded = static_cast<size_t>(std::stoull(token));
+    task.Downloaded = static_cast<size_t>(std::stoull(token));
     if (!std::getline(ss, token, '|'))
         return task;
-    task.status = static_cast<TaskStatus>(std::stoi(token));
+    task.Status = static_cast<TaskStatus>(std::stoi(token));
     return task;
 }
 
@@ -192,7 +192,7 @@ DownloadTask DownloadTask::deserialize(const std::string& data)
 ////////////////////////
 DownloadManager::PersistenceHelper::PersistenceHelper(const std::string& dbPath)
 {
-    db_ = nullptr;
+    mDb = nullptr;
     (void)dbPath;
 }
 
@@ -232,12 +232,12 @@ bool DownloadManager::PersistenceHelper::loadSubTasks(uint64_t taskId, std::vect
 DownloadManager::DownloadManager()
 {
     // 初始化 HTTP 引擎
-    httpDownloader_ = std::make_unique<util::HttpDownloader>();
-    int ret = httpDownloader_->Init(nullptr);
+    mHttpDownloader = std::make_unique<util::HttpDownloader>();
+    int ret = mHttpDownloader->Init(nullptr);
     if (ret != 1) {
         std::cerr << "Warning: HttpDownloader Init returned " << ret << std::endl;
     }
-    httpDownloader_->Start();
+    mHttpDownloader->Start();
 
     // 构建通用上下文, 并启动 worker
     auto coreUP = std::make_unique<CoreContext>();
@@ -313,21 +313,21 @@ DownloadManager::DownloadManager()
                 FileDownloadOptions opts;
 
                 {
-                    std::lock_guard<std::mutex> lk(tasksMutex_);
-                    auto it = tasks_.find(active.parentTaskId);
-                    if (it != tasks_.end() && it->second.totalSize == 0) {
+                    std::lock_guard<std::mutex> lk(mTasksMutex);
+                    auto it = mTasks.find(active.parentTaskId);
+                    if (it != mTasks.end() && it->second.TotalSize == 0) {
                         if (auto ht = dynamic_cast<dcdn::util::HttpDownloaderTask*>(raw)) {
                             clen = ht->ContentLength(); // 整个资源总长
-                            auto itOpt = taskOptions_.find(active.parentTaskId);
-                            if (itOpt != taskOptions_.end())
+                            auto itOpt = mTaskOptions.find(active.parentTaskId);
+                            if (itOpt != mTaskOptions.end())
                                 opts = itOpt->second;
 
                             if (clen > 0) {
-                                if (opts.hasRange) {
-                                    baseOffset = opts.rangeStart;
-                                    if (opts.rangeEnd != SIZE_MAX) {
-                                        totalLen = (opts.rangeEnd >= opts.rangeStart)
-                                            ? (opts.rangeEnd - opts.rangeStart + 1)
+                                if (opts.HasRange) {
+                                    baseOffset = opts.RangeStart;
+                                    if (opts.RangeEnd != SIZE_MAX) {
+                                        totalLen = (opts.RangeEnd >= opts.RangeStart)
+                                            ? (opts.RangeEnd - opts.RangeStart + 1)
                                             : 0;
                                     } else {
                                         totalLen = (baseOffset >= clen) ? 0 : (clen - baseOffset);
@@ -338,10 +338,10 @@ DownloadManager::DownloadManager()
                                 }
 
                                 if (totalLen > 0) {
-                                    it->second.totalSize = totalLen;
+                                    it->second.TotalSize = totalLen;
                                     needSplit = true;
                                 } else {
-                                    it->second.status = TaskStatus::Failed;
+                                    it->second.Status = TaskStatus::Failed;
                                 }
                             }
                         }
@@ -359,9 +359,9 @@ DownloadManager::DownloadManager()
             FileDownloadOptions opts;
             std::shared_ptr<std::fstream> file;
             {
-                std::lock_guard<std::mutex> lk(tasksMutex_);
-                auto itOpt = taskOptions_.find(active.parentTaskId);
-                if (itOpt != taskOptions_.end())
+                std::lock_guard<std::mutex> lk(mTasksMutex);
+                auto itOpt = mTaskOptions.find(active.parentTaskId);
+                if (itOpt != mTaskOptions.end())
                     opts = itOpt->second;
             }
             {
@@ -377,9 +377,9 @@ DownloadManager::DownloadManager()
 
                 // 计算写入偏移（相对 or 绝对）
                 size_t writeOff = off;
-                if (opts.hasRange && opts.writeRangeToSeparateFile) {
-                    if (off >= opts.rangeStart)
-                        writeOff = off - opts.rangeStart;
+                if (opts.HasRange && opts.WriteRangeToSeparateFile) {
+                    if (off >= opts.RangeStart)
+                        writeOff = off - opts.RangeStart;
                     else
                         writeOff = 0; // 防御
                 }
@@ -391,15 +391,15 @@ DownloadManager::DownloadManager()
                     }
                     file->write(reinterpret_cast<const char*>(buffer->Data()), len);
                     file->flush();
-                } else if (opts.outputStream) {
-                    opts.outputStream->write(reinterpret_cast<const char*>(buffer->Data()), len);
-                    opts.outputStream->flush();
-                } else if (!opts.outputPath.empty()) {
-                    std::fstream ofs(opts.outputPath, std::ios::in | std::ios::out | std::ios::binary);
+                } else if (opts.OutputStream) {
+                    opts.OutputStream->write(reinterpret_cast<const char*>(buffer->Data()), len);
+                    opts.OutputStream->flush();
+                } else if (!opts.OutputPath.empty()) {
+                    std::fstream ofs(opts.OutputPath, std::ios::in | std::ios::out | std::ios::binary);
                     if (!ofs) {
-                        std::ofstream create(opts.outputPath, std::ios::binary);
+                        std::ofstream create(opts.OutputPath, std::ios::binary);
                         create.close();
-                        ofs.open(opts.outputPath, std::ios::in | std::ios::out | std::ios::binary);
+                        ofs.open(opts.OutputPath, std::ios::in | std::ios::out | std::ios::binary);
                     }
                     if (ofs) {
                         ofs.seekp(static_cast<std::streamoff>(writeOff), std::ios::beg);
@@ -407,8 +407,8 @@ DownloadManager::DownloadManager()
                     }
                 }
 
-                if (opts.streamCallback) {
-                    opts.streamCallback(reinterpret_cast<const char*>(buffer->Data()), len, off);
+                if (opts.StreamCb) {
+                    opts.StreamCb(reinterpret_cast<const char*>(buffer->Data()), len, off);
                 }
 
                 readSum += len;
@@ -517,10 +517,10 @@ DownloadManager::DownloadManager()
 
                         std::string urlLocal;
                         {
-                            std::lock_guard<std::mutex> lk(tasksMutex_);
-                            auto itT = tasks_.find(active.parentTaskId);
-                            if (itT != tasks_.end()) {
-                                urlLocal = itT->second.url;
+                            std::lock_guard<std::mutex> lk(mTasksMutex);
+                            auto itT = mTasks.find(active.parentTaskId);
+                            if (itT != mTasks.end()) {
+                                urlLocal = itT->second.Url;
 
                                 dcdn::util::HttpDownloaderTaskOption opt;
                                 opt.Request = std::make_shared<dcdn::util::HttpRequest>(urlLocal);
@@ -529,7 +529,7 @@ DownloadManager::DownloadManager()
                                 opt.Notify = CoreNotifyCallback;
                                 opt.Receiver = this;
 
-                                auto sub = httpDownloader_->CreateTask(&opt);
+                                auto sub = mHttpDownloader->CreateTask(&opt);
                                 if (sub) {
                                     std::shared_ptr<std::fstream> f;
                                     auto itF = core->parentFiles.find(active.parentTaskId);
@@ -549,7 +549,7 @@ DownloadManager::DownloadManager()
                                     core->tasksByPtr[sub.get()] = std::move(st);
                                     core->downloaderByTaskId[active.parentTaskId].push_back(sub);
 
-                                    httpDownloader_->AddTask(sub);
+                                    mHttpDownloader->AddTask(sub);
                                     logInfo << "子任务 " << idx << " 续排, start: " << r.start << ", end: " << r.end
                                             << std::endl;
                                 } else {
@@ -570,7 +570,7 @@ DownloadManager::DownloadManager()
                     hasPending = (itP != core->pendingRanges.end() && !itP->second.empty());
                 }
                 if (!hasRunning && !hasPending) {
-                    maybeFinalizeTask_(active.parentTaskId);
+                    maybeFinalizeTask(active.parentTaskId);
                 }
             }
 
@@ -594,32 +594,32 @@ DownloadManager::~DownloadManager()
         g_core.erase(it);
     }
 
-    if (httpDownloader_) {
-        httpDownloader_.reset();
+    if (mHttpDownloader) {
+        mHttpDownloader.reset();
     }
 }
 
 ////////////////////////
 // 配置接口
 ////////////////////////
-void DownloadManager::setStrategy(DownloadStrategy strategy)
+void DownloadManager::SetStrategy(DownloadStrategy strategy)
 {
-    strategy_ = strategy;
+    mStrategy = strategy;
 }
-void DownloadManager::setMaxConcurrentDownloads(size_t max)
+void DownloadManager::SetMaxConcurrentDownloads(size_t max)
 {
-    maxConcurrent_ = max;
+    mMaxConcurrent = max;
 }
-void DownloadManager::setPersistPath(const std::string& path)
+void DownloadManager::SetPersistPath(const std::string& path)
 {
-    persistPath_ = path;
-    dbHelper_ = std::make_unique<PersistenceHelper>(path);
+    mPersistPath = path;
+    mDbHelper = std::make_unique<PersistenceHelper>(path);
 }
 
 ////////////////////////
 // 任务管理（HTTP_ONLY 实现）
 ////////////////////////
-uint64_t DownloadManager::addDownloadTask(
+uint64_t DownloadManager::AddDownloadTask(
     const std::string& url,
     const std::string& contentHash,
     const FileDownloadOptions& options)
@@ -630,57 +630,57 @@ uint64_t DownloadManager::addDownloadTask(
 
     return runSyncOnCore<uint64_t>(core, [this, core, url, contentHash, options]() -> uint64_t {
         DownloadTask task;
-        task.id = genTaskId();
-        task.url = url;
-        task.contentHash = contentHash;
-        task.totalSize = 0; // 对区间任务：稍后设为区间长度；对整文件：设为 Content-Length
-        task.downloaded = 0;
-        task.startTime = std::chrono::system_clock::now();
-        task.lastUpdate = task.startTime;
-        task.status = TaskStatus::Pending;
+        task.Id = genTaskId();
+        task.Url = url;
+        task.ContentHash = contentHash;
+        task.TotalSize = 0; // 对区间任务：稍后设为区间长度；对整文件：设为 Content-Length
+        task.Downloaded = 0;
+        task.StartTime = std::chrono::system_clock::now();
+        task.LastUpdate = task.StartTime;
+        task.Status = TaskStatus::Pending;
 
-        tasks_[task.id] = task;
-        taskOptions_[task.id] = options;
+        mTasks[task.Id] = task;
+        mTaskOptions[task.Id] = options;
 
         // 打开父任务共享文件（随机写）
-        if (!options.outputPath.empty()) {
+        if (!options.OutputPath.empty()) {
             auto fs =
-                std::make_shared<std::fstream>(options.outputPath, std::ios::in | std::ios::out | std::ios::binary);
+                std::make_shared<std::fstream>(options.OutputPath, std::ios::in | std::ios::out | std::ios::binary);
             if (!fs->is_open()) {
-                std::ofstream create(options.outputPath, std::ios::binary);
+                std::ofstream create(options.OutputPath, std::ios::binary);
                 create.close();
-                fs->open(options.outputPath, std::ios::in | std::ios::out | std::ios::binary);
+                fs->open(options.OutputPath, std::ios::in | std::ios::out | std::ios::binary);
             }
             if (fs->is_open()) {
                 std::lock_guard<std::mutex> l(core->mtx);
-                core->parentFiles[task.id] = fs;
+                core->parentFiles[task.Id] = fs;
             }
         }
 
-        if (strategy_ == DownloadStrategy::HTTP_ONLY) {
-            const bool wantRange = options.hasRange;
-            const size_t userStart = options.rangeStart;
-            const bool endKnown = options.hasRange && options.rangeEnd != SIZE_MAX;
+        if (mStrategy == DownloadStrategy::HTTP_ONLY) {
+            const bool wantRange = options.HasRange;
+            const size_t userStart = options.RangeStart;
+            const bool endKnown = options.HasRange && options.RangeEnd != SIZE_MAX;
 
             if (wantRange && endKnown) {
                 // (A) 完整区间已知：不需要 probe，直接切片
-                const size_t length = (options.rangeEnd >= userStart) ? (options.rangeEnd - userStart + 1) : 0;
+                const size_t length = (options.RangeEnd >= userStart) ? (options.RangeEnd - userStart + 1) : 0;
                 if (length == 0) {
-                    auto itT = tasks_.find(task.id);
-                    if (itT != tasks_.end()) {
-                        itT->second.status = TaskStatus::Failed;
+                    auto itT = mTasks.find(task.Id);
+                    if (itT != mTasks.end()) {
+                        itT->second.Status = TaskStatus::Failed;
                     }
-                    return task.id;
+                    return task.Id;
                 }
                 {
-                    std::lock_guard<std::mutex> lk(tasksMutex_);
-                    tasks_[task.id].totalSize = length;
+                    std::lock_guard<std::mutex> lk(mTasksMutex);
+                    mTasks[task.Id].TotalSize = length;
                     // 在split Task之前，避免split 之后，把 Completed 覆盖回 Running
-                    tasks_[task.id].status = TaskStatus::Running;
+                    mTasks[task.Id].Status = TaskStatus::Running; 
                 }
                 // 如果按相对写入，预分配的大小应该是 length；绝对写入的话会非常大，不建议
-                splitTask(task.id, length, userStart);
-                return task.id;
+                splitTask(task.Id, length, userStart);
+                return task.Id;
             }
 
             // (B) 未知 end 或整文件：需要 Content-Length
@@ -690,19 +690,19 @@ uint64_t DownloadManager::addDownloadTask(
             opt.Notify = CoreNotifyCallback;
             opt.Receiver = this;
 
-            auto probe = httpDownloader_->CreateTask(&opt);
+            auto probe = mHttpDownloader->CreateTask(&opt);
             if (!probe) {
-                auto itT = tasks_.find(task.id);
-                if (itT != tasks_.end()) {
-                    itT->second.status = TaskStatus::Failed;
+                auto itT = mTasks.find(task.Id);
+                if (itT != mTasks.end()) {
+                    itT->second.Status = TaskStatus::Failed;
                 }
-                return task.id;
+                return task.Id;
             }
 
             {
                 std::lock_guard<std::mutex> l(core->mtx);
                 ActiveSubTask a;
-                a.parentTaskId = task.id;
+                a.parentTaskId = task.Id;
                 a.transport = Transport::HTTP;
                 a.downloader = probe;
                 a.offset = 0;
@@ -710,43 +710,43 @@ uint64_t DownloadManager::addDownloadTask(
                 a.index = 0;
                 a.isProbe = true;
 
-                auto itF = core->parentFiles.find(task.id);
+                auto itF = core->parentFiles.find(task.Id);
                 if (itF != core->parentFiles.end())
                     a.file = itF->second;
 
                 core->tasksByPtr[probe.get()] = std::move(a);
-                core->downloaderByTaskId[task.id].push_back(probe);
+                core->downloaderByTaskId[task.Id].push_back(probe);
             }
-            httpDownloader_->AddTask(probe);
+            mHttpDownloader->AddTask(probe);
             logInfo << "[Launch] probe Task " << 0 << std::endl;
 
-            auto itT = tasks_.find(task.id);
-            if (itT != tasks_.end()) {
-                itT->second.status = TaskStatus::Running;
+            auto itT = mTasks.find(task.Id);
+            if (itT != mTasks.end()) {
+                itT->second.Status = TaskStatus::Running;
             }
-            return task.id;
+            return task.Id;
         }
 
         // 其他策略暂未实现
-        auto itT = tasks_.find(task.id);
-        if (itT != tasks_.end()) {
-            itT->second.status = TaskStatus::Pending;
+        auto itT = mTasks.find(task.Id);
+        if (itT != mTasks.end()) {
+            itT->second.Status = TaskStatus::Pending;
         }
-        return task.id;
+        return task.Id;
     });
 }
 
-bool DownloadManager::cancelDownloadTask(uint64_t taskId)
+bool DownloadManager::CancelDownloadTask(uint64_t taskId)
 {
     CoreContext* core = getCore(this);
     if (!core)
         return false;
     return runSyncOnCore<bool>(core, [this, core, taskId]() -> bool {
-        auto it = tasks_.find(taskId);
-        if (it == tasks_.end())
+        auto it = mTasks.find(taskId);
+        if (it == mTasks.end())
             return false;
-        it->second.cancelled = true;
-        it->second.status = TaskStatus::Cancelled;
+        it->second.Cancelled = true;
+        it->second.Status = TaskStatus::Cancelled;
 
         // 1) 取消所有子任务，并标记 raw 已取消
         auto itVec = core->downloaderByTaskId.find(taskId);
@@ -754,7 +754,7 @@ bool DownloadManager::cancelDownloadTask(uint64_t taskId)
             for (auto& sp : itVec->second) {
                 if (!sp)
                     continue;
-                httpDownloader_->CancelTask(sp);
+                mHttpDownloader->CancelTask(sp);
                 core->cancelledRaw.insert(sp.get()); // 标记取消
                 core->tasksByPtr.erase(sp.get()); // 清理映射
             }
@@ -776,61 +776,61 @@ bool DownloadManager::cancelDownloadTask(uint64_t taskId)
         // 4) 删除输出文件（如果指定了文件路径）
         FileDownloadOptions opts;
         {
-            std::lock_guard<std::mutex> lk(tasksMutex_);
-            auto itOpt = taskOptions_.find(taskId);
-            if (itOpt != taskOptions_.end())
+            std::lock_guard<std::mutex> lk(mTasksMutex);
+            auto itOpt = mTaskOptions.find(taskId);
+            if (itOpt != mTaskOptions.end())
                 opts = itOpt->second;
         }
-        if (!opts.outputPath.empty()) {
+        if (!opts.OutputPath.empty()) {
             // 关闭 manager 共享句柄
             core->parentFiles.erase(taskId);
-            std::remove(opts.outputPath.c_str()); // 忽略失败（例如文件不存在或被占用）
+            std::remove(opts.OutputPath.c_str()); // 忽略失败（例如文件不存在或被占用）
         }
 
         return true;
     });
 }
 
-bool DownloadManager::pauseDownloadTask(uint64_t taskId)
+bool DownloadManager::PauseDownloadTask(uint64_t taskId)
 {
     CoreContext* core = getCore(this);
     if (!core)
         return false;
     return runSyncOnCore<bool>(core, [this, core, taskId]() -> bool {
-        auto it = tasks_.find(taskId);
-        if (it == tasks_.end())
+        auto it = mTasks.find(taskId);
+        if (it == mTasks.end())
             return false;
-        it->second.paused = true;
-        it->second.status = TaskStatus::Paused;
+        it->second.Paused = true;
+        it->second.Status = TaskStatus::Paused;
 
         auto itVec = core->downloaderByTaskId.find(taskId);
         if (itVec != core->downloaderByTaskId.end()) {
             for (auto& sp : itVec->second) {
                 if (sp)
-                    httpDownloader_->PauseTask(sp);
+                    mHttpDownloader->PauseTask(sp);
             }
         }
         return true;
     });
 }
 
-bool DownloadManager::resumeDownloadTask(uint64_t taskId)
+bool DownloadManager::ResumeDownloadTask(uint64_t taskId)
 {
     CoreContext* core = getCore(this);
     if (!core)
         return false;
     return runSyncOnCore<bool>(core, [this, core, taskId]() -> bool {
-        auto it = tasks_.find(taskId);
-        if (it == tasks_.end())
+        auto it = mTasks.find(taskId);
+        if (it == mTasks.end())
             return false;
-        it->second.paused = false;
-        it->second.status = TaskStatus::Running;
+        it->second.Paused = false;
+        it->second.Status = TaskStatus::Running;
 
         auto itVec = core->downloaderByTaskId.find(taskId);
         if (itVec != core->downloaderByTaskId.end()) {
             for (auto& sp : itVec->second) {
                 if (sp)
-                    httpDownloader_->ResumeTask(sp);
+                    mHttpDownloader->ResumeTask(sp);
             }
         }
         return true;
@@ -840,62 +840,62 @@ bool DownloadManager::resumeDownloadTask(uint64_t taskId)
 ////////////////////////
 // 状态查询与回调注册
 ////////////////////////
-DownloadTask DownloadManager::getTaskStatus(uint64_t taskId) const
+DownloadTask DownloadManager::GetTaskStatus(uint64_t taskId) const
 {
-    std::lock_guard<std::mutex> l(tasksMutex_);
-    auto it = tasks_.find(taskId);
-    if (it != tasks_.end())
+    std::lock_guard<std::mutex> l(mTasksMutex);
+    auto it = mTasks.find(taskId);
+    if (it != mTasks.end())
         return it->second;
     return {};
 }
 
-std::vector<DownloadTask> DownloadManager::getAllTasks() const
+std::vector<DownloadTask> DownloadManager::GetAllTasks() const
 {
-    std::lock_guard<std::mutex> l(tasksMutex_);
+    std::lock_guard<std::mutex> l(mTasksMutex);
     std::vector<DownloadTask> out;
-    out.reserve(tasks_.size());
-    for (auto& kv : tasks_)
+    out.reserve(mTasks.size());
+    for (auto& kv : mTasks)
         out.push_back(kv.second);
     return out;
 }
 
-double DownloadManager::getOverallSpeed() const
+double DownloadManager::GetOverallSpeed() const
 {
-    std::lock_guard<std::mutex> l(tasksMutex_);
+    std::lock_guard<std::mutex> l(mTasksMutex);
     double sum = 0.0;
-    for (auto& kv : tasks_)
-        sum += kv.second.speed;
+    for (auto& kv : mTasks)
+        sum += kv.second.Speed;
     return sum;
 }
 
-void DownloadManager::setBufferReadyCallback(uint64_t taskId, BufferReadyCallback callback)
+void DownloadManager::SetBufferReadyCallback(uint64_t taskId, BufferReadyCallback callback)
 {
-    std::lock_guard<std::mutex> l(tasksMutex_);
-    bufferCallbacks_[taskId] = std::move(callback);
+    std::lock_guard<std::mutex> l(mTasksMutex);
+    mBufferCallbacks[taskId] = std::move(callback);
 }
 
-void DownloadManager::removeBufferReadyCallback(uint64_t taskId)
+void DownloadManager::RemoveBufferReadyCallback(uint64_t taskId)
 {
-    std::lock_guard<std::mutex> l(tasksMutex_);
-    bufferCallbacks_.erase(taskId);
+    std::lock_guard<std::mutex> l(mTasksMutex);
+    mBufferCallbacks.erase(taskId);
 }
 
-std::vector<std::pair<size_t, size_t>> DownloadManager::getAvailableRanges(uint64_t taskId) const
+std::vector<std::pair<size_t, size_t>> DownloadManager::GetAvailableRanges(uint64_t taskId) const
 {
-    std::lock_guard<std::mutex> l(tasksMutex_);
-    auto it = tasks_.find(taskId);
-    if (it != tasks_.end())
-        return it->second.completedRanges;
+    std::lock_guard<std::mutex> l(mTasksMutex);
+    auto it = mTasks.find(taskId);
+    if (it != mTasks.end())
+        return it->second.CompletedRanges;
     return {};
 }
 
-void DownloadManager::setHttpBandwidthRatio(float ratio)
+void DownloadManager::SetHttpBandwidthRatio(float ratio)
 {
-    httpBandwidthRatio_ = ratio;
+    mHttpBandwidthRatio = ratio;
 }
-void DownloadManager::setP2pBandwidthRatio(float ratio)
+void DownloadManager::SetP2pBandwidthRatio(float ratio)
 {
-    p2pBandwidthRatio_ = ratio;
+    mP2pBandwidthRatio = ratio;
 }
 
 ////////////////////////
@@ -908,39 +908,39 @@ void DownloadManager::updateTaskProgress(uint64_t taskId, size_t downloaded)
     bool reachedEnd = false;
 
     {
-        std::lock_guard<std::mutex> l(tasksMutex_);
-        auto it = tasks_.find(taskId);
-        if (it == tasks_.end())
+        std::lock_guard<std::mutex> l(mTasksMutex);
+        auto it = mTasks.find(taskId);
+        if (it == mTasks.end())
             return;
 
-        it->second.downloaded += downloaded;
-        if (it->second.totalSize > 0 && it->second.downloaded >= it->second.totalSize) {
-            it->second.downloaded = it->second.totalSize; // 防御
+        it->second.Downloaded += downloaded;
+        if (it->second.TotalSize > 0 && it->second.Downloaded >= it->second.TotalSize) {
+            it->second.Downloaded = it->second.TotalSize; // 防御
             reachedEnd = true;
-            logWarn << "Task " << taskId << " downloaded more than expected: " << it->second.downloaded << " > "
-                    << it->second.totalSize << std::endl;
+            logWarn << "Task " << taskId << " downloaded more than expected: " << it->second.Downloaded << " > "
+                    << it->second.TotalSize << std::endl;
         }
-        it->second.lastUpdate = now;
+        it->second.LastUpdate = now;
         calculateSpeedLocked(it->second, now);
     }
 
     if (reachedEnd) {
-        maybeFinalizeTask_(taskId);
+        maybeFinalizeTask(taskId);
     }
 }
 
-// 仅在已持有 tasksMutex_ 时调用
+// 仅在已持有 mTasksMutex 时调用
 void DownloadManager::calculateSpeedLocked(DownloadTask& t, std::chrono::system_clock::time_point now)
 {
-    auto seconds = std::chrono::duration_cast<std::chrono::seconds>(now - t.startTime).count();
-    t.speed = (seconds > 0) ? (static_cast<double>(t.downloaded) / static_cast<double>(seconds)) : 0.0;
+    auto seconds = std::chrono::duration_cast<std::chrono::seconds>(now - t.StartTime).count();
+    t.Speed = (seconds > 0) ? (static_cast<double>(t.Downloaded) / static_cast<double>(seconds)) : 0.0;
 }
 
 void DownloadManager::notifyBufferReady(const uint64_t& taskId, size_t start, size_t end)
 {
-    std::lock_guard<std::mutex> l(tasksMutex_);
-    auto it = bufferCallbacks_.find(taskId);
-    if (it != bufferCallbacks_.end()) {
+    std::lock_guard<std::mutex> l(mTasksMutex);
+    auto it = mBufferCallbacks.find(taskId);
+    if (it != mBufferCallbacks.end()) {
         auto cb = it->second;
         if (cb)
             cb(taskId, start, end);
@@ -973,27 +973,27 @@ void DownloadManager::splitTask(uint64_t taskId, size_t totalSize, size_t baseOf
     FileDownloadOptions opts;
     std::string url;
     {
-        std::lock_guard<std::mutex> lk(tasksMutex_);
-        auto it = tasks_.find(taskId);
-        if (it == tasks_.end())
+        std::lock_guard<std::mutex> lk(mTasksMutex);
+        auto it = mTasks.find(taskId);
+        if (it == mTasks.end())
             return;
-        url = it->second.url;
-        auto itOpt = taskOptions_.find(taskId);
-        if (itOpt != taskOptions_.end())
+        url = it->second.Url;
+        auto itOpt = mTaskOptions.find(taskId);
+        if (itOpt != mTaskOptions.end())
             opts = itOpt->second;
     }
 
     // 预分配/截断文件到正确大小（相对写：长度就是 totalSize）
-    if (!opts.outputPath.empty() && totalSize > 0) {
+    if (!opts.OutputPath.empty() && totalSize > 0) {
         // 先截断为 0，避免旧文件更大
         {
-            std::ofstream reset(opts.outputPath, std::ios::binary | std::ios::trunc);
+            std::ofstream reset(opts.OutputPath, std::ios::binary | std::ios::trunc);
         }
-        auto fs = std::make_shared<std::fstream>(opts.outputPath, std::ios::in | std::ios::out | std::ios::binary);
+        auto fs = std::make_shared<std::fstream>(opts.OutputPath, std::ios::in | std::ios::out | std::ios::binary);
         if (!fs->is_open()) {
-            std::ofstream create(opts.outputPath, std::ios::binary | std::ios::trunc);
+            std::ofstream create(opts.OutputPath, std::ios::binary | std::ios::trunc);
             create.close();
-            fs->open(opts.outputPath, std::ios::in | std::ios::out | std::ios::binary);
+            fs->open(opts.OutputPath, std::ios::in | std::ios::out | std::ios::binary);
         }
         if (fs->is_open()) {
             try {
@@ -1030,7 +1030,7 @@ void DownloadManager::splitTask(uint64_t taskId, size_t totalSize, size_t baseOf
         // probe 的 Size() 是已拉到的数据量（从 Start=0 开始）
         already = probeToCancel->Size();
         // 取消 probe + 清理映射/事件，避免迟到通知
-        httpDownloader_->CancelTask(probeToCancel);
+        mHttpDownloader->CancelTask(probeToCancel);
         std::lock_guard<std::mutex> l(core->mtx);
         core->tasksByPtr.erase(probeToCancel.get());
         auto& vec = core->downloaderByTaskId[taskId];
@@ -1052,13 +1052,13 @@ void DownloadManager::splitTask(uint64_t taskId, size_t totalSize, size_t baseOf
             rangeStart = probeEnd + 1;
         if (rangeStart > absEnd) {
             // probe 已经把需要的范围全下完（极端但允许）
-            maybeFinalizeTask_(taskId);
+            maybeFinalizeTask(taskId);
             return;
         }
     }
 
     // 生成 ranges（从 rangeStart 到 absEnd）
-    const size_t chunk = (opts.chunkSize ? opts.chunkSize : (1u << 20)); // 默认 1MB
+    const size_t chunk = (opts.ChunkSize ? opts.ChunkSize : (1u << 20)); // 默认 1MB
     std::vector<CoreContext::Range> ranges;
     for (size_t pos = rangeStart; pos <= absEnd;) {
         size_t rEnd = std::min(pos + chunk - 1, absEnd);
@@ -1070,7 +1070,7 @@ void DownloadManager::splitTask(uint64_t taskId, size_t totalSize, size_t baseOf
 
     // 无可下载分片 -> 尝试 finalize（幂等）
     if (ranges.empty()) {
-        maybeFinalizeTask_(taskId);
+        maybeFinalizeTask(taskId);
         return;
     }
 
@@ -1078,7 +1078,7 @@ void DownloadManager::splitTask(uint64_t taskId, size_t totalSize, size_t baseOf
             << " ranges, total bytes = " << (absEnd - rangeStart + 1) << " chunkSize = " << chunk << std::endl;
 
     // 并发启动
-    const size_t canLaunch = std::min(ranges.size(), maxConcurrent_);
+    const size_t canLaunch = std::min(ranges.size(), mMaxConcurrent);
 
     std::shared_ptr<std::fstream> parentFile;
     {
@@ -1098,7 +1098,7 @@ void DownloadManager::splitTask(uint64_t taskId, size_t totalSize, size_t baseOf
         opt.Notify = CoreNotifyCallback;
         opt.Receiver = this;
 
-        auto sub = httpDownloader_->CreateTask(&opt);
+        auto sub = mHttpDownloader->CreateTask(&opt);
         if (!sub)
             continue;
 
@@ -1119,7 +1119,7 @@ void DownloadManager::splitTask(uint64_t taskId, size_t totalSize, size_t baseOf
             core->nextRangeIndex[taskId] = i + 1;
         }
 
-        httpDownloader_->AddTask(sub);
+        mHttpDownloader->AddTask(sub);
         logInfo << "[Launch] Task " << i << " range " << r.start << "-" << r.end << std::endl;
     }
 
@@ -1131,12 +1131,12 @@ void DownloadManager::splitTask(uint64_t taskId, size_t totalSize, size_t baseOf
             q.push_back(ranges[i]);
     }
 
-    // 极端 canLaunch==0 等情况，兜底 finalize（maybeFinalizeTask_ 本身幂等且会检查 running/pending）
-    maybeFinalizeTask_(taskId);
+    // 极端 canLaunch==0 等情况，兜底 finalize（maybeFinalizeTask 本身幂等且会检查 running/pending）
+    maybeFinalizeTask(taskId);
 }
 
 // 幂等的任务完成判定：无运行子任务 && 无待调度分片 && 进度已满 -> Completed / Cancelled
-bool DownloadManager::maybeFinalizeTask_(uint64_t taskId)
+bool DownloadManager::maybeFinalizeTask(uint64_t taskId)
 {
     CoreContext* core = getCore(this);
     if (!core)
@@ -1157,24 +1157,24 @@ bool DownloadManager::maybeFinalizeTask_(uint64_t taskId)
 
     // 没有运行子任务且没有 pending：看进度与取消状态
     {
-        std::lock_guard<std::mutex> lk(tasksMutex_);
-        auto itT = tasks_.find(taskId);
-        if (itT == tasks_.end())
+        std::lock_guard<std::mutex> lk(mTasksMutex);
+        auto itT = mTasks.find(taskId);
+        if (itT == mTasks.end())
             return false;
 
         auto& t = itT->second;
-        if (t.cancelled) {
-            t.status = TaskStatus::Cancelled;
+        if (t.Cancelled) {
+            t.Status = TaskStatus::Cancelled;
             return true;
         }
-        if (t.totalSize > 0 && t.downloaded < t.totalSize) {
+        if (t.TotalSize > 0 && t.Downloaded < t.TotalSize) {
             // 还未满，不 finalize
             return false;
         }
         // 满即完成（或 totalSize==0 但确实无子任务/队列时，也按完成处理）
-        if (t.totalSize > 0)
-            t.downloaded = t.totalSize;
-        t.status = TaskStatus::Completed;
+        if (t.TotalSize > 0)
+            t.Downloaded = t.TotalSize;
+        t.Status = TaskStatus::Completed;
     }
     // 完成时，做一次幂等"扫尾"清理，防止容器里残留把外部观察到的状态拖回"运行中"
     {

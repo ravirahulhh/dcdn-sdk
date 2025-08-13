@@ -17,8 +17,8 @@ int main()
     dcdn::DownloadManager mgr;
 
     // 配置为 HTTP_ONLY 策略，最大并发 4
-    mgr.setStrategy(dcdn::DownloadStrategy::HTTP_ONLY);
-    mgr.setMaxConcurrentDownloads(5);
+    mgr.SetStrategy(dcdn::DownloadStrategy::HTTP_ONLY);
+    mgr.SetMaxConcurrentDownloads(5);
 
     // 想下载的 HTTP 文件 URL
     // std::string url = "https://testfileorg.netwet.net/500MB-CZIPtestfile.org.zip";
@@ -37,15 +37,15 @@ int main()
 
     // 下载区间 [start, end]，并把结果写成一个小文件（相对偏移）：
     dcdn::FileDownloadOptions opt;
-    opt.outputPath = "chunk.bin";
-    opt.hasRange = true;
+    opt.OutputPath = "chunk.bin";
+    opt.HasRange = true;
     // opt.rangeStart = 0ULL;
-    opt.rangeStart = 73741824ULL;
-    opt.rangeEnd = 1073741823ULL;
+    opt.RangeStart = 73741824ULL;
+    opt.RangeEnd   = 1073741823ULL;
     // opt.rangeEnd   = 73741823ULL;
-    opt.chunkSize = 10 * 1024 * 1024;
-    opt.writeRangeToSeparateFile = true; // 默认即为 true
-    auto taskId = mgr.addDownloadTask(url, "", opt);
+    opt.ChunkSize = 10 * 1024 * 1024;
+    opt.WriteRangeToSeparateFile = true; // 默认即为 true
+    auto taskId = mgr.AddDownloadTask(url, "", opt);
 
     // 下载区间 [start, EOF]（end 未知）：
     // FileDownloadOptions opt;
@@ -61,20 +61,21 @@ int main()
     // 每秒打印一次任务状态，直到完成/失败
     bool firstPause = true;
     while (true) {
-        auto task = mgr.getTaskStatus(taskId);
+        auto task = mgr.GetTaskStatus(taskId);
 
         double percent = 0.0;
-        if (task.totalSize > 0) {
-            percent = (100.0 * task.downloaded) / task.totalSize;
+        if (task.TotalSize > 0) {
+            percent = (100.0 * task.Downloaded) / task.TotalSize;
         }
 
         std::cout << "进度: " << percent << "% "
-                  << "已下载: " << task.downloaded << "/" << task.totalSize << " bytes "
-                  << "速度: " << task.speed / 1024.0 << " KB/s "
-                  << "状态: " << static_cast<int>(task.status) << std::endl;
+                  << "已下载: " << task.Downloaded << "/" << task.TotalSize << " bytes "
+                  << "速度: " << task.Speed / 1024.0 << " KB/s "
+                  << "状态: " << static_cast<int>(task.Status) << std::endl;
 
-        if (task.status == dcdn::TaskStatus::Completed || task.status == dcdn::TaskStatus::Failed ||
-            task.status == dcdn::TaskStatus::Cancelled) {
+        if (task.Status == dcdn::TaskStatus::Completed ||
+            task.Status == dcdn::TaskStatus::Failed ||
+            task.Status == dcdn::TaskStatus::Cancelled) {
             std::cout << "main: 任务结束" << std::endl;
             break;
         }
@@ -88,19 +89,15 @@ int main()
 
         // 暂停/继续示例
         if (percent > 0.5 && firstPause) {
-            auto success = mgr.pauseDownloadTask(taskId);
-            if (success)
-                std::cout << "main: 暂停任务成功" << std::endl;
-            else
-                std::cout << "main: 暂停任务失败" << std::endl;
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-            std::cout << "main: 继续任务" << std::endl;
-            success = mgr.resumeDownloadTask(taskId);
-            if (success)
-                std::cout << "main: 继续任务成功" << std::endl;
-            else
-                std::cout << "main: 继续任务失败" << std::endl;
-            firstPause = false;
+           auto success = mgr.PauseDownloadTask(taskId);
+           if (success) std::cout << "main: 暂停任务成功" << std::endl;
+           else std::cout << "main: 暂停任务失败" << std::endl;
+           std::this_thread::sleep_for(std::chrono::seconds(1));
+           std::cout << "main: 继续任务" << std::endl;
+           success = mgr.ResumeDownloadTask(taskId);
+           if (success) std::cout << "main: 继续任务成功" << std::endl;
+           else std::cout << "main: 继续任务失败" << std::endl;
+           firstPause = false;
         }
 
         std::this_thread::sleep_for(std::chrono::seconds(1));
