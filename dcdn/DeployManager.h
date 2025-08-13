@@ -55,7 +55,8 @@ inline auto makeDeployStorage(const std::string& filename)
             make_column("block_start", &DeployTask::blockStart),
             make_column("block_end", &DeployTask::blockEnd),
             make_column("block_hash", &DeployTask::blockHash),
-            make_column("status", &DeployTask::status),
+            // 关键修改：强制 NOT NULL + 默认值，确保 extractor 不会遇到 NULL
+            make_column("status", &DeployTask::status, not_null(), default_value(1)),
             make_column("download_path", &DeployTask::downloadPath),
             make_column("create_time", &DeployTask::createTime),
             make_column("update_time", &DeployTask::updateTime)));
@@ -84,8 +85,10 @@ public:
 private:
     friend class EventLoop<DeployManager>;
 
+    // 新增：主动初始化数据库
+    bool initDB();
     int createTable();
-    DeployStoragePtr getDB();
+    DeployStoragePtr getDB(); // 简化版getDB
 
     void run() override;
     void handleDeployMsgEvent(std::shared_ptr<Event> evt);
@@ -117,6 +120,7 @@ private:
     std::shared_ptr<DownloadManager> mDownloadMgr;
     util::HttpClient mClient;
     std::mutex mTaskMutex;
+    std::mutex mDbMutex; // 普通锁即可，无需递归锁
     std::unordered_map<std::string, uint64_t> mJobToTaskMap;
     bool mInited = false; // 标记是否已初始化
 };
