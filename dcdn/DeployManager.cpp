@@ -357,4 +357,61 @@ std::vector<DeployTask> DeployManager::loadDownloadingTasks()
     }
 }
 
+void DeployManager::resubmitDownloadTasks()
+{
+    LOGI << "Resubmitting incomplete deploy tasks";
+    if (!mFileMgr || !mDownloadMgr) {
+        LOGW << "Core managers unavailable, skip task resubmission";
+        return;
+    }
+
+    auto tasks = loadDownloadingTasks();
+    if (tasks.empty()) {
+        LOGI << "No incomplete tasks to resubmit";
+        return;
+    }
+
+    for (const auto& task : tasks) {
+        if (task.downloadPath.empty()) {
+            LOGW << "Invalid download path for task " << task.jobId << ", skipping";
+            continue;
+        }
+
+        FileDownloadOptions opts;
+        opts.outputPath = task.downloadPath;
+        if (task.blockStart > 0 || task.blockEnd > 0) {
+            opts.hasRange = true;
+            opts.rangeStart = task.blockStart;
+            opts.rangeEnd = task.blockEnd;
+        }
+
+        uint64_t taskId = mDownloadMgr->addDownloadTask(task.url, task.fileHash, opts);
+        if (taskId == 0) {
+            LOGW << "Failed to resubmit task " << task.jobId;
+            updateDeployTaskStatus(task.jobId, DeployStatus::FAILED);
+        } else {
+            std::lock_guard<std::mutex> lock(mTaskMutex);
+            mJobToTaskMap[task.jobId] = taskId;
+            LOGI << "Resubmitted task " << task.jobId << " with new task_id: " << taskId;
+        }
+    }
+}
+
+void DeployManager::reportToServer(const std::string& job_id, bool success)
+{
+    try {
+        json event;
+        event["type"] = "deploy_result";
+        event["kvs"] = {{"job_id", job_id}, {"code", success ? "0" : "1"}};
+
+        json request;
+        request["events"] = {event};
+
+        json response;
+        mMan->AsyncApiPost(nullptr, "/api/v1/report_event", request, this, nullptr, nullptr);
+    } catch (const std::exception& e) {
+        LOGE << "Exception during report for job " << job_id << ": " << e.what();
+    }
+}
+
 NS_END
