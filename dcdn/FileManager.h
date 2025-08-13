@@ -39,25 +39,25 @@ struct FileItem
     uint64_t id;
     FileStatus status;
     std::string path;
-    uint64_t last_access;
-    uint64_t last_report;
-    std::string created_at;
-    std::string file_hash;
-    uint64_t block_start = 0;
-    uint64_t block_end = 0;
-    std::string block_hash;
+    uint64_t lastAccess;
+    uint64_t lastReport;
+    std::string createdAt;
+    std::string fileHash;
+    uint64_t blockStart = 0;
+    uint64_t blockEnd = 0;
+    std::string blockHash;
 };
 
 // LRU cache node - unified management of access records and LRU information
 struct LRUNode
 {
-    uint64_t file_id; // File ID used in database
-    uint64_t last_access;
-    uint64_t access_count;
-    uint64_t file_size; // File size information for LRU eviction calculation
-    std::string file_path; // File path for deletion operations
-    std::list<uint64_t>::iterator list_iter; // Iterator pointing to position in LRU list
-    bool is_dirty; // Flag indicating whether flush to database is needed
+    uint64_t fileId; // File ID used in database
+    uint64_t lastAccess;
+    uint64_t accessCount;
+    uint64_t fileSize; // File size information for LRU eviction calculation
+    std::string filePath; // File path for deletion operations
+    std::list<uint64_t>::iterator listIter; // Iterator pointing to position in LRU list
+    bool isDirty; // Flag indicating whether flush to database is needed
 };
 
 struct FileManagerOption
@@ -95,8 +95,8 @@ public:
 
     // Get file path by block hash
     // Returns empty string if file not found
-    std::string GetPathByBlockHash(const std::string& block_hash, bool need_report = false);
-    std::optional<FileResourceInfo> GetUploadFileResource(const std::string& file_hash, uint64_t min_start);
+    std::string GetPathByBlockHash(const std::string& blockHash, bool needReport = false);
+    std::optional<FileResourceInfo> GetUploadFileResource(const std::string& fileHash, uint64_t minStart);
     std::string NewDownloadPath(uint64_t filesize);
 
     void FlushAccessRecords();
@@ -125,15 +125,15 @@ private:
 
     // Helper method: scan filesystem and database, return file difference information
     void scanFilesystemAndDatabase(
-        std::vector<std::string>& filesystem_files,
-        std::unordered_map<std::string, std::tuple<uint64_t, std::string, uint64_t, uint64_t>>& db_files_map);
+        std::vector<std::string>& filesystemFiles,
+        std::unordered_map<std::string, std::tuple<uint64_t, std::string, uint64_t, uint64_t>>& dbFilesMap);
 
     // Helper method: handle orphan files (files in filesystem but not in database)
-    uint64_t cleanOrphanFiles(const std::vector<std::string>& orphan_files);
+    uint64_t cleanOrphanFiles(const std::vector<std::string>& orphanFiles);
 
     // Helper method: handle missing files (files in database but not in filesystem)
     uint64_t cleanMissingFiles(
-        const std::vector<std::tuple<uint64_t, std::string, std::string, uint64_t, uint64_t>>& missing_files);
+        const std::vector<std::tuple<uint64_t, std::string, std::string, uint64_t, uint64_t>>& missingFiles);
 
     void cleanStaleDownloads(); // Clean expired download files
 
@@ -153,8 +153,8 @@ private:
 
     // LRU-related internal methods
     uint64_t calculateTotalStorageSize();
-    void recordFileAccess(uint64_t file_id, const std::string& file_path, uint64_t file_size);
-    void removeLRUFiles(uint64_t current_size, uint64_t target_size);
+    void recordFileAccess(uint64_t fileId, const std::string& filePath, uint64_t fileSize);
+    void removeLRUFiles(uint64_t currentSize, uint64_t targetSize);
 
     // db
     std::filesystem::path dbPath() const
@@ -191,7 +191,7 @@ private:
 
     // LRU-related member variables - using file ID as key
     std::mutex mLRUMutex;
-    std::unordered_map<uint64_t, LRUNode> mLRUCache; // file_id -> LRUNode, unified access record management
+    std::unordered_map<uint64_t, LRUNode> mLRUCache; // fileId -> LRUNode, unified access record management
     std::list<uint64_t> mLRUList; // Recently used file ID list, newest at head
 
     // File operation synchronization lock - prevents race conditions between file create/delete and scan cleanup

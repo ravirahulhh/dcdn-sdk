@@ -6,11 +6,4 @@
 #include "Types.h"
 #include "Version.h"
 
-struct BlockInfo
-{
-    uint64_t start;
-    uint64_t end;
-    std::string hash;
-};
-
 #endif

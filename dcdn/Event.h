@@ -3,6 +3,7 @@
 
 #include <string>
 
+#include "Types.h"
 #include "common/Common.h"
 
 NS_BEGIN(dcdn)
@@ -66,19 +67,19 @@ private:
 struct FileDownloadDoneArg
 {
     std::string url;
-    std::string file_path;
-    std::string file_hash;
-    BlockInfo block_info;
+    std::string filePath;
+    std::string fileHash;
+    BlockInfo blockInfo;
 };
 
 struct FileDownloadFailedArg
 {
-    std::string file_path;
+    std::string filePath;
 };
 
 struct RemoveFileArg
 {
-    std::string block_hash;
+    std::string blockHash;
 };
 
 struct DeployMsgArg

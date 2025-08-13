@@ -44,36 +44,36 @@ struct JsonFileInfo
 
     JsonFileInfo(const std::string& h, const std::string& u, uint64_t s): hash(h), url(u), size(s) {}
 
-    void addBlock(uint64_t start, uint64_t end, const std::string& block_hash)
+    void addBlock(uint64_t start, uint64_t end, const std::string& blockHash)
     {
-        blocks.emplace_back(start, end, block_hash);
+        blocks.emplace_back(start, end, blockHash);
     }
 
     nlohmann::json to_json() const
     {
         nlohmann::json j{{"hash", hash}, {"url", url}, {"size", size}};
 
-        nlohmann::json blocks_array = nlohmann::json::array();
+        nlohmann::json blocksArray = nlohmann::json::array();
         for (const auto& block : blocks) {
-            blocks_array.push_back(block.to_json());
+            blocksArray.push_back(block.to_json());
         }
-        j["blocks"] = blocks_array;
+        j["blocks"] = blocksArray;
 
         return j;
     }
 
     static JsonFileInfo from_json(const nlohmann::json& j)
     {
-        JsonFileInfo file_info{
+        JsonFileInfo fileInfo{
             j.at("hash").get<std::string>(), j.at("url").get<std::string>(), j.at("size").get<uint64_t>()};
 
         if (j.contains("blocks") && j["blocks"].is_array()) {
-            for (const auto& block_json : j["blocks"]) {
-                file_info.blocks.push_back(JsonBlockInfo::from_json(block_json));
+            for (const auto& blockJson : j["blocks"]) {
+                fileInfo.blocks.push_back(JsonBlockInfo::from_json(blockJson));
             }
         }
 
-        return file_info;
+        return fileInfo;
     }
 };
 
@@ -106,17 +106,17 @@ struct JsonReportFileInfo
 
     nlohmann::json to_json() const
     {
-        nlohmann::json add_array = nlohmann::json::array();
+        nlohmann::json addArray = nlohmann::json::array();
         for (const auto& file : add) {
-            add_array.push_back(file.to_json());
+            addArray.push_back(file.to_json());
         }
 
-        nlohmann::json del_array = nlohmann::json::array();
+        nlohmann::json delArray = nlohmann::json::array();
         for (const auto& file : del) {
-            del_array.push_back(file.to_json());
+            delArray.push_back(file.to_json());
         }
 
-        return nlohmann::json{{"add", add_array}, {"del", del_array}};
+        return nlohmann::json{{"add", addArray}, {"del", delArray}};
     }
 
     static JsonReportFileInfo from_json(const nlohmann::json& j)
@@ -124,14 +124,14 @@ struct JsonReportFileInfo
         JsonReportFileInfo report{};
 
         if (j.contains("add") && j["add"].is_array()) {
-            for (const auto& file_json : j["add"]) {
-                report.add.push_back(JsonFileInfo::from_json(file_json));
+            for (const auto& fileJson : j["add"]) {
+                report.add.push_back(JsonFileInfo::from_json(fileJson));
             }
         }
 
         if (j.contains("del") && j["del"].is_array()) {
-            for (const auto& file_json : j["del"]) {
-                report.del.push_back(JsonFileInfo::from_json(file_json));
+            for (const auto& fileJson : j["del"]) {
+                report.del.push_back(JsonFileInfo::from_json(fileJson));
             }
         }
 
