@@ -42,7 +42,7 @@ MainManager::MainManager(): BaseManager(this)
     mWebRtc = std::make_shared<WebRtcManager>(this);
     mFileMgr = std::make_shared<FileManager>(this);
     mUploadMgr = std::make_shared<UploadManager>(this);
-    // mDeployMgr = std::make_shared<DeployManager>(this);
+    mDeployMgr = std::make_shared<DeployManager>(this);
     mDownloadMgr = std::make_shared<dcdn::DownloadManager>();
 
     RegisterGlobalHandler(
