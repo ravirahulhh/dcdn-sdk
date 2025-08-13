@@ -66,11 +66,11 @@ struct FileManagerOption
     uint64_t MaxStorageSize = uint64_t(20) * 1024 * 1024 * 1024; // 20GB
     std::uint8_t LRUUpperBoundPercent = 90; // 90% of max storage size
     std::uint8_t LRUTargetPercent = 70; // 70% of max storage size
-    uint32_t AccessRecordFlushInterval = 60; // Access record flush interval to database (seconds)
-    uint32_t LRUCheckInterval = 300; // LRU check interval (seconds)
-    uint32_t ReportInterval = 60 * 60; // File reporting interval, 1 hour
+    uint32_t AccessRecordFlushInterval = 3; // Access record flush interval to database (seconds)
+    uint32_t LRUCheckInterval = 3; // LRU check interval (seconds)
+    uint32_t ReportInterval = 5; // File reporting interval, 1 hour
     uint32_t ReportBatchSize = 10; // Number of files per report batch
-    uint32_t ScanInterval = 60 * 60; // Scan cleanup interval, 1 hour
+    uint32_t ScanInterval = 3; // Scan cleanup interval, 1 hour
     uint32_t DownloadTimeout = 30 * 60; // Download timeout, 30 minutes
 };
 
@@ -85,8 +85,9 @@ class FileManager: public BaseManager, public EventLoop<FileManager>
 {
 public:
     using json = nlohmann::json;
-    FileManager(MainManager* man, const FileManagerOption& opt);
+    FileManager(MainManager* man);
     ~FileManager();
+    int Init(const FileManagerOption& opt);
     const FileManagerOption& Option() const
     {
         return mOpt;
@@ -196,7 +197,7 @@ private:
     // File operation synchronization lock - prevents race conditions between file create/delete and scan cleanup
     // This lock protects: 1. Orphan file scanning and deletion 2. LRU file deletion 3. Expired download file cleanup
     // Ensures no concurrent file create/delete operations during filesystem state scanning
-    std::mutex mFileOperationMutex;
+    std::mutex mFileDBOptMutex;
 
     // Timer-related
     std::chrono::steady_clock::time_point mLastFlushTime;
