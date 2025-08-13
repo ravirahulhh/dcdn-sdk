@@ -61,12 +61,20 @@ inline auto makeDeployStorage(const std::string& filename) {
 using DeployStorage = decltype(makeDeployStorage(""));
 using DeployStoragePtr = std::shared_ptr<DeployStorage>;
 
+struct DeployManagerOption {
+    std::shared_ptr<FileManager> fileMgr;
+    std::shared_ptr<DownloadManager> downloadMgr;
+};
+
 class DeployManager : public BaseManager, public EventLoop<DeployManager> {
 public:
     using json = nlohmann::json;
 
     explicit DeployManager(MainManager* man);
     ~DeployManager() override;
+
+    // 新增初始化方法，通过option注入依赖
+    int Init(const DeployManagerOption& opt);
 
 private:
     friend class EventLoop<DeployManager>;
@@ -104,6 +112,7 @@ private:
     util::HttpClient mClient;
     std::mutex mTaskMutex;
     std::unordered_map<std::string, uint64_t> mJobToTaskMap;
+    bool mInited = false; // 标记是否已初始化
 };
 
 NS_END

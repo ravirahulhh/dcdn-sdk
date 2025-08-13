@@ -55,25 +55,6 @@ NS_BEGIN(dcdn)
 
 DeployManager::DeployManager(MainManager* man): BaseManager(man)
 {
-    mFileMgr = std::dynamic_pointer_cast<FileManager>(man->getFileManager());
-    mDownloadMgr = std::dynamic_pointer_cast<DownloadManager>(man->getDownloadManager());
-
-    if (!mFileMgr) {
-        LOGW << "FileManager instance is null in DeployManager";
-    }
-    if (!mDownloadMgr) {
-        LOGW << "DownloadManager instance is null in DeployManager";
-    }
-
-    if (createTable() != 0) {
-        LOGE << "DeployManager database initialization failed";
-    } else {
-        LOGI << "DeployManager database initialized successfully";
-    }
-
-    registerHandler(EventType::DeployMsg, &DeployManager::handleDeployMsgEvent);
-
-    resubmitDownloadTasks();
 }
 
 DeployManager::~DeployManager()
@@ -81,6 +62,46 @@ DeployManager::~DeployManager()
     std::lock_guard<std::mutex> lock(mTaskMutex);
     mJobToTaskMap.clear();
 }
+
+int DeployManager::Init(const DeployManagerOption& opt)
+{
+    if (mInited) {
+        LOGW << "DeployManager already initialized";
+        return 0;
+    }
+
+    // 从option注入依赖
+    mFileMgr = opt.fileMgr;
+    mDownloadMgr = opt.downloadMgr;
+
+    // 校验依赖是否有效
+    if (!mFileMgr) {
+        LOGW << "FileManager instance is null in DeployManager";
+        return -1;
+    }
+    if (!mDownloadMgr) {
+        LOGW << "DownloadManager instance is null in DeployManager";
+        return -1;
+    }
+
+    // 初始化数据库表
+    if (createTable() != 0) {
+        LOGE << "DeployManager database initialization failed";
+        return -1;
+    } else {
+        LOGI << "DeployManager database initialized successfully";
+    }
+
+    // 注册事件处理器
+    registerHandler(EventType::DeployMsg, &DeployManager::handleDeployMsgEvent);
+
+    // 重新提交未完成的任务
+    resubmitDownloadTasks();
+
+    mInited = true;
+    return 0;
+}
+
 
 int DeployManager::createTable()
 {
@@ -115,6 +136,11 @@ DeployStoragePtr DeployManager::getDB()
 
 void DeployManager::run()
 {
+    if (!mInited) {
+        LOGE << "DeployManager not initialized, cannot run";
+        return;
+    }
+
     LOGI << "DeployManager started";
     while (true) {
         checkDownloadStatus();
