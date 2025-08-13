@@ -378,14 +378,14 @@ void DeployManager::resubmitDownloadTasks()
         }
 
         FileDownloadOptions opts;
-        opts.outputPath = task.downloadPath;
+        opts.OutputPath = task.downloadPath;
         if (task.blockStart > 0 || task.blockEnd > 0) {
-            opts.hasRange = true;
-            opts.rangeStart = task.blockStart;
-            opts.rangeEnd = task.blockEnd;
+            opts.HasRange = true;
+            opts.RangeStart = task.blockStart;
+            opts.RangeEnd = task.blockEnd;
         }
 
-        uint64_t taskId = mDownloadMgr->addDownloadTask(task.url, task.fileHash, opts);
+        uint64_t taskId = mDownloadMgr->AddDownloadTask(task.url, task.fileHash, opts);
         if (taskId == 0) {
             LOGW << "Failed to resubmit task " << task.jobId;
             updateDeployTaskStatus(task.jobId, DeployStatus::FAILED);

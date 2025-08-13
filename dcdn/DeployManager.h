@@ -94,9 +94,9 @@ private:
     bool saveDeployTask(const DeployTask& task);
     bool updateDeployTaskStatus(const std::string& jobId, DeployStatus status);
     std::vector<DeployTask> loadDownloadingTasks();
-    void resubmitDownloadTasks(){}
+    void resubmitDownloadTasks();
 
-    void reportToServer(const std::string& jobId, bool success){}
+    void reportToServer(const std::string& jobId, bool success);
 
     uint64_t getCurrentTimestamp() const
     {
