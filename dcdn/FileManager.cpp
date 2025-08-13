@@ -758,10 +758,17 @@ void FileManager::reportHaveFiles(const std::vector<std::tuple<FileItem, std::st
             logWarn << "File item has empty block or file hash, skipping report";
             continue;
         }
+        if (item.blockStart > item.blockEnd) {
+            logWarn << "Invalid block range for file item, skipping report";
+            continue;
+        }
         auto it = jsonFiles.find(item.fileHash);
         if (it != jsonFiles.end()) {
             // If file already exists, update block information
             it->second.addBlock(item.blockStart, item.blockEnd, item.blockHash);
+            if (item.fileHash == item.blockHash) {
+                it->second.size = item.blockEnd - item.blockStart;
+            }
         } else {
             // Create new file information
             JsonFileInfo fileInfo(item.fileHash, url, 0);
