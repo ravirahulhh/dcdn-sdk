@@ -42,8 +42,8 @@ MainManager::MainManager(): BaseManager(this)
     mWebRtc = std::make_shared<WebRtcManager>(this);
     mFileMgr = std::make_shared<FileManager>(this);
     mUploadMgr = std::make_shared<UploadManager>(this);
-    mDeployMgr = std::make_shared<DeployManager>(this);
-    // mDownloadMgr = std::make_shared<DownloadManager>(this);
+    // mDeployMgr = std::make_shared<DeployManager>(this);
+    mDownloadMgr = std::make_shared<dcdn::DownloadManager>();
 
     RegisterGlobalHandler(
         EventType::AsyncApiRequest,
@@ -158,8 +158,7 @@ void MainManager::run()
     mWebSkt->Start();
     mFileMgr->Start();
     mUploadMgr->Start();
-    mDownloadMgr->Start();
-    mDeployMgr->Start();
+    // mDownloadMgr->Start();
     while (true) {
         waitAllEvents(std::chrono::milliseconds(1000));
     }
@@ -190,7 +189,7 @@ std::shared_ptr<BaseManager> MainManager::getFileManager() const
     return mFileMgr;
 }
 
-std::shared_ptr<BaseManager> MainManager::getDownloadManager() const
+std::shared_ptr<dcdn::DownloadManager> MainManager::getDownloadManager() const
 {
     return mDownloadMgr;
 }

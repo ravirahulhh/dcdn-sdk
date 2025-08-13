@@ -24,7 +24,7 @@ struct MainManagerOption
     std::string DeviceId;
     std::string ApiKey;
 };
-
+class DownloadManager;
 class MainManager: public BaseManager, public EventLoop<MainManager>
 {
 public:
@@ -75,7 +75,7 @@ public:
     }
 
     std::shared_ptr<BaseManager> getFileManager() const;
-    std::shared_ptr<BaseManager> getDownloadManager() const;
+    std::shared_ptr<DownloadManager> getDownloadManager() const;
 
 private:
     void run();
@@ -116,7 +116,7 @@ private:
     std::shared_ptr<BaseManager> mWebRtc;
     std::shared_ptr<BaseManager> mFileMgr;
     std::shared_ptr<BaseManager> mUploadMgr;
-    std::shared_ptr<BaseManager> mDownloadMgr;
+    std::shared_ptr<dcdn::DownloadManager> mDownloadMgr;
     std::shared_ptr<BaseManager> mDeployMgr;
 };
 

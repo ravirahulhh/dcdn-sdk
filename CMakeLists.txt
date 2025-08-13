@@ -18,9 +18,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include_directories(
+    ${CMAKE_SOURCE_DIR}/deps/src/libdatachannel-0.23.1/deps/json/include
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/deps/src/libdatachannel-0.23.1/deps/plog/include
-    ${CMAKE_SOURCE_DIR}/deps/src/libdatachannel-0.23.1/deps/json/include
 )
 
 set(NO_EXAMPLES ON CACHE BOOL "Disable building datachannel examples" FORCE)
