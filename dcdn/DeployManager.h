@@ -29,16 +29,16 @@ enum class DeployStatus : int
 
 struct DeployTask
 {
-    std::string job_id;
-    std::string file_hash;
+    std::string jobId;
+    std::string fileHash;
     std::string url;
-    uint64_t block_start = 0;
-    uint64_t block_end = 0;
-    std::string block_hash;
+    uint64_t blockStart = 0;
+    uint64_t blockEnd = 0;
+    std::string blockHash;
     DeployStatus status = DeployStatus::DOWNLOADING;
-    std::string download_path;
-    uint64_t create_time = 0;
-    uint64_t update_time = 0;
+    std::string downloadPath;
+    uint64_t createTime = 0;
+    uint64_t updateTime = 0;
 };
 
 // sqlite_orm 存储映射
@@ -49,16 +49,16 @@ inline auto makeDeployStorage(const std::string& filename)
         filename,
         make_table(
             "deploy_tasks",
-            make_column("job_id", &DeployTask::job_id, primary_key()),
-            make_column("file_hash", &DeployTask::file_hash),
+            make_column("job_id", &DeployTask::jobId, primary_key()),
+            make_column("file_hash", &DeployTask::fileHash),
             make_column("url", &DeployTask::url),
-            make_column("block_start", &DeployTask::block_start),
-            make_column("block_end", &DeployTask::block_end),
-            make_column("block_hash", &DeployTask::block_hash),
+            make_column("block_start", &DeployTask::blockStart),
+            make_column("block_end", &DeployTask::blockEnd),
+            make_column("block_hash", &DeployTask::blockHash),
             make_column("status", &DeployTask::status),
-            make_column("download_path", &DeployTask::download_path),
-            make_column("create_time", &DeployTask::create_time),
-            make_column("update_time", &DeployTask::update_time)));
+            make_column("download_path", &DeployTask::downloadPath),
+            make_column("create_time", &DeployTask::createTime),
+            make_column("update_time", &DeployTask::updateTime)));
 }
 
 using DeployStorage = decltype(makeDeployStorage(""));
@@ -92,11 +92,11 @@ private:
     void checkDownloadStatus();
 
     bool saveDeployTask(const DeployTask& task);
-    bool updateDeployTaskStatus(const std::string& job_id, DeployStatus status);
+    bool updateDeployTaskStatus(const std::string& jobId, DeployStatus status);
     std::vector<DeployTask> loadDownloadingTasks();
     void resubmitDownloadTasks();
 
-    void reportToServer(const std::string& job_id, bool success);
+    void reportToServer(const std::string& jobId, bool success);
 
     uint64_t getCurrentTimestamp() const
     {

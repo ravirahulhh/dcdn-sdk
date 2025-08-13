@@ -157,76 +157,76 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
     }
     const auto& arg = e->Arg();
 
-    if (arg.job_id.empty()) {
-        LOGW << "DeployMsg missing required field: job_id";
+    if (arg.jobId.empty()) {
+        LOGW << "DeployMsg missing required field: jobId";
         return;
     }
 
-    if (arg.file_hash.empty() || arg.url.empty()) {
-        LOGW << "DeployMsg invalid: missing url or hash (job_id: " << arg.job_id << ")";
-        reportToServer(arg.job_id, false);
+    if (arg.fileHash.empty() || arg.url.empty()) {
+        LOGW << "DeployMsg invalid: missing url or hash (jobId: " << arg.jobId << ")";
+        reportToServer(arg.jobId, false);
         return;
     }
 
     if (!mFileMgr) {
-        LOGE << "FileManager is not available (job_id: " << arg.job_id << ")";
-        reportToServer(arg.job_id, false);
+        LOGE << "FileManager is not available (jobId: " << arg.jobId << ")";
+        reportToServer(arg.jobId, false);
         return;
     }
 
     std::string downloadPath = mFileMgr->NewDownloadPath(0);
     if (downloadPath.empty()) {
-        LOGW << "Failed to get download path (job_id: " << arg.job_id << ")";
-        reportToServer(arg.job_id, false);
+        LOGW << "Failed to get download path (jobId: " << arg.jobId << ")";
+        reportToServer(arg.jobId, false);
         return;
     }
 
     DeployTask task;
-    task.job_id = arg.job_id;
-    task.file_hash = arg.file_hash;
-    task.block_hash = arg.block_info.hash;
-    task.block_start = arg.block_info.start;
-    task.block_end = arg.block_info.end;
+    task.jobId = arg.jobId;
+    task.fileHash = arg.fileHash;
+    task.blockHash = arg.blockInfo.hash;
+    task.blockStart = arg.blockInfo.start;
+    task.blockEnd = arg.blockInfo.end;
     task.url = arg.url;
     task.status = DeployStatus::DOWNLOADING;
-    task.download_path = downloadPath;
-    task.create_time = getCurrentTimestamp();
-    task.update_time = task.create_time;
+    task.downloadPath = downloadPath;
+    task.createTime = getCurrentTimestamp();
+    task.updateTime = task.createTime;
 
     if (!saveDeployTask(task)) {
-        LOGW << "Failed to save deploy task (job_id: " << arg.job_id << ")";
-        reportToServer(arg.job_id, false);
+        LOGW << "Failed to save deploy task (jobId: " << arg.jobId << ")";
+        reportToServer(arg.jobId, false);
         return;
     }
 
     if (!mDownloadMgr) {
-        LOGE << "DownloadManager is not available (job_id: " << arg.job_id << ")";
-        updateDeployTaskStatus(arg.job_id, DeployStatus::FAILED);
-        reportToServer(arg.job_id, false);
+        LOGE << "DownloadManager is not available (jobId: " << arg.jobId << ")";
+        updateDeployTaskStatus(arg.jobId, DeployStatus::FAILED);
+        reportToServer(arg.jobId, false);
         return;
     }
 
     FileDownloadOptions opts;
     opts.outputPath = downloadPath;
-    if (task.block_start > 0 || task.block_end > 0) {
+    if (task.blockStart > 0 || task.blockEnd > 0) {
         opts.hasRange = true;
-        opts.rangeStart = task.block_start;
-        opts.rangeEnd = task.block_end;
+        opts.rangeStart = task.blockStart;
+        opts.rangeEnd = task.blockEnd;
     }
 
-    uint64_t taskId = mDownloadMgr->addDownloadTask(task.url, task.file_hash, opts);
+    uint64_t taskId = mDownloadMgr->addDownloadTask(task.url, task.fileHash, opts);
     if (taskId == 0) {
-        LOGW << "Failed to create download task (job_id: " << arg.job_id << ")";
-        updateDeployTaskStatus(arg.job_id, DeployStatus::FAILED);
-        reportToServer(arg.job_id, false);
+        LOGW << "Failed to create download task (jobId: " << arg.jobId << ")";
+        updateDeployTaskStatus(arg.jobId, DeployStatus::FAILED);
+        reportToServer(arg.jobId, false);
         return;
     }
 
     {
         std::lock_guard<std::mutex> lock(mTaskMutex);
-        mJobToTaskMap[arg.job_id] = taskId;
+        mJobToTaskMap[arg.jobId] = taskId;
     }
-    LOGI << "Deploy task initialized (job_id: " << arg.job_id << ", task_id: " << taskId << ")";
+    LOGI << "Deploy task initialized (jobId: " << arg.jobId << ", taskId: " << taskId << ")";
 }
 
 void DeployManager::checkDownloadStatus()
@@ -245,9 +245,9 @@ void DeployManager::checkDownloadStatus()
         uint64_t taskId = 0;
         {
             std::lock_guard<std::mutex> lock(mTaskMutex);
-            auto it = mJobToTaskMap.find(task.job_id);
+            auto it = mJobToTaskMap.find(task.jobId);
             if (it == mJobToTaskMap.end()) {
-                LOGW << "No download task ID found for job: " << task.job_id;
+                LOGW << "No download task ID found for job: " << task.jobId;
                 continue;
             }
             taskId = it->second;
@@ -258,50 +258,50 @@ void DeployManager::checkDownloadStatus()
         switch (downloadStatus.status) {
             case TaskStatus::Completed: {
                 FileDownloadDoneArg doneArg;
-                doneArg.file_hash = task.file_hash;
-                doneArg.block_info.hash = task.block_hash;
-                doneArg.block_info.start = task.block_start;
-                doneArg.block_info.end = task.block_end;
+                doneArg.fileHash = task.fileHash;
+                doneArg.blockInfo.hash = task.blockHash;
+                doneArg.blockInfo.start = task.blockStart;
+                doneArg.blockInfo.end = task.blockEnd;
                 doneArg.url = task.url;
-                doneArg.file_path = task.download_path;
+                doneArg.filePath = task.downloadPath;
 
                 mFileMgr->PostEvent(
                     std::make_shared<ArgEvent<FileDownloadDoneArg>>(EventType::FileDownloadDone, std::move(doneArg)));
 
-                updateDeployTaskStatus(task.job_id, DeployStatus::COMPLETED);
+                updateDeployTaskStatus(task.jobId, DeployStatus::COMPLETED);
 
                 {
                     std::lock_guard<std::mutex> lock(mTaskMutex);
-                    mJobToTaskMap.erase(task.job_id);
+                    mJobToTaskMap.erase(task.jobId);
                 }
 
-                reportToServer(task.job_id, true);
-                LOGI << "Deploy task completed (job_id: " << task.job_id << ")";
+                reportToServer(task.jobId, true);
+                LOGI << "Deploy task completed (jobId: " << task.jobId << ")";
                 break;
             }
             case TaskStatus::Failed:
             case TaskStatus::Cancelled: {
                 FileDownloadFailedArg failArg;
-                failArg.file_path = task.download_path;
+                failArg.filePath = task.downloadPath;
 
                 mFileMgr->PostEvent(
                     std::make_shared<ArgEvent<FileDownloadFailedArg>>(
                         EventType::FileDownloadFailed, std::move(failArg)));
 
-                updateDeployTaskStatus(task.job_id, DeployStatus::FAILED);
+                updateDeployTaskStatus(task.jobId, DeployStatus::FAILED);
 
                 {
                     std::lock_guard<std::mutex> lock(mTaskMutex);
-                    mJobToTaskMap.erase(task.job_id);
+                    mJobToTaskMap.erase(task.jobId);
                 }
 
-                reportToServer(task.job_id, false);
-                LOGW << "Deploy task failed (job_id: " << task.job_id << ")";
+                reportToServer(task.jobId, false);
+                LOGW << "Deploy task failed (jobId: " << task.jobId << ")";
                 break;
             }
             default: {
                 DeployTask updateTask = task;
-                updateTask.update_time = getCurrentTimestamp();
+                updateTask.updateTime = getCurrentTimestamp();
                 saveDeployTask(updateTask);
                 break;
             }
@@ -319,12 +319,12 @@ bool DeployManager::saveDeployTask(const DeployTask& task)
         db->replace(task);
         return true;
     } catch (const std::exception& e) {
-        LOGE << "Save deploy task failed (job_id: " << task.job_id << "): " << e.what();
+        LOGE << "Save deploy task failed (jobId: " << task.jobId << "): " << e.what();
         return false;
     }
 }
 
-bool DeployManager::updateDeployTaskStatus(const std::string& job_id, DeployStatus status)
+bool DeployManager::updateDeployTaskStatus(const std::string& jobId, DeployStatus status)
 {
     auto db = getDB();
     if (!db)
@@ -333,11 +333,11 @@ bool DeployManager::updateDeployTaskStatus(const std::string& job_id, DeployStat
     try {
         using namespace sqlite_orm;
         db->update_all(
-            set(c(&DeployTask::status) = status, c(&DeployTask::update_time) = getCurrentTimestamp()),
-            where(c(&DeployTask::job_id) == job_id));
+            set(c(&DeployTask::status) = status, c(&DeployTask::updateTime) = getCurrentTimestamp()),
+            where(c(&DeployTask::jobId) == jobId));
         return true;
     } catch (const std::exception& e) {
-        LOGE << "Update task status failed (job_id: " << job_id << "): " << e.what();
+        LOGE << "Update task status failed (jobId: " << jobId << "): " << e.what();
         return false;
     }
 }
@@ -354,63 +354,6 @@ std::vector<DeployTask> DeployManager::loadDownloadingTasks()
     } catch (const std::exception& e) {
         LOGE << "Load downloading tasks failed: " << e.what();
         return {};
-    }
-}
-
-void DeployManager::resubmitDownloadTasks()
-{
-    LOGI << "Resubmitting incomplete deploy tasks";
-    if (!mFileMgr || !mDownloadMgr) {
-        LOGW << "Core managers unavailable, skip task resubmission";
-        return;
-    }
-
-    auto tasks = loadDownloadingTasks();
-    if (tasks.empty()) {
-        LOGI << "No incomplete tasks to resubmit";
-        return;
-    }
-
-    for (const auto& task : tasks) {
-        if (task.download_path.empty()) {
-            LOGW << "Invalid download path for task " << task.job_id << ", skipping";
-            continue;
-        }
-
-        FileDownloadOptions opts;
-        opts.outputPath = task.download_path;
-        if (task.block_start > 0 || task.block_end > 0) {
-            opts.hasRange = true;
-            opts.rangeStart = task.block_start;
-            opts.rangeEnd = task.block_end;
-        }
-
-        uint64_t taskId = mDownloadMgr->addDownloadTask(task.url, task.file_hash, opts);
-        if (taskId == 0) {
-            LOGW << "Failed to resubmit task " << task.job_id;
-            updateDeployTaskStatus(task.job_id, DeployStatus::FAILED);
-        } else {
-            std::lock_guard<std::mutex> lock(mTaskMutex);
-            mJobToTaskMap[task.job_id] = taskId;
-            LOGI << "Resubmitted task " << task.job_id << " with new task_id: " << taskId;
-        }
-    }
-}
-
-void DeployManager::reportToServer(const std::string& job_id, bool success)
-{
-    try {
-        json event;
-        event["type"] = "deploy_result";
-        event["kvs"] = {{"job_id", job_id}, {"code", success ? "0" : "1"}};
-
-        json request;
-        request["events"] = {event};
-
-        json response;
-        mMan->AsyncApiPost(nullptr, "/api/v1/report_event", request, this, nullptr, nullptr);
-    } catch (const std::exception& e) {
-        LOGE << "Exception during report for job " << job_id << ": " << e.what();
     }
 }
 
