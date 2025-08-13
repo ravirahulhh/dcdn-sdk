@@ -32,6 +32,19 @@
 ## 锁
 锁的粒度要足够小，只锁定需要的资源，资源获取到后立刻释放，处理好后再加锁处理结果
 
+## 库使用
+
+### log
+底层使用的是plog，但是不要直接用plog的宏或函数(避免和libdatachannel依赖plog冲突)，使用sdk中封装的宏
+- logVerb
+- logDebug
+- logInfo
+- logWarn
+- logError
+
+### http请求
+使用MainManager提供的封装，同步的用ApiPost，异步的用AsyncApiPost，推荐使用异步接口，避免直接使用HttpClient和ApiClient的接口
+
 ## 第三方依赖
 - 慎重引入新的第三方依赖
 
