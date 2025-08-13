@@ -75,8 +75,8 @@ public:
     }
 
     std::shared_ptr<BaseManager> GetFileManager() const;
-    std::shared_ptr<DownloadManager> getDownloadManager() const;
-    std::shared_ptr<BaseManager> getDeployManager() const;
+    std::shared_ptr<DownloadManager> GetDownloadManager() const;
+    std::shared_ptr<BaseManager> GetDeployManager() const;
 
 private:
     void run();

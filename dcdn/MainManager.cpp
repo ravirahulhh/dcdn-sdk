@@ -87,7 +87,7 @@ int MainManager::init(const MainManagerOption& opt)
 
     DeployManagerOption deployOpt;
     deployOpt.fileMgr = std::dynamic_pointer_cast<FileManager>(this->GetFileManager());
-    deployOpt.downloadMgr = std::dynamic_pointer_cast<DownloadManager>(this->getDownloadManager());
+    deployOpt.downloadMgr = std::dynamic_pointer_cast<DownloadManager>(this->GetDownloadManager());
 
     // 调用 DeployManager 的 Init 方法
     if (static_cast<DeployManager*>(mDeployMgr.get())->Init(deployOpt) != 0) {
@@ -191,12 +191,12 @@ std::shared_ptr<BaseManager> MainManager::GetFileManager() const
     return mFileMgr;
 }
 
-std::shared_ptr<dcdn::DownloadManager> MainManager::getDownloadManager() const
+std::shared_ptr<dcdn::DownloadManager> MainManager::GetDownloadManager() const
 {
     return mDownloadMgr;
 }
 
-std::shared_ptr<BaseManager> MainManager::getDeployManager() const
+std::shared_ptr<BaseManager> MainManager::GetDeployManager() const
 {
     return mDeployMgr;
 }
