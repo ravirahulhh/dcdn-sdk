@@ -382,15 +382,7 @@ void DeployManager::reportToServer(const std::string& job_id, bool success)
         return;
     }
     try {
-        json report;
-        std::string peer_id = mMan->Cfg().PeerId();
-        if (peer_id.empty()) {
-            LOGW << "peer_id is empty, using default";
-            peer_id = "unknown_peer";
-        }
-
         json event;
-        event["peer_id"] = peer_id;
         event["type"] = "deploy_result";
         event["kvs"] = {{"job_id", job_id}, {"code", success ? "0" : "1"}};
 
@@ -398,12 +390,7 @@ void DeployManager::reportToServer(const std::string& job_id, bool success)
         request["events"] = {event};
 
         json response;
-        long httpCode = mainMgr->ApiPost(mClient, "/api/v1/report_event", request, response);
-        if (httpCode != 200) {
-            LOGW << "Report failed for job " << job_id << " (HTTP code: " << httpCode << ")";
-        } else {
-            LOGI << "Successfully reported job " << job_id;
-        }
+        mMan->AsyncApiPost(nullptr, "/api/v1/report_event", request, this, nullptr, nullptr);
     } catch (const std::exception& e) {
         LOGE << "Exception during report for job " << job_id << ": " << e.what();
     }
