@@ -94,17 +94,20 @@ public:
     using Base::Base;
 };
 
-FileManager::FileManager(MainManager* man, const FileManagerOption& opt): BaseManager(man), mOpt(opt)
+FileManager::FileManager(MainManager* man): BaseManager(man) {}
+
+int FileManager::init(const FileManagerOption& opt)
 {
+    mOpt = opt;
     mLastFlushTime = std::chrono::steady_clock::now();
     mLastLRUCheckTime = std::chrono::steady_clock::now();
 
-    if (man->Option().WorkDir.empty()) {
+    if (mMan->Option().WorkDir.empty()) {
         throw std::runtime_error("Work directory is not set in MainManager");
     }
 
-    if (!std::filesystem::exists(man->Option().WorkDir)) {
-        std::filesystem::create_directories(man->Option().WorkDir);
+    if (!std::filesystem::exists(mMan->Option().WorkDir)) {
+        std::filesystem::create_directories(mMan->Option().WorkDir);
         logDebug << "Created work directory";
     }
 
@@ -148,43 +151,37 @@ FileManager::FileManager(MainManager* man, const FileManagerOption& opt): BaseMa
     registerHandler(EventType::FileDownloadFailed, &FileManager::handleDownloadFileFailed);
     registerHandler(EventType::RemoveFile, &FileManager::handleRemoveFile);
     registerHandler(EventType::AsyncApiRequest, &FileManager::handleAsyncApiRequestEvent);
-
-    // Start LRU thread
-    mLRUThread = std::thread(&FileManager::runLRUThread, this);
-
-    // Start flush thread
-    mFlushThread = std::thread(&FileManager::runFlushThread, this);
-
-    // Start report thread
-    mReportThread = std::thread(&FileManager::runReportThread, this);
-
-    // Start scan cleanup thread
-    mScanThread = std::thread(&FileManager::runScanThread, this);
 }
 
 FileManager::~FileManager()
 {
-    // Stop all threads
-    mShouldStop = true;
-    mLRUCondition.notify_all();
-    mFlushCondition.notify_all();
-    mReportCondition.notify_all();
-    mScanCondition.notify_all();
+    try {
+        // Stop all threads
+        mShouldStop = true;
+        mLRUCondition.notify_all();
+        mFlushCondition.notify_all();
+        mReportCondition.notify_all();
+        mScanCondition.notify_all();
 
-    if (mLRUThread.joinable()) {
-        mLRUThread.join();
-    }
+        if (mLRUThread.joinable()) {
+            mLRUThread.join();
+        }
 
-    if (mFlushThread.joinable()) {
-        mFlushThread.join();
-    }
+        if (mFlushThread.joinable()) {
+            mFlushThread.join();
+        }
 
-    if (mReportThread.joinable()) {
-        mReportThread.join();
-    }
+        if (mReportThread.joinable()) {
+            mReportThread.join();
+        }
 
-    if (mScanThread.joinable()) {
-        mScanThread.join();
+        if (mScanThread.joinable()) {
+            mScanThread.join();
+        }
+    } catch (const std::exception& e) {
+        logError << "Exception during FileManager destruction: " << e.what();
+    } catch (...) {
+        logError << "Unknown exception during FileManager destruction";
     }
 }
 
@@ -206,6 +203,22 @@ void FileManager::run()
         std::filesystem::create_directories(fileDir());
         logDebug << "Created file directory: " << fileDir();
     }
+
+    // Start LRU thread
+    logDebug << "Starting LRU eviction thread";
+    mLRUThread = std::thread(&FileManager::runLRUThread, this);
+
+    // Start flush thread
+    logDebug << "Starting access record flush thread";
+    mFlushThread = std::thread(&FileManager::runFlushThread, this);
+
+    // Start report thread
+    logDebug << "Starting file reporting thread";
+    mReportThread = std::thread(&FileManager::runReportThread, this);
+
+    // Start scan cleanup thread
+    logDebug << "Starting scan cleanup thread";
+    mScanThread = std::thread(&FileManager::runScanThread, this);
 
     while (true) {
         // Main loop only handles events, flush tasks are handled by separate threads
