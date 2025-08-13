@@ -72,15 +72,15 @@ struct UploadFileTask
     std::string PeerID;
     std::string FileHash;
     std::string FilePath;
-    size_t Offset;
-    size_t Len;
+    size_t BlockStart;
+    size_t BlockEnd;
     std::string IceUfrag;
     std::string IcePwd;
     std::string RemoteSdp;
 
-    std::string label;
-    std::shared_ptr<rtc::PeerConnection> pc;
-    std::shared_ptr<rtc::DataChannel> dc;
+    std::string ChannelLabel;
+    std::shared_ptr<rtc::PeerConnection> Pc;
+    std::shared_ptr<rtc::DataChannel> Dc;
 
     enum State
     {
@@ -92,47 +92,49 @@ struct UploadFileTask
         Cancelled,
         Completed,
     };
-    std::mutex stateMutex;
-    State state;
+    std::mutex StateMutex;
+    State TaskState;
 
-    size_t bytesSent = 0;
-    std::ifstream file;
+    size_t BytesSent = 0;
+    size_t FileOffset;
+    size_t FileEnd;
+    std::ifstream File;
 
     UploadFileTask(
         const std::string& PeerID,
         const std::string& FileHash,
-        uint64_t offset,
-        uint64_t len,
+        uint64_t Start,
+        uint64_t End,
         const std::string& IceUfrag,
         const std::string& IcePwd,
         const std::string& RemoteSdp)
     {
-        state = Init;
+        TaskState = Init;
         this->PeerID = PeerID;
         this->FileHash = FileHash;
-        this->Offset = offset;
-        this->Len = len;
+        this->BlockStart = Start;
+        this->BlockEnd = End;
         this->IceUfrag = IceUfrag;
         this->IcePwd = IcePwd;
         this->RemoteSdp = RemoteSdp;
-        this->label = FileHash + "-" + std::to_string(offset) + "-" + std::to_string(len);
+        this->ChannelLabel = FileHash + "-" + std::to_string(Start) + "-" + std::to_string(End);
     }
 
     std::string Label()
     {
-        return label;
+        return ChannelLabel;
     }
 
     State GetState()
     {
-        std::lock_guard<std::mutex> lock(stateMutex);
-        return state;
+        std::lock_guard<std::mutex> lock(StateMutex);
+        return TaskState;
     }
 
     void SetState(State newState)
     {
-        std::lock_guard<std::mutex> lock(stateMutex);
-        state = newState;
+        std::lock_guard<std::mutex> lock(StateMutex);
+        TaskState = newState;
     }
 };
 
