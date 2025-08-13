@@ -154,10 +154,10 @@ void MainManager::run()
     logInfo << "MainManager running";
     mHttpDownloader->Start();
     login();
-    mWebRtc->Start();
-    mWebSkt->Start();
+    // mWebRtc->Start();
+    // mWebSkt->Start();
     mFileMgr->Start();
-    mUploadMgr->Start();
+    // mUploadMgr->Start();
     // mDownloadMgr->Start();
     while (true) {
         waitAllEvents(std::chrono::milliseconds(1000));
@@ -192,6 +192,11 @@ std::shared_ptr<BaseManager> MainManager::getFileManager() const
 std::shared_ptr<dcdn::DownloadManager> MainManager::getDownloadManager() const
 {
     return mDownloadMgr;
+}
+
+std::shared_ptr<BaseManager> MainManager::getDeployManager() const
+{
+    return mDeployMgr;
 }
 
 NS_END
