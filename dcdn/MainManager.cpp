@@ -158,6 +158,7 @@ void MainManager::run()
     mWebSkt->Start();
     mFileMgr->Start();
     mUploadMgr->Start();
+    mDeployMgr->Start();
     // mDownloadMgr->Start();
     while (true) {
         waitAllEvents(std::chrono::milliseconds(1000));
