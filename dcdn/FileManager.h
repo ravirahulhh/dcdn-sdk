@@ -87,7 +87,7 @@ public:
     using json = nlohmann::json;
     FileManager(MainManager* man);
     ~FileManager();
-    int init(const FileManagerOption& opt);
+    int Init(const FileManagerOption& opt);
     const FileManagerOption& Option() const
     {
         return mOpt;

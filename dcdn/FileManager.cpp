@@ -96,14 +96,15 @@ public:
 
 FileManager::FileManager(MainManager* man): BaseManager(man) {}
 
-int FileManager::init(const FileManagerOption& opt)
+int FileManager::Init(const FileManagerOption& opt)
 {
     mOpt = opt;
     mLastFlushTime = std::chrono::steady_clock::now();
     mLastLRUCheckTime = std::chrono::steady_clock::now();
 
     if (mMan->Option().WorkDir.empty()) {
-        throw std::runtime_error("Work directory is not set in MainManager");
+        logError << "Work directory is not set in MainManager";
+        return -1;
     }
 
     if (!std::filesystem::exists(mMan->Option().WorkDir)) {
@@ -112,7 +113,8 @@ int FileManager::init(const FileManagerOption& opt)
     }
 
     if (opt.RootPath.empty()) {
-        throw std::runtime_error("Root path is not set in FileManagerOption");
+        logError << "Root path is not set in FileManagerOption";
+        return -1;
     }
 
     if (!std::filesystem::exists(opt.RootPath)) {
@@ -125,7 +127,7 @@ int FileManager::init(const FileManagerOption& opt)
     if (!std::filesystem::exists(dbPath())) {
         if (createTable() != ErrorCodeOk) {
             logError << "Failed to create files.db table";
-            throw std::runtime_error("Failed to create files.db table");
+            return -1;
         }
     }
 
@@ -134,7 +136,7 @@ int FileManager::init(const FileManagerOption& opt)
             db->stor.sync_schema();
         } catch (...) {
             logError << "Failed to sync schema for files.db";
-            throw std::runtime_error("Failed to sync schema for files.db");
+            return -1;
         }
     }
 

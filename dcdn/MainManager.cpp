@@ -37,13 +37,9 @@ MainManager::MainManager(): BaseManager(this)
     mHttpDownloader = std::make_shared<util::HttpDownloader>();
     mApiClient = std::make_shared<ApiClient>(mHttpDownloader.get());
 
-    FileManagerOption fileMgrOpt = FileManagerOption();
-    fileMgrOpt.RootPath = std::filesystem::path(mOpt.WorkDir).append("download").string();
-
     mWebSkt = std::make_shared<WebSocketManager>(this);
     mWebRtc = std::make_shared<WebRtcManager>(this);
-    dcdn::FileManagerOption fmOpt; // TODO: load from configuration
-    mFileMgr = std::make_shared<FileManager>(this, fileMgrOpt);
+    mFileMgr = std::make_shared<FileManager>(this);
     mUploadMgr = std::make_shared<UploadManager>(this);
     mDeployMgr = std::make_shared<DeployManager>(this);
     // mDownloadMgr = std::make_shared<DownloadManager>(this);
@@ -78,6 +74,15 @@ int MainManager::init(const MainManagerOption& opt)
     if (peerId.empty()) {
         // TODO: generate PeerId
     }
+
+    // Init FileManager
+    FileManagerOption fileMgrOpt = FileManagerOption();
+    fileMgrOpt.RootPath = std::filesystem::path(mOpt.WorkDir).append("download").string();
+    if (static_cast<FileManager*>(mFileMgr.get())->Init(fileMgrOpt) != 0) {
+        LOGE << "Failed to initialize FileManager";
+        return -1;
+    }
+
     DeployManagerOption deployOpt;
     deployOpt.fileMgr = std::dynamic_pointer_cast<FileManager>(this->getFileManager());
     deployOpt.downloadMgr = std::dynamic_pointer_cast<DownloadManager>(this->getDownloadManager());
