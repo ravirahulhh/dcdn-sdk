@@ -74,7 +74,7 @@ public:
         return mApiClient->Cancel(reqId);
     }
 
-    std::shared_ptr<BaseManager> getFileManager() const;
+    std::shared_ptr<BaseManager> GetFileManager() const;
     std::shared_ptr<DownloadManager> getDownloadManager() const;
     std::shared_ptr<BaseManager> getDeployManager() const;
 

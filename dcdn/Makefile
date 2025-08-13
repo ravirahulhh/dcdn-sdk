@@ -32,6 +32,8 @@ libdcdnObjs = \
 			   dcdn.o \
 			   DownloadManager.o \
 			   DeployManager.o \
+			   P2PDownloader.o \
+			   P2PSingleTask.o \
 
 testTargets = \
 			  MainTest \

@@ -2,10 +2,10 @@
 #define _DCDN_UTIL_DOWNLOADER_H_
 
 #include <any>
+#include <atomic>
 #include <list>
 #include <string>
 #include <thread>
-#include <atomic>
 
 #include "common/Common.h"
 

@@ -205,7 +205,8 @@ private:
                     } else {
                         t->setStatus(HttpDownloaderTask::Fail);
                     }
-                    logDebug << "task url:" << t->mOpt.Request->Url() << " complete: " << (res == CURLE_OK ? "succ" : "fail");
+                    logDebug << "task url:" << t->mOpt.Request->Url()
+                             << " complete: " << (res == CURLE_OK ? "succ" : "fail");
                 }
             }
 

@@ -1,16 +1,15 @@
-#include "DownloadManager.h"
-#include <iostream>
-#include <thread>
-#include <chrono>
-
 #include <plog/Appenders/ConsoleAppender.h>
 #include <plog/Initializers/RollingFileInitializer.h>
 #include <plog/Log.h>
 
 #include <chrono>
 #include <iostream>
+#include <thread>
 
-int main() {
+#include "DownloadManager.h"
+
+int main()
+{
     static plog::ConsoleAppender<plog::TxtFormatter> consoleAppender;
     plog::Severity lvl = plog::debug;
     plog::init<DCDN_LOGGER_ID>(lvl, &consoleAppender);
@@ -24,7 +23,6 @@ int main() {
     // 想下载的 HTTP 文件 URL
     // std::string url = "https://testfileorg.netwet.net/500MB-CZIPtestfile.org.zip";
     std::string url = "https://hil-speed.hetzner.com/1GB.bin";
-
 
     // 输出到本地 test.bin，内部并发分片大小 10MB (Preferred Chunk Size, 不一定严格遵守)
     // dcdn::FileDownloadOptions opts;
@@ -43,7 +41,7 @@ int main() {
     opt.hasRange = true;
     // opt.rangeStart = 0ULL;
     opt.rangeStart = 73741824ULL;
-    opt.rangeEnd   = 1073741823ULL;
+    opt.rangeEnd = 1073741823ULL;
     // opt.rangeEnd   = 73741823ULL;
     opt.chunkSize = 10 * 1024 * 1024;
     opt.writeRangeToSeparateFile = true; // 默认即为 true
@@ -56,7 +54,6 @@ int main() {
     // opt.rangeStart = 100 * 1024 * 1024ULL;
     // opt.rangeEnd   = SIZE_MAX; // 未知
     // mgr.addDownloadTask(url, "", opt);
-
 
     // 添加下载任务
     std::cout << "任务已创建，taskId = " << taskId << std::endl;
@@ -76,8 +73,7 @@ int main() {
                   << "速度: " << task.speed / 1024.0 << " KB/s "
                   << "状态: " << static_cast<int>(task.status) << std::endl;
 
-        if (task.status == dcdn::TaskStatus::Completed ||
-            task.status == dcdn::TaskStatus::Failed ||
+        if (task.status == dcdn::TaskStatus::Completed || task.status == dcdn::TaskStatus::Failed ||
             task.status == dcdn::TaskStatus::Cancelled) {
             std::cout << "main: 任务结束" << std::endl;
             break;
@@ -92,15 +88,19 @@ int main() {
 
         // 暂停/继续示例
         if (percent > 0.5 && firstPause) {
-           auto success = mgr.pauseDownloadTask(taskId);
-           if (success) std::cout << "main: 暂停任务成功" << std::endl;
-           else std::cout << "main: 暂停任务失败" << std::endl;
-           std::this_thread::sleep_for(std::chrono::seconds(1));
-           std::cout << "main: 继续任务" << std::endl;
-           success = mgr.resumeDownloadTask(taskId);
-           if (success) std::cout << "main: 继续任务成功" << std::endl;
-           else std::cout << "main: 继续任务失败" << std::endl;
-           firstPause = false;
+            auto success = mgr.pauseDownloadTask(taskId);
+            if (success)
+                std::cout << "main: 暂停任务成功" << std::endl;
+            else
+                std::cout << "main: 暂停任务失败" << std::endl;
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            std::cout << "main: 继续任务" << std::endl;
+            success = mgr.resumeDownloadTask(taskId);
+            if (success)
+                std::cout << "main: 继续任务成功" << std::endl;
+            else
+                std::cout << "main: 继续任务失败" << std::endl;
+            firstPause = false;
         }
 
         std::this_thread::sleep_for(std::chrono::seconds(1));

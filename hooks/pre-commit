@@ -1,0 +1,25 @@
+#!/bin/sh
+
+ROOT=$(git rev-parse --show-toplevel)
+
+FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(c|cpp|cc|cxx|h|hpp|hh)$')
+
+if [ -z "$FILES" ]; then
+    exit 0
+fi
+
+# 检查 clang-format 是否可用
+CLANG_FORMAT="clang-format"
+if ! command -v "$CLANG_FORMAT" >/dev/null 2>&1; then
+    echo "错误: clang-format 未安装。请安装 clang-format 并重试。"
+    exit 1
+fi
+
+echo "运行 clang-format 格式化代码..."
+for file in $FILES; do
+    "$CLANG_FORMAT" -i -style=file "$ROOT/$file"
+    git add "$ROOT/$file"
+done
+
+echo "clang-format 格式化完成。"
+exit 0

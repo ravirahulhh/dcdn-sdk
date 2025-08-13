@@ -1,30 +1,34 @@
 #ifndef _DCDN_SDK_DEPLOY_MANAGER_H_
 #define _DCDN_SDK_DEPLOY_MANAGER_H_
 
-#include "BaseManager.h"
-#include "EventLoop.h"
-#include "FileManager.h"
-#include "DownloadManager.h"
-#include "common/Common.h" // 包含BlockInfo定义
-#include <sqlite_orm/sqlite_orm.h>
 #include <nlohmann/json.hpp>
-#include <string>
-#include <vector>
+#include <sqlite_orm/sqlite_orm.h>
+
 #include <chrono>
+#include <filesystem>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <unordered_map>
-#include <filesystem>
+#include <vector>
+
+#include "BaseManager.h"
+#include "DownloadManager.h"
+#include "EventLoop.h"
+#include "FileManager.h"
+#include "common/Common.h" // 包含BlockInfo定义
 
 NS_BEGIN(dcdn)
 
-enum class DeployStatus : int{
+enum class DeployStatus : int
+{
     DOWNLOADING = 1,
     COMPLETED = 2,
     FAILED = 3
 };
 
-struct DeployTask {
+struct DeployTask
+{
     std::string job_id;
     std::string file_hash;
     std::string url;
@@ -38,7 +42,8 @@ struct DeployTask {
 };
 
 // sqlite_orm 存储映射
-inline auto makeDeployStorage(const std::string& filename) {
+inline auto makeDeployStorage(const std::string& filename)
+{
     using namespace sqlite_orm;
     return make_storage(
         filename,
@@ -53,20 +58,20 @@ inline auto makeDeployStorage(const std::string& filename) {
             make_column("status", &DeployTask::status),
             make_column("download_path", &DeployTask::download_path),
             make_column("create_time", &DeployTask::create_time),
-            make_column("update_time", &DeployTask::update_time)
-        )
-    );
+            make_column("update_time", &DeployTask::update_time)));
 }
 
 using DeployStorage = decltype(makeDeployStorage(""));
 using DeployStoragePtr = std::shared_ptr<DeployStorage>;
 
-struct DeployManagerOption {
+struct DeployManagerOption
+{
     std::shared_ptr<FileManager> fileMgr;
     std::shared_ptr<DownloadManager> downloadMgr;
 };
 
-class DeployManager : public BaseManager, public EventLoop<DeployManager> {
+class DeployManager: public BaseManager, public EventLoop<DeployManager>
+{
 public:
     using json = nlohmann::json;
 
@@ -93,13 +98,14 @@ private:
 
     void reportToServer(const std::string& job_id, bool success);
 
-    uint64_t getCurrentTimestamp() const {
-        return std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::system_clock::now().time_since_epoch()
-        ).count();
+    uint64_t getCurrentTimestamp() const
+    {
+        return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
+            .count();
     }
 
-    std::filesystem::path dbPath() const {
+    std::filesystem::path dbPath() const
+    {
         std::filesystem::path dbFile(mMan->Option().WorkDir);
         dbFile.append("deploy.db");
         return dbFile;

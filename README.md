@@ -68,3 +68,18 @@ cd build
 cmake ..
 make -j8
 ```
+
+# git hook 配置
+
+## 安装pre-commit hook
+
+```bash
+cp hooks/pre-commit .git/hooks/
+chmod +x .git/hooks/pre-commit
+```
+
+OR
+
+```bash
+git config --local core.hooksPath hooks
+```

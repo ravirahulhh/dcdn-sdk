@@ -17,6 +17,7 @@ class BaseEventLoop
 public:
     typedef void (*GlobalHandler)(std::shared_ptr<Event> evt, void* userData);
     void RegisterGlobalHandler(int etype, GlobalHandler hdlr, void* userData);
+
 protected:
     void globalHandle(std::shared_ptr<Event> evt);
 };
@@ -101,6 +102,7 @@ protected:
             globalHandle(evt);
         }
     }
+
 private:
     std::mutex mMtx;
     std::condition_variable mCv;
