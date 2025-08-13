@@ -820,11 +820,10 @@ void FileManager::handleAsyncApiRequestEvent(std::shared_ptr<Event> evt) {}
 
 void FileManager::handleDownloadFileDone(std::shared_ptr<Event> evt)
 {
-    auto argEvt = std::static_pointer_cast<ArgEvent<std::shared_ptr<FileDownloadDoneArg>>>(evt);
-    auto arg = argEvt->Arg();
-    logDebug << "Handling download file done for block hash: " << arg->blockInfo.hash
-             << ", file path: " << arg->filePath;
-    if (arg->blockInfo.hash.empty()) {
+    auto argEvt = std::static_pointer_cast<ArgEvent<FileDownloadDoneArg>>(evt);
+    auto arg = argEvt.get()->Arg();
+    logDebug << "Handling download file done for block hash: " << arg.blockInfo.hash << ", file path: " << arg.filePath;
+    if (arg.blockInfo.hash.empty()) {
         logWarn << "Block hash is empty, cannot handle download file done";
         return;
     }
@@ -838,7 +837,7 @@ void FileManager::handleDownloadFileDone(std::shared_ptr<Event> evt)
     {
         // try move file from tmp to file dir
         std::lock_guard<std::mutex> lockFOpt(mFileDBOptMutex);
-        std::string tmpFilePath = arg->filePath;
+        std::string tmpFilePath = arg.filePath;
         // handle empty path or file not exists
         if (tmpFilePath.empty() || !std::filesystem::exists(tmpFilePath)) {
             logWarn << "Download file path is empty";
@@ -855,7 +854,7 @@ void FileManager::handleDownloadFileDone(std::shared_ptr<Event> evt)
         }
 
         // target filename is blockHash
-        auto targetRelativePath = std::filesystem::path(arg->blockInfo.hash);
+        auto targetRelativePath = std::filesystem::path(arg.blockInfo.hash);
         std::filesystem::path targetPath(fileDir());
         targetPath.append(targetRelativePath.string());
 
@@ -875,15 +874,15 @@ void FileManager::handleDownloadFileDone(std::shared_ptr<Event> evt)
         }
 
         try {
-            logDebug << "File download completed, updating database record for block hash: " << arg->blockInfo.hash
-                     << ", file hash: " << arg->fileHash;
+            logDebug << "File download completed, updating database record for block hash: " << arg.blockInfo.hash
+                     << ", file hash: " << arg.fileHash;
             // Select and update records based on download path and status=Downloading
             db->stor.update_all(
                 set(c(&FileItem::status) = FileStatus::AVAILABLE,
-                    c(&FileItem::blockStart) = arg->blockInfo.start,
-                    c(&FileItem::blockEnd) = arg->blockInfo.end,
-                    c(&FileItem::fileHash) = arg->fileHash,
-                    c(&FileItem::blockHash) = arg->blockInfo.hash,
+                    c(&FileItem::blockStart) = arg.blockInfo.start,
+                    c(&FileItem::blockEnd) = arg.blockInfo.end,
+                    c(&FileItem::fileHash) = arg.fileHash,
+                    c(&FileItem::blockHash) = arg.blockInfo.hash,
                     c(&FileItem::lastAccess) = getCurrentTimestamp(),
                     c(&FileItem::lastReport) = getCurrentTimestamp(),
                     c(&FileItem::path) = targetPath.string()),
@@ -892,12 +891,12 @@ void FileManager::handleDownloadFileDone(std::shared_ptr<Event> evt)
             // Get the fileId of the updated record
             auto updatedFiles = db->stor.select(
                 &FileItem::id,
-                where(c(&FileItem::blockHash) == arg->blockInfo.hash and c(&FileItem::status) == FileStatus::AVAILABLE),
+                where(c(&FileItem::blockHash) == arg.blockInfo.hash and c(&FileItem::status) == FileStatus::AVAILABLE),
                 limit(1));
 
             if (!updatedFiles.empty()) {
                 uint64_t updatedFileId = updatedFiles[0];
-                recordFileAccess(updatedFileId, targetPath.string(), arg->blockInfo.end - arg->blockInfo.start);
+                recordFileAccess(updatedFileId, targetPath.string(), arg.blockInfo.end - arg.blockInfo.start);
             }
         } catch (const std::exception& e) {
             logWarn << "Failed to update download file record: " << e.what();
@@ -911,11 +910,11 @@ void FileManager::handleDownloadFileDone(std::shared_ptr<Event> evt)
     // Report file download completion
     try {
         FileItem item;
-        item.blockHash = arg->blockInfo.hash;
-        item.fileHash = arg->fileHash;
-        item.blockStart = arg->blockInfo.start;
-        item.blockEnd = arg->blockInfo.end;
-        reportHaveFiles(std::vector<std::tuple<FileItem, std::string>>{std::make_tuple(item, arg->url)});
+        item.blockHash = arg.blockInfo.hash;
+        item.fileHash = arg.fileHash;
+        item.blockStart = arg.blockInfo.start;
+        item.blockEnd = arg.blockInfo.end;
+        reportHaveFiles(std::vector<std::tuple<FileItem, std::string>>{std::make_tuple(item, arg.url)});
     } catch (const std::exception& e) {
         logWarn << "Failed to report file download completion: " << e.what();
         return;
