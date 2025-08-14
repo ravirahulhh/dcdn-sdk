@@ -10,6 +10,8 @@
 #include <mutex>
 #include <thread>
 
+#include "dcdn.h"
+
 #include "ApiClient.h"
 #include "BaseManager.h"
 #include "Config.h"
@@ -23,6 +25,8 @@ struct MainManagerOption
     std::string WorkDir;
     std::string DeviceId;
     std::string ApiKey;
+    DcdnDeviceInfo DeviceInfo;
+    DcdnDiskInfo DiskInfo;
 };
 class DownloadManager;
 class MainManager: public BaseManager, public EventLoop<MainManager>

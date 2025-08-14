@@ -134,18 +134,38 @@ void MainManager::login()
     msg["device_id"] = mOpt.DeviceId;
     msg["apikey"] = mOpt.ApiKey;
 
+    json devInfo;
+    devInfo["os"] = mOpt.DeviceInfo.os;
+    devInfo["arch"] = mOpt.DeviceInfo.arch;
+    devInfo["cpu_num"] = mOpt.DeviceInfo.cpuNum;
+    devInfo["mem_mb"] = mOpt.DeviceInfo.memMb;
+    msg["device_info"] = devInfo;
+
+    json diskInfo;
+    diskInfo["capacity"] = mOpt.DiskInfo.capacity;
+    diskInfo["storage_limit_bytes"] = mOpt.DiskInfo.storage_limit_bytes;
+    diskInfo["used_bytes"] = mOpt.DiskInfo.used_bytes;
+    msg["disk_info"] = diskInfo;
+
+    logDebug << "login to server, request=" << msg.dump();
+
     AsyncApiPost(
         nullptr,
         "/api/v1/login",
         msg,
         this,
         [this](json& res) {
+            auto respStr = res.dump();
+            logDebug << "login OK, resp=" << respStr;
             try {
-                auto data = res["data"];
-                std::string token = data["token"];
+                std::string token = res["token"];
+                std::string peerId = res["peerId"];
                 mCfg.SetToken(token);
+                mCfg.SetPeerId(peerId);
             } catch (std::exception& excp) {
+                logError << "login fail" << excp.what();
             } catch (...) {
+                logError << "login fail";
             }
         },
         nullptr);
@@ -155,9 +175,15 @@ void MainManager::run()
 {
     logInfo << "MainManager running";
     mHttpDownloader->Start();
+
+    logDebug << "login to server ...";
     login();
+
+    logDebug << "connect to cmd channel ...";
+    mWebSkt->Start();
+    logDebug << "connect to cmd channel OK";
+
     // mWebRtc->Start();
-    // mWebSkt->Start();
     mFileMgr->Start();
     mUploadMgr->Start();
     mDeployMgr->Start();

@@ -75,6 +75,13 @@ void WebSocketManager::run()
 void WebSocketManager::connect()
 {
     try {
+        auto token = mMan->Cfg().Token();
+        if (token.size() == 0) {
+            logInfo << "websocket token is empty";
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            return;
+        }
+
         rtc::WebSocket::Configuration config;
         config.disableTlsVerification = mMan->Cfg().WebSktDisableTlsVerification();
         auto ws = std::make_shared<rtc::WebSocket>(std::move(config));
@@ -94,7 +101,8 @@ void WebSocketManager::connect()
         mStatus = Connecting;
         mWebSkt = ws;
         std::string url = mMan->Cfg().WebSktUrl();
-        url += "/ws";
+        url += "/ws?token=";
+        url += mMan->Cfg().Token();
         logInfo << "websocket try to connect: " << url;
         mWebSkt->open(url);
     } catch (std::exception& excp) {

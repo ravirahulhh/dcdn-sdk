@@ -29,24 +29,53 @@ typedef struct _DcdnUploadOption
     size_t MaxUploadSpeed; // BytesPerSecond, 0:unlimit
 } DcdnUploadOption;
 
-typedef struct _DcdnDeviceInfo
-{
-    const char* Id;
-    const char* CPU;
-    uint64_t Memory;
-    const char* OS;
+
+typedef struct _DcdnDeviceInfo {
+    char* Id;
+    char* os;
+    char* arch;
+    uint32_t cpuNum;
+    uint32_t memMb;
 } DcdnDeviceInfo;
+
+typedef struct _DcdnDiskInfo {
+    uint64_t capacity;
+    uint64_t storage_limit_bytes;
+    uint64_t used_bytes;
+} DcdnDiskInfo;
 
 typedef struct _DcdnInitOption
 {
     const char* WorkDir;
     const char* ApiKey;
     DcdnDeviceInfo Device;
+    DcdnDiskInfo Disk;
     DcdnUploadOption Upload;
 } DcdnInitOption;
 
-typedef struct _DcdnNetworkInfo
-{
+typedef enum _DcdnProtocol {
+    ProtocolUnknown   = 0,
+    ProtocolWebRTC    = 1,
+    ProtocolTCP       = 2,
+    ProtocolQuic      = 3,
+    ProtocolWebsocket = 4,
+    ProtocolHTTP      = 5,
+} DcdnProtocol;
+
+typedef enum _DcdnNatType {
+    NatUnknown        = 0,
+    NatPublic         = 1,  // 公网访问
+    NatFullCone       = 2,  // 完全锥型 NAT: 内网 IP:Port 映射到固定公网 IP:Port,允许任何外部 IP 访问
+    NatRestricted     = 3,  // 受限锥型 NAT: 仅允许 特定外部 IP 访问映射的端口（不限制端口号）
+    NatPortRestricted = 4,  // 端口受限锥型: 仅允许 特定外部 IP:Port 访问映射的端口
+    NatSymmetric      = 5,  // 对称型 NAT: 同一内网 IP:Port 访问不同外部目标时，会分配 不同公网映射端口
+} DcdnNatType;
+
+typedef struct _DcdnNetworkInfo {
+    char *ip;           // parsed ip list in candidates
+    uint32_t port;
+    uint32_t protocol;  // webrtc by default
+    uint32_t nat_type;
     const char* Ssid;
     double Longitude;
     double Latitude;

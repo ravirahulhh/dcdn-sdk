@@ -10,10 +10,22 @@ int DcdnInit(const DcdnInitOption* opt)
 
     MainManagerOption mopt;
     mopt.ApiKey = opt->ApiKey;
-    mopt.DeviceId = opt->Device.Id;
     mopt.WorkDir = opt->WorkDir;
+    mopt.DeviceInfo = opt->Device;
+    mopt.DeviceId = opt->Device.Id;
+    mopt.DiskInfo = opt->Disk;
 
+    logInfo << "init main_manager ...";
     int ret = MainManager::Init(mopt);
+    if (ret != 1) {
+        logError << "init main_manager fail";
+        return 1;
+    }
+
+    logInfo << "start main_manager ...";
+    auto mainMgr = MainManager::Singlet();
+    mainMgr->Start();
+
     return ret;
 }
 
