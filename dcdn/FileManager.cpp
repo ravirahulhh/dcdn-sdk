@@ -900,7 +900,8 @@ void FileManager::handleDownloadFileDone(std::shared_ptr<Event> evt)
 
         try {
             logDebug << "File download completed, updating database record for block hash: " << arg.blockInfo.hash
-                     << ", file hash: " << arg.fileHash;
+                     << ", file hash: " << arg.fileHash << ", block start: " << arg.blockInfo.start
+                     << ", block end: " << arg.blockInfo.end;
             // Select and update records based on download path and status=Downloading
             db->stor.update_all(
                 set(c(&FileItem::status) = FileStatus::AVAILABLE,
