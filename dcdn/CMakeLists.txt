@@ -6,6 +6,7 @@ find_package(OpenSSL REQUIRED)
 
 # Source files
 add_library(dcdn  STATIC 
+    dcdn.cpp
     Cert.cpp		
     DownloadManager.cpp	
     FileManager.cpp		
@@ -24,11 +25,11 @@ add_library(dcdn  STATIC
 )
 
 include_directories(
-    ${CMAKE_SOURCE_DIR}
-    ${CMAKE_SOURCE_DIR}/deps/src/curl-8.15.0/include
-    ${CMAKE_SOURCE_DIR}/deps/src/libdatachannel-0.23.1/include
-    ${CMAKE_SOURCE_DIR}/deps/src/sqlite_orm-1.9.1/include
-    ${CMAKE_SOURCE_DIR}/deps/src/libdatachannel-0.23.1/deps/plog/include
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/src/curl-8.15.0/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/src/libdatachannel-0.23.1/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/src/sqlite_orm-1.9.1/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/src/libdatachannel-0.23.1/deps/plog/include
 )
 
 # Link libraries

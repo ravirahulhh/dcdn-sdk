@@ -28,8 +28,8 @@ public:
 
 Config::Config()
 {
-    mApiRootUrl = "https://pcdn.capell.io";
-    mWebSktUrl = "ws://pcdn.capell.io";
+    mApiRootUrl = "https://api-pcdn.capell.io";
+    mWebSktUrl = "ws://cmd-pcdn.capell.io";
     mStunServers.emplace_back("39.106.141.70:8347");
     mStunServers.emplace_back("stun1.l.google.com:3478");
 }

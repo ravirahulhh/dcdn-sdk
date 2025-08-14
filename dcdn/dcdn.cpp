@@ -7,7 +7,12 @@ extern "C" {
 int DcdnInit(const DcdnInitOption* opt)
 {
     using namespace dcdn;
+
     MainManagerOption mopt;
+    mopt.ApiKey = opt->ApiKey;
+    mopt.DeviceId = opt->Device.Id;
+    mopt.WorkDir = opt->WorkDir;
+
     int ret = MainManager::Init(mopt);
     return ret;
 }
