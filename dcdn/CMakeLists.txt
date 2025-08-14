@@ -58,3 +58,5 @@ add_executable(dl_manager_test DownloadeManagerTest.cpp)
 target_link_libraries(dl_manager_test PRIVATE dcdn)
 
 
+add_executable(http_test  ${CMAKE_SOURCE_DIR}/util/HttpDownloaderTest.cpp)
+target_link_libraries(http_test PRIVATE dcdn)
