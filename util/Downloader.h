@@ -36,10 +36,7 @@ public:
     virtual ~DownloaderTaskBuffer()
     {
         while (mNext) {
-            auto n = mNext;
-            if (n) {
-                mNext = n->Next();
-            }
+            mNext = mNext->Next();
         }
     }
     std::shared_ptr<DownloaderTaskBuffer> Next()
