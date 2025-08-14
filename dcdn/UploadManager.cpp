@@ -79,8 +79,9 @@ void UploadManager::processTasks()
             std::unique_lock<std::mutex> lock(mTaskMutex);
             mTaskCond.wait_for(
                 lock, std::chrono::milliseconds(100), [this] { return !mTaskQueue.empty() || mStopFlag; });
-            if (mStopFlag)
+            if (mStopFlag) {
                 break;
+            }
             continue;
         }
         std::shared_ptr<UploadFileTask> task;
@@ -162,6 +163,10 @@ void UploadManager::processTasks()
                         logError << "Send ERROR:FILE_OPEN_FAILED or close dc failed: " << e.what();
                     }
 
+                    if (task->BlockEnd == 0) {
+                        task->FileEnd = task->File.tellg();
+                    }
+
                     std::lock_guard<std::mutex> lock(mLabelTaskMapMutex);
                     mLabelTaskMap.erase(task->Label());
                     continue;
@@ -170,8 +175,8 @@ void UploadManager::processTasks()
                 task->File.seekg(task->FileOffset + task->BytesSent);
             }
 
-            logDebug << "task: " << task->Label() << " file size: " << task->FileEnd
-                     << " bytesSent: " << task->BytesSent;
+            logDebug << "task: " << task->Label() << " file: " << task->FilePath << " file start: " << task->FileOffset
+                     << " file end: " << task->FileEnd << " bytesSent: " << task->BytesSent;
 
             const size_t chunkSize = 16 * 1024; // 16KB
             size_t bytesToSend = std::min(chunkSize, task->FileEnd - task->BytesSent);

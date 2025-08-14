@@ -61,15 +61,15 @@ void P2PDownloader::AddTask(std::shared_ptr<util::DownloaderTask> task)
     post([p2pTask, this]() { addTask(p2pTask); });
 }
 
-void P2PDownloader::initPeerConnection(
-    const std::string& peerId,
-    const std::string& peerSdp,
-    const P2PDownloaderTaskOption& request,
-    std::shared_ptr<P2PSingleTask> task)
+void P2PDownloader::initPeerConnection(const P2PDownloaderTaskOption& request, std::shared_ptr<P2PSingleTask> task)
 {
     rtc::Configuration config;
-
+    config.enableIceUdpMux = true;
     const auto cp = mOption.Certificate;
+    config.certificatePemFile = cp.certPem;
+    config.keyPemFile = cp.keyPem;
+    config.iceUfrag = request.IceUfrag;
+    config.icePwd = request.IcePwd;
     auto ss = MainManager::Singlet()->Cfg().StunServers();
     for (auto s : ss) {
         auto idx = s.find(':');
@@ -84,18 +84,13 @@ void P2PDownloader::initPeerConnection(
             config.iceServers.push_back(serv);
         }
     }
-    config.enableIceUdpMux = true;
-    config.certificatePemFile = cp.certPem;
-    config.keyPemFile = cp.keyPem;
-    config.iceUfrag = request.IceUfrag;
-    config.icePwd = request.IcePwd;
 
     auto pc = std::make_shared<rtc::PeerConnection>(config);
     pc->setRemoteDescription(request.PeerSdp);
 
     {
         std::lock_guard<std::mutex> lock(mMutex);
-        mPeerConnections[peerId] = pc;
+        mPeerConnections[request.PeerID] = pc;
     }
 
     addSingleTask(pc, request, task);
@@ -170,7 +165,7 @@ void P2PDownloader::addTask(std::shared_ptr<P2PSingleTask> task)
 
     if (needInit) {
         logDebug << "create task init connection init for peer: " << task->mTaskOpt.PeerID;
-        initPeerConnection(task->mTaskOpt.PeerID, task->mTaskOpt.PeerSdp, std::move(task->mTaskOpt), task);
+        initPeerConnection(std::move(task->mTaskOpt), task);
     } else {
         addSingleTask(peerConn, task->mTaskOpt, task);
         logDebug << "create task without init connection" << task->mTaskOpt.PeerID;

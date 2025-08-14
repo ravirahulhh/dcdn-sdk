@@ -61,7 +61,7 @@ private:
 
 private:
     std::mutex mMutex;
-    double mTokens;
+    double mTokens = 0;
     double mLastTime;
 };
 
@@ -71,7 +71,7 @@ struct UploadFileTask
 {
     std::string PeerID;
     std::string FileHash;
-    std::string FilePath;
+    std::string FilePath = "";
     size_t BlockStart;
     size_t BlockEnd;
     std::string IceUfrag;
@@ -96,8 +96,8 @@ struct UploadFileTask
     State TaskState;
 
     size_t BytesSent = 0;
-    size_t FileOffset;
-    size_t FileEnd;
+    size_t FileOffset = 0;
+    size_t FileEnd = 0;
     std::ifstream File;
 
     UploadFileTask(

@@ -57,11 +57,11 @@ private:
     friend class P2PDownloader;
     size_t mNextReadOffset = 0;
 
-    TaskId mTaskID;
-    std::string mContentHash;
-    uint64_t mStart;
-    uint64_t mEnd;
-    size_t mTotalSize;
+    TaskId mTaskID = 0;
+    std::string mContentHash = "";
+    uint64_t mStart = 0;
+    uint64_t mEnd = 0;
+    size_t mTotalSize = 0;
     P2PDownloaderTaskOption mTaskOpt;
 
     std::shared_ptr<rtc::DataChannel> mDc;

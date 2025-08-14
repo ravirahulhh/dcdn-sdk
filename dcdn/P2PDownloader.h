@@ -71,11 +71,7 @@ private:
     void pauseTask(std::shared_ptr<util::DownloaderTask> task);
     void resumeTask(std::shared_ptr<util::DownloaderTask> task);
 
-    void initPeerConnection(
-        const std::string& peerId,
-        const std::string& peerSdp,
-        const P2PDownloaderTaskOption& taskOpt,
-        std::shared_ptr<P2PSingleTask> task);
+    void initPeerConnection(const P2PDownloaderTaskOption& taskOpt, std::shared_ptr<P2PSingleTask> task);
 
     void post(std::function<void()>&& task);
     void run() override;
