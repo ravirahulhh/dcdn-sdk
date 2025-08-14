@@ -807,6 +807,7 @@ void FileManager::reportHaveFiles(const std::vector<std::tuple<FileItem, std::st
         logDebug << "Have file report success with response: " << body;
     };
     auto failCallBack = [](int code) { logDebug << "Have file report failed with code: " << code; };
+    logDebug << "Sending report with changes: " << msg.dump();
     mMan->AsyncApiPostWithToken(nullptr, "/api/v1/update_file_info", msg, this, succCallBack, failCallBack);
 }
 
@@ -828,6 +829,7 @@ void FileManager::reportRemoveFile(const FileItem& item)
         logDebug << "Remove file report success with response: " << body;
     };
     auto failCallBack = [](int code) { logDebug << "Remove file report failed with code: " << code; };
+    logDebug << "Sending remove file report with changes: " << msg.dump();
     mMan->AsyncApiPostWithToken(nullptr, "/api/v1/update_file_info", msg, this, succCallBack, failCallBack);
 }
 
