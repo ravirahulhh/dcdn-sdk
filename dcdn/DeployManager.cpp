@@ -297,7 +297,21 @@ void DeployManager::checkDownloadStatus()
             case TaskStatus::Completed: {
                 logInfo << "Task (jobId: " << task.jobId << ") has completed downloading";
 
-                std::string localFileHash = calculateFileHash(task.downloadPath);
+                std::string localFileHash;
+                int hashError = calculateFileHash(task.downloadPath, localFileHash);
+                if (hashError != ErrorCodeOk) {
+                    FileDownloadFailedArg failArg;
+                    failArg.filePath = task.downloadPath;
+
+                    mFileMgr->PostEvent(
+                        std::make_shared<ArgEvent<FileDownloadFailedArg>>(
+                            EventType::FileDownloadFailed, std::move(failArg)));
+
+                    updateDeployTaskStatus(task.jobId, DeployStatus::FAILED);
+                    logInfo << "Updated task status to FAILED (jobId: " << task.jobId << ")";
+                    break;
+                }
+
                 std::string fileHash = task.fileHash;
                 if (task.blockStart == 0 && task.blockEnd == 0) {
                     if (task.fileHash.empty()) {

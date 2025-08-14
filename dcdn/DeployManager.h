@@ -115,9 +115,17 @@ private:
         return dbFile;
     }
 
-    std::string calculateFileHash(const std::string& filePath)
+    int calculateFileHash(const std::string& filePath, std::string& hashResult)
     {
-        return FileHash::calculate(filePath);
+        // 直接调用FileHash::calculate，保持相同的返回值和参数结构
+        int result = FileHash::calculate(filePath, hashResult);
+
+        // 可以在这里添加额外的日志或处理逻辑
+        if (result != ErrorCodeOk) {
+            logError << "Failed to calculate file hash for: " << filePath << ", error code: " << result;
+        }
+
+        return result; // 返回与内部调用相同的错误码
     }
 
 private:
