@@ -3,11 +3,17 @@
 #include <iostream>
 
 #include "DeployManager.h"
+#include "dcdn.h"
 
 int main(int argc, char* argv[])
 {
     dcdn::MainManagerOption opt;
     opt.WorkDir = "./data";
+    opt.ApiKey = "123456";
+    opt.DeviceId = "device123";
+    opt.DeviceInfo = DcdnDeviceInfo{
+        const_cast<char*>("device123"), const_cast<char*>("Linux"), const_cast<char*>("Linux"), 8, 16384};
+    opt.DiskInfo = DcdnDiskInfo{1000000000, 800000000, 200000000};
     int ret = dcdn::MainManager::Init(opt);
     if (ret != 1) {
         logError << "Init MainManager fail";

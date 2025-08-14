@@ -10,12 +10,11 @@
 #include <mutex>
 #include <thread>
 
-#include "dcdn.h"
-
 #include "ApiClient.h"
 #include "BaseManager.h"
 #include "Config.h"
 #include "EventLoop.h"
+#include "dcdn.h"
 #include "util/HttpClient.h"
 
 NS_BEGIN(dcdn)
@@ -71,6 +70,18 @@ public:
         std::string url = mCfg.ApiRootUrl();
         url += uri;
         return mApiClient->Do(reqId, {url, arg.dump(), "application/json"}, ev, succ, fail);
+    }
+
+    template<class E, class Succ, class Fail>
+    int AsyncApiPostWithToken(void** reqId, const char* uri, json& arg, E* ev, Succ succ, Fail fail)
+    {
+        logDebug << "AsyncApiPost uri:" << uri;
+        std::string url = mCfg.ApiRootUrl();
+        url += uri;
+        util::HttpRequest req(url, arg.dump(), "application/json");
+        std::string token = "Bearer " + mCfg.Token();
+        req.SetHeader("Authorization", token.c_str());
+        return mApiClient->Do(reqId, std::move(req), ev, succ, fail);
     }
 
     bool CancelAsyncApiPost(void* reqId)
