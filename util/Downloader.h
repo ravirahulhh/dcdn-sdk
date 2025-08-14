@@ -38,7 +38,7 @@ public:
         while (mNext) {
             auto n = mNext;
             if (n) {
-                mNext = n;
+                mNext = n->Next();
             }
         }
     }
