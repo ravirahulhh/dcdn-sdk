@@ -157,7 +157,6 @@ int FileManager::Init(const FileManagerOption& opt)
     registerHandler(EventType::FileDownloadDone, &FileManager::handleDownloadFileDone);
     registerHandler(EventType::FileDownloadFailed, &FileManager::handleDownloadFileFailed);
     registerHandler(EventType::RemoveFile, &FileManager::handleRemoveFile);
-    registerHandler(EventType::AsyncApiRequest, &FileManager::handleAsyncApiRequestEvent);
     return 0;
 }
 
@@ -803,7 +802,12 @@ void FileManager::reportHaveFiles(const std::vector<std::tuple<FileItem, std::st
     }
     MainManager::json msg;
     msg["changes"] = report.to_json();
-    mMan->AsyncApiPost(nullptr, "/api/v1/update_file_info", msg, this, nullptr, nullptr);
+    auto succCallBack = [](util::HttpResponse& resp) {
+        auto body = resp.Body();
+        logDebug << "Have file report success with response: " << body;
+    };
+    auto failCallBack = [](int code) { logDebug << "Have file report failed with code: " << code; };
+    mMan->AsyncApiPost(nullptr, "/api/v1/update_file_info", msg, this, succCallBack, failCallBack);
 }
 
 void FileManager::reportRemoveFile(const FileItem& item)
@@ -819,10 +823,13 @@ void FileManager::reportRemoveFile(const FileItem& item)
     std::string resp;
     MainManager::json msg;
     msg["changes"] = report.to_json();
-    mMan->AsyncApiPost(nullptr, "/api/v1/update_file_info", msg, this, nullptr, nullptr);
+    auto succCallBack = [](util::HttpResponse& resp) {
+        auto body = resp.Body();
+        logDebug << "Remove file report success with response: " << body;
+    };
+    auto failCallBack = [](int code) { logDebug << "Remove file report failed with code: " << code; };
+    mMan->AsyncApiPost(nullptr, "/api/v1/update_file_info", msg, this, succCallBack, failCallBack);
 }
-
-void FileManager::handleAsyncApiRequestEvent(std::shared_ptr<Event> evt) {}
 
 void FileManager::handleDownloadFileDone(std::shared_ptr<Event> evt)
 {
