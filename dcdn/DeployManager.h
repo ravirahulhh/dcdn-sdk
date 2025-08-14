@@ -128,6 +128,18 @@ private:
         return result; // 返回与内部调用相同的错误码
     }
 
+    int getFileSize(const std::string& filePath, uint64_t& fileSize)
+    {
+        int result = FileHash::getFileSize(filePath, fileSize);
+
+        // 添加额外的日志记录
+        if (result != ErrorCodeOk) {
+            logError << "Failed to get file size for: " << filePath << ", error code: " << result;
+        }
+
+        return result; // 返回原始错误码
+    }
+
 private:
     DeployStoragePtr mDB;
     std::shared_ptr<FileManager> mFileMgr;

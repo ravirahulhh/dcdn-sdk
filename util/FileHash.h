@@ -176,6 +176,29 @@ public:
         // 执行URL安全的Base64编码
         return base64Encode(data, hashResult);
     }
+
+    static int getFileSize(const std::string& filePath, uint64_t& fileSize)
+    {
+        fileSize = 0; // 初始化输出参数
+
+        // 以二进制模式打开文件，定位到文件末尾
+        std::ifstream file(filePath, std::ios::binary | std::ios::ate);
+        if (!file.is_open()) {
+            logError << "Failed to open file for size check: " << filePath;
+            return ErrorCodeErr;
+        }
+
+        // 获取文件大小（当前位置即为文件末尾偏移量）
+        std::streamoff size = file.tellg();
+        if (size < 0) {
+            logError << "Failed to get file size for: " << filePath;
+            return ErrorCodeErr;
+        }
+
+        fileSize = static_cast<uint64_t>(size);
+        logInfo << "File size for " << filePath << ": " << fileSize << " bytes";
+        return ErrorCodeOk;
+    }
 };
 
 NS_END

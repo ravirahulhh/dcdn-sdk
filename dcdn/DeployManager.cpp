@@ -368,6 +368,24 @@ void DeployManager::checkDownloadStatus()
                     break;
                 }
 
+                uint64_t blockEnd = task.blockEnd;
+                if (task.blockEnd == 0) {
+                    uint64_t filesize;
+                    int getFileSizeError = getFileSize(task.downloadPath, filesize);
+                    if (getFileSizeError != ErrorCodeOk) {
+                        FileDownloadFailedArg failArg;
+                        failArg.filePath = task.downloadPath;
+
+                        mFileMgr->PostEvent(
+                            std::make_shared<ArgEvent<FileDownloadFailedArg>>(
+                                EventType::FileDownloadFailed, std::move(failArg)));
+
+                        updateDeployTaskStatus(task.jobId, DeployStatus::FAILED);
+                        logInfo << "Updated task status to FAILED (jobId: " << task.jobId << ")";
+                        break;
+                    }
+                    blockEnd = task.blockStart + filesize;
+                }
                 std::string fileHash = task.fileHash;
                 if (task.blockStart == 0 && task.blockEnd == 0) {
                     if (task.fileHash.empty()) {
@@ -390,7 +408,7 @@ void DeployManager::checkDownloadStatus()
                 doneArg.fileHash = fileHash;
                 doneArg.blockInfo.hash = localFileHash;
                 doneArg.blockInfo.start = task.blockStart;
-                doneArg.blockInfo.end = task.blockEnd;
+                doneArg.blockInfo.end = blockEnd;
                 doneArg.url = task.url;
                 doneArg.filePath = task.downloadPath;
 
