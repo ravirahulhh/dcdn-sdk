@@ -69,39 +69,63 @@ void P2PSingleTask::Start()
 
 bool P2PSingleTask::Pause()
 {
-    if (pause()) {
-        if (mDc && mDc->isOpen()) {
-            mDc->send("PAUSE");
-        }
-        notify(shared_from_this());
-        return true;
+    if (!pause()) {
+        return false;
     }
-    return false;
+
+    if (mDc && mDc->isOpen()) {
+        try {
+            mDc->send("PAUSE");
+        } catch (const std::exception& e) {
+            notify(shared_from_this());
+            logError << "Failed to send PAUSE message: " << e.what();
+            return false;
+        }
+    }
+
+    notify(shared_from_this());
+    return true;
 }
 
 bool P2PSingleTask::Resume()
 {
-    if (resume()) {
-        if (mDc && mDc->isOpen()) {
-            mDc->send("RESUME");
-        }
-        notify(shared_from_this());
-        return true;
+    if (!resume()) {
+        return false;
     }
-    return false;
+
+    if (mDc && mDc->isOpen()) {
+        try {
+            mDc->send("RESUME");
+        } catch (const std::exception& e) {
+            notify(shared_from_this());
+            logError << "Failed to send RESUME message: " << e.what();
+            return false;
+        }
+    }
+
+    notify(shared_from_this());
+    return true;
 }
 
 bool P2PSingleTask::Cancel()
 {
-    if (cancel()) {
-        if (mDc && mDc->isOpen()) {
+    if (!cancel()) {
+        return false;
+    }
+
+    if (mDc && mDc->isOpen()) {
+        try {
             mDc->send("CANCEL");
             mDc->close();
+        } catch (const std::exception& e) {
+            notify(shared_from_this());
+            logError << "Failed to send CANCEL message or close DataChannel: " << e.what();
+            return false;
         }
-        notify(shared_from_this());
-        return true;
     }
-    return false;
+
+    notify(shared_from_this());
+    return true;
 }
 
 void P2PSingleTask::HandleIncomingData(std::variant<std::vector<std::byte>, std::string>&& data)
@@ -135,16 +159,10 @@ void P2PSingleTask::handleIncomingDataInternal(std::variant<std::vector<std::byt
         double progress = static_cast<double>(Size()) / mTotalSize;
         logDebug << "Received data. Progress: " << (progress * 100) << "%";
 
-        if (progress >= 0.95 && mDc && mDc->isOpen()) {
-            mDc->send("STOP");
-            logDebug << "Sent STOP to peer, buffer near full. TaskId: " << mTaskID;
-        }
-
         if (Size() >= mTotalSize) {
             setStatus(DownloaderTask::Completed);
             notify(shared_from_this());
         }
-
     } else if (std::holds_alternative<std::string>(data)) {
         const std::string& msg = std::get<std::string>(data);
 
@@ -154,6 +172,9 @@ void P2PSingleTask::handleIncomingDataInternal(std::variant<std::vector<std::byt
         } else if (msg == "CANCEL_ACK") {
             setStatus(DownloaderTask::Cancelled);
             logDebug << "Received CANCEL_ACK. TaskId: " << mTaskID;
+        } else if (msg.find("ERROR") != std::string::npos) {
+            setStatus(DownloaderTask::Fail);
+            logDebug << "Received ERROR. TaskId: " << mTaskID << ", errmesg: " << msg;
         } else {
             logWarn << "Unhandled control message: " << msg;
         }

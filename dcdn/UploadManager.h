@@ -61,7 +61,7 @@ private:
 
 private:
     std::mutex mMutex;
-    double mTokens;
+    double mTokens = 0;
     double mLastTime;
 };
 
@@ -71,7 +71,7 @@ struct UploadFileTask
 {
     std::string PeerID;
     std::string FileHash;
-    std::string FilePath;
+    std::string FilePath = "";
     size_t BlockStart;
     size_t BlockEnd;
     std::string IceUfrag;
@@ -87,6 +87,7 @@ struct UploadFileTask
         Init,
         Pending,
         Running,
+        BufferedAmount,
         Paused,
         Failed,
         Cancelled,
@@ -96,8 +97,8 @@ struct UploadFileTask
     State TaskState;
 
     size_t BytesSent = 0;
-    size_t FileOffset;
-    size_t FileEnd;
+    size_t FileOffset = 0;
+    size_t FileEnd = 0;
     std::ifstream File;
 
     UploadFileTask(
@@ -146,19 +147,27 @@ public:
     UploadManager(MainManager* man, FileManager* mf, CertificatePair cert);
     ~UploadManager();
 
-    void Start(bool detach = true);
-    std::shared_ptr<std::thread> Thread()
-    {
-        return mThread;
-    }
-
-public:
+private:
     void run();
-    void stop();
-    void processTasks();
+
+    std::vector<UploadFileTaskPtr> getTasksToProcess();
+    void handleTask(UploadFileTaskPtr task);
+    void handleRunningTask(UploadFileTaskPtr task);
+    void handleUploadMsgEvent(std::shared_ptr<Event> evt);
+
+    bool initFileOperations(UploadFileTaskPtr task);
+    void performFileSending(UploadFileTaskPtr task);
+
     void setupPeerConnection(UploadFileTaskPtr task);
     void handleDataChannel(std::shared_ptr<rtc::DataChannel> dc, UploadFileTaskPtr task);
-    void handleUploadMsgEvent(std::shared_ptr<Event> evt);
+    void setupOnOpenCallback(std::shared_ptr<rtc::DataChannel> dc, UploadFileTaskPtr channelTask);
+    void setupOnBufferedAmountLowCallback(std::shared_ptr<rtc::DataChannel> dc, UploadFileTaskPtr channelTask);
+    void setupOnMessageCallback(std::shared_ptr<rtc::DataChannel> dc, UploadFileTaskPtr channelTask);
+    void setupOnClosedCallback(std::shared_ptr<rtc::DataChannel> dc, UploadFileTaskPtr channelTask);
+
+    std::optional<std::tuple<std::string, size_t, size_t>> parseLabel(const std::string& label);
+    std::optional<UploadFileTaskPtr>
+    findOrCreateTask(std::shared_ptr<rtc::DataChannel> dc, UploadFileTaskPtr initial_task, const std::string& label);
 
 private:
     FileManager* mFileMgr;
@@ -167,12 +176,8 @@ private:
 
     std::mutex mLabelTaskMapMutex;
     std::unordered_map<std::string, UploadFileTaskPtr> mLabelTaskMap;
-    std::mutex mTaskMutex;
-    std::queue<UploadFileTaskPtr> mTaskQueue;
-    std::condition_variable mTaskCond;
 
     std::atomic<bool> mStopFlag{false};
-    std::shared_ptr<std::thread> mThread;
 };
 
 NS_END
