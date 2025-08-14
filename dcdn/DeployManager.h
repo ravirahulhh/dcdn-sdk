@@ -16,7 +16,8 @@
 #include "DownloadManager.h"
 #include "EventLoop.h"
 #include "FileManager.h"
-#include "common/Common.h" // 包含BlockInfo定义
+#include "common/Common.h"
+#include "util/FileHash.h"
 
 NS_BEGIN(dcdn)
 
@@ -112,6 +113,11 @@ private:
         std::filesystem::path dbFile(mMan->Option().WorkDir);
         dbFile.append("deploy.db");
         return dbFile;
+    }
+
+    std::string calculateFileHash(const std::string& filePath)
+    {
+        return FileHash::calculate(filePath);
     }
 
 private:

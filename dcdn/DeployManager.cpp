@@ -297,57 +297,12 @@ void DeployManager::checkDownloadStatus()
             case TaskStatus::Completed: {
                 logInfo << "Task (jobId: " << task.jobId << ") has completed downloading";
 
-                std::string fileMd5;
-                try {
-                    std::ifstream file(task.downloadPath, std::ios::binary);
-                    if (!file.is_open()) {
-                        logError << "Failed to open file for MD5 calculation: " << task.downloadPath;
-                        FileDownloadFailedArg failArg;
-                        failArg.filePath = task.downloadPath;
-
-                        mFileMgr->PostEvent(
-                            std::make_shared<ArgEvent<FileDownloadFailedArg>>(
-                                EventType::FileDownloadFailed, std::move(failArg)));
-                        updateDeployTaskStatus(task.jobId, DeployStatus::FAILED);
-                        reportToServer(task.jobId, false);
-                        break;
-                    }
-
-                    MD5_CTX md5Context;
-                    MD5_Init(&md5Context);
-
-                    const size_t bufferSize = 8192;
-                    char buffer[bufferSize];
-                    while (file.read(buffer, bufferSize)) {
-                        MD5_Update(&md5Context, buffer, file.gcount());
-                    }
-                    // 处理最后一部分数据
-                    if (file.gcount() > 0) {
-                        MD5_Update(&md5Context, buffer, file.gcount());
-                    }
-
-                    unsigned char md5Digest[MD5_DIGEST_LENGTH];
-                    MD5_Final(md5Digest, &md5Context);
-
-                    // 转换为十六进制字符串
-                    std::stringstream ss;
-                    for (int i = 0; i < MD5_DIGEST_LENGTH; ++i) {
-                        ss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(md5Digest[i]);
-                    }
-                    fileMd5 = ss.str();
-                    logInfo << "Calculated MD5 for " << task.downloadPath << ": " << fileMd5;
-                } catch (const std::exception& e) {
-                    logError << "Exception during MD5 calculation: " << e.what();
-                    updateDeployTaskStatus(task.jobId, DeployStatus::FAILED);
-                    reportToServer(task.jobId, false);
-                    break;
-                }
-
+                std::string localFileHash = calculateFileHash(task.downloadPath);
                 std::string fileHash = task.fileHash;
                 if (task.blockStart == 0 && task.blockEnd == 0) {
                     if (task.fileHash.empty()) {
-                        fileHash = fileMd5;
-                    } else if (!task.fileHash.empty() && task.fileHash != fileMd5) {
+                        fileHash = localFileHash;
+                    } else if (!task.fileHash.empty() && task.fileHash != localFileHash) {
                         logError << "File hash mismatch (jobId: " << task.jobId << ")";
                         FileDownloadFailedArg failArg;
                         failArg.filePath = task.downloadPath;
@@ -363,7 +318,7 @@ void DeployManager::checkDownloadStatus()
 
                 FileDownloadDoneArg doneArg;
                 doneArg.fileHash = fileHash;
-                doneArg.blockInfo.hash = fileMd5;
+                doneArg.blockInfo.hash = localFileHash;
                 doneArg.blockInfo.start = task.blockStart;
                 doneArg.blockInfo.end = task.blockEnd;
                 doneArg.url = task.url;
