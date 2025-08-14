@@ -33,7 +33,15 @@ struct DownloaderOption
 class DownloaderTaskBuffer
 {
 public:
-    virtual ~DownloaderTaskBuffer() {}
+    virtual ~DownloaderTaskBuffer()
+    {
+        while (mNext) {
+            auto n = mNext;
+            if (n) {
+                mNext = n;
+            }
+        }
+    }
     std::shared_ptr<DownloaderTaskBuffer> Next()
     {
         return mNext;

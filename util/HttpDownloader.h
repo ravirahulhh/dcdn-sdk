@@ -227,6 +227,8 @@ private:
                         t->mCurlAdded = false;
                         t->setStatus(HttpDownloaderTask::Fail);
                         notify = true;
+                    } else {
+                        t->mCurlAdded = true;
                     }
                 }
                 if (notify) {
