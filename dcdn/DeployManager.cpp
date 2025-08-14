@@ -502,15 +502,16 @@ void DeployManager::resubmitDownloadTasks()
 void DeployManager::reportToServer(const std::string& jobId, bool success)
 {
     try {
-        json event;
-        event["type"] = "deploy_result";
-        event["kvs"] = {{"job_id", jobId}, {"code", success ? "0" : "1"}};
+        // 将event定义为数组，并在其中添加事件对象
+        json events = json::array();
+        events.push_back({{"type", "deploy_result"}, {"kvs", {{"job_id", jobId}, {"code", success ? "0" : "1"}}}});
 
         json request;
-        request["events"] = {event};
+        request["events"] = events; // 直接使用数组赋值
 
+        logInfo << "Reporting deploy result to server: " << request.dump();
         json response;
-        mMan->AsyncApiPost(nullptr, "/api/v1/report_event", request, this, nullptr, nullptr);
+        mMan->AsyncApiPostWithToken(nullptr, "/api/v1/report_event", request, this, nullptr, nullptr);
     } catch (const std::exception& e) {
         logError << "Exception during report for job " << jobId << ": " << e.what();
     }

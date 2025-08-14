@@ -27,7 +27,7 @@ int main(int argc, char* argv[])
     std::shared_ptr<dcdn::DeployManager> deployMgr =
         std::dynamic_pointer_cast<dcdn::DeployManager>(m->GetDeployManager());
     auto deployArg = dcdn::DeployMsgArg{
-        .jobId = "1234",
+        .jobId = generate_uuid_v4(),
         .url = "https://d1.xia12345.com/video/202310/6524242c37926f1bd8c374d8/hd.mp4",
     };
 
