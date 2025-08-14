@@ -146,7 +146,7 @@ void UploadManager::handleRunningTask(UploadFileTaskPtr task)
         return;
     }
 
-    if (task->Dc->bufferedAmount() > 1024 * 1024) {
+    if (task->Dc->bufferedAmount() > mMaxBufferedAmount.load() * mBufferedThresholdRate.load()) {
         task->SetState(UploadFileTask::BufferedAmount);
         return;
     }
@@ -291,7 +291,7 @@ void UploadManager::setupOnBufferedAmountLowCallback(
     std::shared_ptr<rtc::DataChannel> dc,
     UploadFileTaskPtr channelTask)
 {
-    dc->setBufferedAmountLowThreshold(1024 * 1024); // set buffered amount low threshold to 1MB
+    dc->setBufferedAmountLowThreshold(mMaxBufferedAmount.load());
     dc->onBufferedAmountLow([this, channelTask]() {
         logInfo << "DataChannel buffered amount low: " << channelTask->Label();
         if (channelTask->GetState() == UploadFileTask::BufferedAmount) {
