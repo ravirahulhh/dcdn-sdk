@@ -155,31 +155,33 @@ void DownloadManager::run()
         // 等待：若无 FunctionCall 事件，可被下载器通知（mCv）唤醒
         {
             std::unique_lock<std::mutex> lk(mMtx);
-            mCv.wait_for(lk,reapInterval, [&] { return !mDlEvents.empty() || !mEvents.empty(); });
-        }
-
-        if (mDlEvents.size() == 0 && mEvents.size() == 0) {
-            logError << "EventLoop: mDlEvents.size() == 0 && mEvents.size() == 0";
+            mCv.wait_for(lk,reapInterval, [&] { return !mDlEventsHttp.empty() || !mEvents.empty(); });
         }
 
         // 处理 1 个 FunctionCall 事件(若有)
         this->waitEvent(10ms);
 
-        // 抽取一批 downloader 事件
-        std::vector<std::shared_ptr<dcdn::util::DownloaderTask>> batch;
+        // pop downloader read events 
+        std::vector<std::shared_ptr<util::DownloaderTask>> httpBatch;
+        std::vector<std::shared_ptr<util::DownloaderTask>> p2pBatch;
         {
-            std::lock_guard<std::mutex> l(mMtx);
-            batch.reserve(mDlEvents.size());
-            for (auto& kv : mDlEvents)
-                batch.push_back(kv.second);
-            mDlEvents.clear();
+            std::lock_guard<std::mutex> g(mMtx);
+            httpBatch.reserve(mDlEventsHttp.size());
+            for (auto& kv : mDlEventsHttp) httpBatch.push_back(kv.second);
+            mDlEventsHttp.clear();
+
+            p2pBatch.reserve(mDlEventsP2p.size());
+            for (auto& kv : mDlEventsP2p) p2pBatch.push_back(kv.second);
+            mDlEventsP2p.clear();
         }
-        for (auto& t : batch) {
-            try {
-                processDownloaderEvent(t);
-            } catch (...) {
-            }
+
+        for (auto& t : httpBatch) {
+            try { processHttpEvent(t); } catch (...) {}
         }
+        for (auto& t : p2pBatch) {
+            try { processP2pEvent(t); } catch (...) {}
+        }
+
         // —— 看门狗：回收卡死的分片
         auto now = std::chrono::steady_clock::now();
         if (now - lastReap >= reapInterval) {
@@ -189,8 +191,8 @@ void DownloadManager::run()
             std::vector<ActiveSubTask> snapshot;
             {
                 std::lock_guard<std::mutex> l(mMtx);
-                snapshot.reserve(mActiveByPtr.size());
-                for (auto& kv : mActiveByPtr)
+                snapshot.reserve(mActiveByPtrHttp.size());
+                for (auto& kv : mActiveByPtrHttp)
                     snapshot.push_back(kv.second);
             }
 
@@ -224,8 +226,8 @@ void DownloadManager::run()
                         std::lock_guard<std::mutex> l(mMtx);
                         auto raw = st.downloader.get();
 
-                        mActiveByPtr.erase(raw);
-                        auto& vec = mDlByTask[st.parentTaskId];
+                        mActiveByPtrHttp.erase(raw);
+                        auto& vec = mDlByTaskHttp[st.parentTaskId];
                         vec.erase(
                             std::remove_if(
                                 vec.begin(),
@@ -234,7 +236,7 @@ void DownloadManager::run()
                             vec.end());
 
                         mPendingRanges[st.parentTaskId].push_front(Range{missStart, missEnd});
-                        mCancelledRaw.insert(raw);
+                        mCancelledRawHttp.insert(raw);
                         mHttpDownloader->CancelTask(st.downloader);
                         logWarn << "看门狗扫描：无进展子任务 " << st.index << "被取消";
                     }
@@ -284,7 +286,7 @@ void DownloadManager::run()
                             opt.Request = std::make_shared<dcdn::util::HttpRequest>(urlLocal);
                             opt.Start = r.start;
                             opt.End = r.end;
-                            opt.Notify = &DownloadManager::coreNotifyCallback;
+                            opt.Notify = &DownloadManager::coreNotifyCallbackHttp;
                             opt.Receiver = this;
 
                             auto sub = mHttpDownloader->CreateTask(&opt);
@@ -306,8 +308,8 @@ void DownloadManager::run()
                                     st2.isProbe = false;
                                     st2.lastTouched = std::chrono::steady_clock::now();
 
-                                    mActiveByPtr[sub.get()] = std::move(st2);
-                                    mDlByTask[st.parentTaskId].push_back(sub);
+                                    mActiveByPtrHttp[sub.get()] = std::move(st2);
+                                    mDlByTaskHttp[st.parentTaskId].push_back(sub);
                                 }
                                 mHttpDownloader->AddTask(sub);
                                 logWarn << "[watchdog] 子任务无进展，回填续排原来index任务：" << st.index << ", 回填range: " << r.start << "-" << r.end;
@@ -329,8 +331,8 @@ void DownloadManager::run()
                 std::vector<uint64_t> toCheck;
                 {
                     std::lock_guard<std::mutex> l(mMtx);
-                    toCheck.reserve(mDlByTask.size());
-                    for (auto& kv : mDlByTask)
+                    toCheck.reserve(mDlByTaskHttp.size());
+                    for (auto& kv : mDlByTaskHttp)
                         toCheck.push_back(kv.first);
                 }
                 for (auto id : toCheck) {
@@ -353,18 +355,22 @@ void DownloadManager::handleFunctionCall(std::shared_ptr<Event> evt)
 }
 
 // ============ 统一 downloader 通知入口（HttpDownloader 使用） ============
-void DownloadManager::coreNotifyCallback(std::shared_ptr<dcdn::util::DownloaderTask> task, void* receiver)
+void DownloadManager::coreNotifyCallbackHttp(std::shared_ptr<dcdn::util::DownloaderTask> task, void* receiver)
 {
     if (!task || !receiver)
         return;
     auto* self = static_cast<DownloadManager*>(receiver);
     {
         std::lock_guard<std::mutex> g(self->mMtx);
-        if (self->mCancelledRaw.count(task.get()))
+        if (self->mCancelledRawHttp.count(task.get()))
             return; // 丢弃取消后的迟到回调
-        self->mDlEvents[task.get()] = std::move(task); // 去重：同一个 raw 只保留一个
+        self->mDlEventsHttp[task.get()] = std::move(task); // 去重：同一个 raw 只保留一个
     }
     self->mCv.notify_all();
+}
+
+void DownloadManager::coreNotifyCallbackP2p(std::shared_ptr<dcdn::util::DownloaderTask> task, void* receiver) {
+
 }
 
 // 包装（预留）
@@ -374,14 +380,14 @@ void DownloadManager::onDownloaderNotify(std::shared_ptr<dcdn::util::DownloaderT
 }
 
 // 实际处理一个 downloader 事件（读取 -> 写入 -> 进度/续排/完成判定）
-void DownloadManager::processDownloaderEvent(std::shared_ptr<dcdn::util::DownloaderTask> ev)
+void DownloadManager::processHttpEvent(std::shared_ptr<dcdn::util::DownloaderTask> ev)
 {
     auto* raw = ev.get();
 
     // 任务取消后的迟到通知直接丢弃
     {
         std::lock_guard<std::mutex> g(mMtx);
-        if (mCancelledRaw.count(raw))
+        if (mCancelledRawHttp.count(raw))
             return;
     }
 
@@ -389,8 +395,8 @@ void DownloadManager::processDownloaderEvent(std::shared_ptr<dcdn::util::Downloa
     ActiveSubTask active;
     {
         std::lock_guard<std::mutex> g(mMtx);
-        auto it = mActiveByPtr.find(raw);
-        if (it == mActiveByPtr.end()) {
+        auto it = mActiveByPtrHttp.find(raw);
+        if (it == mActiveByPtrHttp.end()) {
             // 可能是迟到事件，直接早退
             return;
         }
@@ -529,8 +535,8 @@ void DownloadManager::processDownloaderEvent(std::shared_ptr<dcdn::util::Downloa
     // 记录分片实际读到的量 + 心跳
     if (readSum > 0) {
         std::lock_guard<std::mutex> l(mMtx);
-        auto it = mActiveByPtr.find(raw);
-        if (it != mActiveByPtr.end()) {
+        auto it = mActiveByPtrHttp.find(raw);
+        if (it != mActiveByPtrHttp.end()) {
             it->second.actualGot += readSum;
             it->second.lastTouched = std::chrono::steady_clock::now();
         }
@@ -545,8 +551,8 @@ void DownloadManager::processDownloaderEvent(std::shared_ptr<dcdn::util::Downloa
     uint64_t got = 0;
     {
         std::lock_guard<std::mutex> l(mMtx);
-        auto it = mActiveByPtr.find(raw);
-        if (it != mActiveByPtr.end())
+        auto it = mActiveByPtrHttp.find(raw);
+        if (it != mActiveByPtrHttp.end())
             got = it->second.actualGot;
     }
     bool endByLength = (!active.isProbe && active.length > 0 && got >= active.length);
@@ -560,8 +566,8 @@ void DownloadManager::processDownloaderEvent(std::shared_ptr<dcdn::util::Downloa
                 std::lock_guard<std::mutex> l(mMtx);
                 mPendingRanges[active.parentTaskId].push_front(Range{missStart, missEnd});
                 // 清理映射
-                mActiveByPtr.erase(raw);
-                auto& vec = mDlByTask[active.parentTaskId];
+                mActiveByPtrHttp.erase(raw);
+                auto& vec = mDlByTaskHttp[active.parentTaskId];
                 vec.erase(
                     std::remove_if(
                         vec.begin(),
@@ -575,8 +581,8 @@ void DownloadManager::processDownloaderEvent(std::shared_ptr<dcdn::util::Downloa
             uint64_t actualGot = got;
             {
                 std::lock_guard<std::mutex> l(mMtx);
-                mActiveByPtr.erase(raw);
-                auto& vec = mDlByTask[active.parentTaskId];
+                mActiveByPtrHttp.erase(raw);
+                auto& vec = mDlByTaskHttp[active.parentTaskId];
                 vec.erase(
                     std::remove_if(
                         vec.begin(),
@@ -635,7 +641,7 @@ void DownloadManager::processDownloaderEvent(std::shared_ptr<dcdn::util::Downloa
                     opt.Request = std::make_shared<dcdn::util::HttpRequest>(urlLocal);
                     opt.Start = r.start;
                     opt.End = r.end;
-                    opt.Notify = &DownloadManager::coreNotifyCallback;
+                    opt.Notify = &DownloadManager::coreNotifyCallbackHttp;
                     opt.Receiver = this;
 
                     auto sub = mHttpDownloader->CreateTask(&opt);
@@ -657,8 +663,8 @@ void DownloadManager::processDownloaderEvent(std::shared_ptr<dcdn::util::Downloa
                             st.isProbe = false;
                             st.lastTouched = std::chrono::steady_clock::now();
 
-                            mActiveByPtr[sub.get()] = std::move(st);
-                            mDlByTask[active.parentTaskId].push_back(sub);
+                            mActiveByPtrHttp[sub.get()] = std::move(st);
+                            mDlByTaskHttp[active.parentTaskId].push_back(sub);
                         }
                         mHttpDownloader->AddTask(sub);
                         logInfo << "子任务 " << idxNext << " 续排, start: " << r.start << ", end: " << r.end;
@@ -678,8 +684,8 @@ void DownloadManager::processDownloaderEvent(std::shared_ptr<dcdn::util::Downloa
         bool hasRunning = false, hasPending = false;
         {
             std::lock_guard<std::mutex> l(mMtx);
-            auto itD = mDlByTask.find(active.parentTaskId);
-            hasRunning = (itD != mDlByTask.end() && !itD->second.empty());
+            auto itD = mDlByTaskHttp.find(active.parentTaskId);
+            hasRunning = (itD != mDlByTaskHttp.end() && !itD->second.empty());
             auto itP = mPendingRanges.find(active.parentTaskId);
             hasPending = (itP != mPendingRanges.end() && !itP->second.empty());
         }
@@ -692,6 +698,10 @@ void DownloadManager::processDownloaderEvent(std::shared_ptr<dcdn::util::Downloa
     if (active.parentTaskId != 0) {
         maybeFinalizeTask(active.parentTaskId);
     }
+}
+
+void DownloadManager::processP2pEvent(std::shared_ptr<util::DownloaderTask> ev) {
+
 }
 
 // ============ 配置接口 ============
@@ -780,7 +790,7 @@ uint64_t DownloadManager::AddDownloadTask(
                 dcdn::util::HttpDownloaderTaskOption opt;
                 opt.Request = std::make_shared<dcdn::util::HttpRequest>(url);
                 opt.Start = 0; // 探测
-                opt.Notify = &DownloadManager::coreNotifyCallback;
+                opt.Notify = &DownloadManager::coreNotifyCallbackHttp;
                 opt.Receiver = this;
 
                 auto probe = mHttpDownloader->CreateTask(&opt);
@@ -808,8 +818,8 @@ uint64_t DownloadManager::AddDownloadTask(
                     if (itF != mParentFiles.end())
                         a.file = itF->second;
 
-                    mActiveByPtr[probe.get()] = std::move(a);
-                    mDlByTask[task.Id].push_back(probe);
+                    mActiveByPtrHttp[probe.get()] = std::move(a);
+                    mDlByTaskHttp[task.Id].push_back(probe);
                 }
                 mHttpDownloader->AddTask(probe);
                 logInfo << "[Launch] probe Task " << 0;
@@ -857,23 +867,23 @@ bool DownloadManager::CancelDownloadTask(uint64_t taskId)
         // 取消所有子任务 & 标记 raw 已取消
         {
             std::lock_guard<std::mutex> l(mMtx);
-            auto itVec = mDlByTask.find(taskId);
-            if (itVec != mDlByTask.end()) {
+            auto itVec = mDlByTaskHttp.find(taskId);
+            if (itVec != mDlByTaskHttp.end()) {
                 for (auto& sp : itVec->second) {
                     if (!sp)
                         continue;
                     mHttpDownloader->CancelTask(sp);
-                    mCancelledRaw.insert(sp.get());
-                    mActiveByPtr.erase(sp.get());
+                    mCancelledRawHttp.insert(sp.get());
+                    mActiveByPtrHttp.erase(sp.get());
                 }
                 itVec->second.clear();
             }
             // 清空 pending
             mPendingRanges[taskId].clear();
             // 丢弃事件队列里属于该任务的事件
-            for (auto it2 = mDlEvents.begin(); it2 != mDlEvents.end();) {
-                if (mCancelledRaw.count(it2->first))
-                    it2 = mDlEvents.erase(it2);
+            for (auto it2 = mDlEventsHttp.begin(); it2 != mDlEventsHttp.end();) {
+                if (mCancelledRawHttp.count(it2->first))
+                    it2 = mDlEventsHttp.erase(it2);
                 else
                     ++it2;
             }
@@ -913,8 +923,8 @@ bool DownloadManager::PauseDownloadTask(uint64_t taskId)
         }
         {
             std::lock_guard<std::mutex> l(mMtx);
-            auto itVec = mDlByTask.find(taskId);
-            if (itVec != mDlByTask.end()) {
+            auto itVec = mDlByTaskHttp.find(taskId);
+            if (itVec != mDlByTaskHttp.end()) {
                 for (auto& sp : itVec->second) {
                     if (sp)
                         mHttpDownloader->PauseTask(sp);
@@ -944,8 +954,8 @@ bool DownloadManager::ResumeDownloadTask(uint64_t taskId)
         }
         {
             std::lock_guard<std::mutex> l(mMtx);
-            auto itVec = mDlByTask.find(taskId);
-            if (itVec != mDlByTask.end()) {
+            auto itVec = mDlByTaskHttp.find(taskId);
+            if (itVec != mDlByTaskHttp.end()) {
                 for (auto& sp : itVec->second) {
                     if (!sp)
                         continue;
@@ -1125,14 +1135,14 @@ void DownloadManager::splitTask(uint64_t taskId, size_t totalSize, size_t baseOf
     size_t already = 0;
     {
         std::lock_guard<std::mutex> l(mMtx);
-        auto itD = mDlByTask.find(taskId);
-        if (itD != mDlByTask.end()) {
+        auto itD = mDlByTaskHttp.find(taskId);
+        if (itD != mDlByTaskHttp.end()) {
             for (auto& sp : itD->second) {
                 if (!sp)
                     continue;
                 auto raw = sp.get();
-                auto itActive = mActiveByPtr.find(raw);
-                if (itActive != mActiveByPtr.end() && itActive->second.isProbe) {
+                auto itActive = mActiveByPtrHttp.find(raw);
+                if (itActive != mActiveByPtrHttp.end() && itActive->second.isProbe) {
                     probeToCancel = sp;
                     break;
                 }
@@ -1144,11 +1154,11 @@ void DownloadManager::splitTask(uint64_t taskId, size_t totalSize, size_t baseOf
         mHttpDownloader->CancelTask(probeToCancel);
 
         std::lock_guard<std::mutex> l(mMtx);
-        mActiveByPtr.erase(probeToCancel.get());
-        auto& vec = mDlByTask[taskId];
+        mActiveByPtrHttp.erase(probeToCancel.get());
+        auto& vec = mDlByTaskHttp[taskId];
         vec.erase(std::remove(vec.begin(), vec.end(), probeToCancel), vec.end());
-        mCancelledRaw.insert(probeToCancel.get());
-        mDlEvents.erase(probeToCancel.get());
+        mCancelledRawHttp.insert(probeToCancel.get());
+        mDlEventsHttp.erase(probeToCancel.get());
         logInfo << "http probe 已取消";
     }
 
@@ -1232,7 +1242,7 @@ void DownloadManager::splitTask(uint64_t taskId, size_t totalSize, size_t baseOf
         opt.Request = std::make_shared<dcdn::util::HttpRequest>(url);
         opt.Start = r.start;
         opt.End = r.end;
-        opt.Notify = &DownloadManager::coreNotifyCallback;
+        opt.Notify = &DownloadManager::coreNotifyCallbackHttp;
         opt.Receiver = this;
 
         auto sub = mHttpDownloader->CreateTask(&opt);
@@ -1251,8 +1261,8 @@ void DownloadManager::splitTask(uint64_t taskId, size_t totalSize, size_t baseOf
             st.isProbe = false;
             st.lastTouched = std::chrono::steady_clock::now();
 
-            mActiveByPtr[sub.get()] = std::move(st);
-            mDlByTask[taskId].push_back(sub);
+            mActiveByPtrHttp[sub.get()] = std::move(st);
+            mDlByTaskHttp[taskId].push_back(sub);
             mNextRangeIdx[taskId] = i + 1;
         }
 
@@ -1279,8 +1289,8 @@ bool DownloadManager::maybeFinalizeTask(uint64_t taskId)
     bool hasPending = false;
     {
         std::lock_guard<std::mutex> l(mMtx);
-        auto itD = mDlByTask.find(taskId);
-        hasRunning = (itD != mDlByTask.end() && !itD->second.empty());
+        auto itD = mDlByTaskHttp.find(taskId);
+        hasRunning = (itD != mDlByTaskHttp.end() && !itD->second.empty());
         auto itP = mPendingRanges.find(taskId);
         hasPending = (itP != mPendingRanges.end() && !itP->second.empty());
     }
@@ -1309,7 +1319,7 @@ bool DownloadManager::maybeFinalizeTask(uint64_t taskId)
     // 幂等清理
     {
         std::lock_guard<std::mutex> l(mMtx);
-        mDlByTask.erase(taskId);
+        mDlByTaskHttp.erase(taskId);
         mPendingRanges.erase(taskId);
         mParentFiles.erase(taskId);
     }
