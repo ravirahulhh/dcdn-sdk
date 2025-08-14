@@ -147,6 +147,16 @@ public:
     UploadManager(MainManager* man, FileManager* mf, CertificatePair cert);
     ~UploadManager();
 
+    void SetMaxBufferedAmount(uint64_t amount)
+    {
+        mMaxBufferedAmount.store(amount);
+    }
+
+    void SetBufferedThresholdRate(double rate)
+    {
+        mBufferedThresholdRate.store(rate);
+    }
+
 private:
     void run();
 
@@ -173,6 +183,9 @@ private:
     FileManager* mFileMgr;
     CertificatePair mCert;
     TokenBucketPtr mTokenBucket;
+
+    std::atomic_uint64_t mMaxBufferedAmount{1024 * 1024};
+    std::atomic<double> mBufferedThresholdRate{0.9};
 
     std::mutex mLabelTaskMapMutex;
     std::unordered_map<std::string, UploadFileTaskPtr> mLabelTaskMap;
