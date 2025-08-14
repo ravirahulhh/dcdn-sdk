@@ -85,7 +85,7 @@ auto createFileStorage(const std::string& filename)
                 make_column("block_end", &FileItem::blockEnd),
                 make_column("last_access", &FileItem::lastAccess),
                 make_column("last_report", &FileItem::lastReport),
-                make_column("created_at", &FileItem::createdAt, default_value("currentTimeSTAMP"))));
+                make_column("created_at", &FileItem::createdAt, default_value("CURRENT_TIMESTAMP"))));
         return storage;
     } catch (const std::exception& e) {
         logWarn << "Failed to create file storage: " << e.what();
@@ -279,7 +279,7 @@ int FileManager::createTable()
         block_end INTEGER,
         last_access INTEGER,
         last_report INTEGER,
-        create_at DATETIME DEFAULT currentTimeSTAMP
+        create_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_file_hash ON files(file_hash);
         CREATE INDEX IF NOT EXISTS idx_block_start ON files(block_start);
@@ -911,6 +911,7 @@ void FileManager::handleDownloadFileDone(std::shared_ptr<Event> evt)
                     c(&FileItem::blockHash) = arg.blockInfo.hash,
                     c(&FileItem::lastAccess) = getCurrentTimestamp(),
                     c(&FileItem::lastReport) = getCurrentTimestamp(),
+                    c(&FileItem::createdAt) = getCurrentTimestamp(),
                     c(&FileItem::path) = targetPath.string()),
                 where(c(&FileItem::path) == tmpFilePath and c(&FileItem::status) == FileStatus::DOWNLOADING));
 
