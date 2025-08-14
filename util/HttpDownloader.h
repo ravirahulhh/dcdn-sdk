@@ -144,7 +144,7 @@ public:
         }
         curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, writeCallback);
         curl_easy_setopt(c, CURLOPT_WRITEDATA, t.get());
-        if (opt->Start > 0) {
+        if (opt->Start > 0 || opt->Start < opt->End) {
             std::string range = std::to_string(opt->Start) + "-";
             if (opt->End >= opt->Start) {
                 range += std::to_string(opt->End);
