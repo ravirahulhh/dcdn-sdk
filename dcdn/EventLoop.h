@@ -103,11 +103,11 @@ protected:
         }
     }
 
-private:
+protected:
     std::mutex mMtx;
     std::condition_variable mCv;
     std::list<std::shared_ptr<Event>> mEvents;
-
+private:
     std::unordered_map<int, Handler> mHandlers;
 };
 

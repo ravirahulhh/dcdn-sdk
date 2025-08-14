@@ -5,56 +5,61 @@
 
 #include <atomic>
 #include <chrono>
+#include <deque>
+#include <fstream>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
+
+#include "BaseManager.h"
+#include "EventLoop.h"
+#include "Event.h"
 
 #include "P2PDownloader.h"
 #include "util/HttpDownloader.h"
 
 namespace dcdn {
 
-// 下载策略
+// ===================== 下载策略 / 任务状态 =====================
 enum class DownloadStrategy
 {
-    HTTP_ONLY, // 仅使用 HTTP 下载
-    P2P_ONLY, // 仅使用 P2P 下载
-    HYBRID // 混合模式（HTTP + P2P）
+    HTTP_ONLY,  // 仅使用 HTTP 下载
+    P2P_ONLY,   // 仅使用 P2P 下载
+    HYBRID      // 混合模式（HTTP + P2P）
 };
 
-// 任务状态
 enum class TaskStatus
 {
-    Pending, // 等待开始
-    Running, // 正在运行
-    Paused, // 已暂停
-    Completed, // 已完成
-    Failed, // 下载失败
-    Cancelled // 已取消
+    Pending,     // 等待开始
+    Running,     // 正在运行
+    Paused,      // 已暂停
+    Completed,   // 已完成
+    Failed,      // 下载失败
+    Cancelled    // 已取消
 };
 
-// 表示使用方提交的一个总的下载任务（公有成员：首字母大写驼峰）
+// ===================== 任务与选项（公有成员：大驼峰） =====================
 struct DownloadTask
 {
     uint64_t Id = 0;                 // 任务 ID（唯一标识）
     std::string Url;                 // 下载 URL
     std::string ContentHash;         // 内容哈希（可选）
-    size_t TotalSize = 0;            // 此次任务需下载的总长度（区间下载为区间长度；整文件为文件大小）
+    size_t TotalSize = 0;            // 需下载的总长度（区间为区间长度；整文件为文件大小）
     size_t Downloaded = 0;           // 已下载字节数
     double Speed = 0;                // 下载速度（bytes/sec）
     std::chrono::system_clock::time_point StartTime;   // 任务开始时间
     std::chrono::system_clock::time_point LastUpdate;  // 上次进度更新时间
     std::atomic<bool> Paused{false};    // 是否暂停
     std::atomic<bool> Cancelled{false}; // 是否取消
-    TaskStatus Status = TaskStatus::Pending;  // 当前任务状态
+    TaskStatus Status = TaskStatus::Pending;           // 当前任务状态
 
-    // 已下载的区间（用于断点续传；尚未实现区间合并逻辑，这里仅保留接口）
-    std::vector<std::pair<size_t, size_t>> CompletedRanges;
+    std::vector<std::pair<size_t, size_t>> CompletedRanges; // 已完成区间
 
-    // 赋值与构造
     DownloadTask& operator=(const DownloadTask& other)
     {
         Id = other.Id;
@@ -71,20 +76,16 @@ struct DownloadTask
         CompletedRanges = other.CompletedRanges;
         return *this;
     }
-
     DownloadTask(const DownloadTask& other) { *this = other; }
     DownloadTask() {}
 
-    // 按需持久化的序列化接口
     std::string Serialize() const;
     static DownloadTask Deserialize(const std::string& data);
 };
 
-// 回调定义（类型名保持不变；参数名不受命名规范强制要求）
 using StreamCallback = std::function<void(const char* data, size_t size, size_t offset)>;
 using BufferReadyCallback = std::function<void(uint64_t taskId, size_t start, size_t end)>;
 
-// 文件下载选项（公有成员：首字母大写驼峰）
 struct FileDownloadOptions
 {
     std::string OutputPath;                     // 输出文件路径
@@ -98,7 +99,7 @@ struct FileDownloadOptions
     //   - RangeEnd == SIZE_MAX 表示下载到 EOF
     bool HasRange = false;
     size_t RangeStart = 0;
-    size_t RangeEnd = SIZE_MAX;                 // inclusive；SIZE_MAX 表示未知结尾
+    size_t RangeEnd = SIZE_MAX;                 // inclusive；SIZE_MAX 表示未知结尾（下载到 EOF）
 
     // 写入策略：
     //   - true  => 输出文件仅包含该区间内容，按相对偏移写入（0..length-1）
@@ -116,25 +117,21 @@ struct FileDownloadOptions
     {}
 };
 
-// DownloadManager 职责:
-//  - 任务编排器
-//  - 状态管理器
-//  - 断点续传控制器
-// 支持三种策略（HTTP_ONLY / P2P_ONLY / HYBRID）
-// 支持媒体流式读取、带宽比例控制、任务持久化以及进度合并
-class DownloadManager
+// ===================== DownloadManager =====================
+// - 继承 BaseManager（线程包装）+ EventLoop<DownloadManager>（事件循环）
+// - public 函数/类名：大驼峰；private 成员/函数：m前缀 + 小驼峰
+class DownloadManager : public BaseManager, public EventLoop<DownloadManager>
 {
 public:
     explicit DownloadManager();
     ~DownloadManager();
 
-    // ===== 配置（public 函数：首字母大写驼峰） =====
-        // 配置
+    // ===== 配置 =====
     void SetStrategy(DownloadStrategy strategy);
     void SetMaxConcurrentDownloads(size_t max);
     void SetPersistPath(const std::string& path);
 
-    // ===== 任务管理：返回任务 ID =====
+    // ===== 任务管理 =====
     uint64_t AddDownloadTask(
         const std::string& url,
         const std::string& contentHash = "",
@@ -158,17 +155,16 @@ public:
     void SetP2pBandwidthRatio(float ratio);  // 0.0-1.0
 
 private:
-    // 内部任务分片（持久化/统计用；内部结构名与成员保留小驼峰风格以便区分）
+    // ===================== 持久化辅助 =====================
     struct SubTask
     {
-        size_t offset;                         // 分片起始偏移
-        size_t length;                         // 分片长度
-        std::shared_ptr<void> downloaderTask;  // 分片对应的下载任务对象
-        bool completed = false;                // 分片是否完成
-        int retryCount = 0;                    // 重试次数
+        size_t offset;
+        size_t length;
+        std::shared_ptr<void> downloaderTask;
+        bool completed = false;
+        int retryCount = 0;
     };
 
-    // 数据持久化助手
     class PersistenceHelper
     {
     public:
@@ -186,7 +182,26 @@ private:
         std::mutex mDbMutex;
     };
 
-    // ===== 内部工具方法（private：首字母小写驼峰） =====
+private:
+    // ===================== 事件循环/线程 =====================
+    void run() override; // BaseManager 要求实现线程主函数
+
+    // 处理 FunctionCall 事件：把 std::function<void()> 直接执行
+    void handleFunctionCall(std::shared_ptr<Event> evt);
+
+    // 把 lambda 丢进事件线程串行执行（cmdQueue）
+    template<typename R>
+    R runSyncOnLoop(std::function<R()> fn);
+    void runAsyncOnLoop(std::function<void()> fn);
+
+    // ===================== 下载器通知与处理 =====================
+    // 统一 downloader 通知入口（HttpDownloader 使用）
+    static void coreNotifyCallback(std::shared_ptr<dcdn::util::DownloaderTask> task, void* receiver);
+    void onDownloaderNotify(std::shared_ptr<dcdn::util::DownloaderTask> task);
+    void processDownloaderEvent(std::shared_ptr<dcdn::util::DownloaderTask> task);
+
+private:
+    // ===================== 原内部工具方法（保留小驼峰） =====================
     void loadPersistedTasks();
     void persistTask(const DownloadTask& task);
     void removePersistedTask(uint64_t taskId);
@@ -204,10 +219,44 @@ private:
     // baseOffset：此次任务的起始绝对偏移（整文件为0；区间下载为 RangeStart）
     void splitTask(uint64_t taskId, size_t totalSize, size_t baseOffset);
 
-    bool maybeFinalizeTask(uint64_t taskId); // 幂等完成判定（去掉尾随下划线以符合规范）
+    bool maybeFinalizeTask(uint64_t taskId); // 幂等完成判定
 
 private:
-    // ===== 私有成员变量（m + 首字母大写驼峰） =====
+    // ===================== 事件循环下的"核心容器"（原 CoreContext） =====================
+    struct ActiveSubTask
+    {
+        enum class Transport { HTTP, P2P };
+        uint64_t parentTaskId = 0;
+        Transport transport = Transport::HTTP;
+        size_t offset = 0;
+        size_t length = 0;
+        int index = 0;
+        std::shared_ptr<dcdn::util::DownloaderTask> downloader;
+        std::shared_ptr<std::fstream> file;
+        bool isProbe = false;
+        uint64_t actualGot = 0;
+        // NEW: 看门狗用的时间戳（最后一次有读进展的时间）
+        std::chrono::steady_clock::time_point lastTouched = std::chrono::steady_clock::now();
+    };
+    struct Range { size_t start; size_t end; };
+
+    // downloader 原生事件（用 map 去重）：raw* -> task shared_ptr
+    std::unordered_map<dcdn::util::DownloaderTask*, std::shared_ptr<dcdn::util::DownloaderTask>> mDlEvents;
+    // raw* -> ActiveSubTask
+    std::unordered_map<dcdn::util::DownloaderTask*, ActiveSubTask> mActiveByPtr;
+    // 父任务 -> 正在运行的 downloader
+    std::unordered_map<uint64_t, std::vector<std::shared_ptr<dcdn::util::DownloaderTask>>> mDlByTask;
+    // 父任务 -> 待调度分片
+    std::unordered_map<uint64_t, std::deque<Range>> mPendingRanges;
+    // 父任务 -> 下一个分片序号
+    std::unordered_map<uint64_t, size_t> mNextRangeIdx;
+    // 父任务 -> 共享随机写文件句柄
+    std::unordered_map<uint64_t, std::shared_ptr<std::fstream>> mParentFiles;
+    // 已取消的 raw*（丢弃迟到通知）
+    std::unordered_set<dcdn::util::DownloaderTask*> mCancelledRaw;
+
+private:
+    // ===================== 任务/配置/下载器句柄 =====================
     DownloadStrategy mStrategy = DownloadStrategy::HTTP_ONLY;
     size_t mMaxConcurrent = 4;
     std::string mPersistPath;
@@ -225,6 +274,38 @@ private:
     float mHttpBandwidthRatio = 0.5f; // HTTP 带宽占比
     float mP2pBandwidthRatio = 0.5f;  // P2P 带宽占比
 };
+
+
+template<typename R>
+R DownloadManager::runSyncOnLoop(std::function<R()> fn)
+{
+    // 使用 FunctionCall 事件把任务丢进事件循环串行执行
+    this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(
+        EventType::FunctionCall,
+        [prom = std::make_shared<std::promise<R>>(), fn = std::move(fn)]() mutable {
+            try { prom->set_value(fn()); }
+            catch (...) { try { prom->set_exception(std::current_exception()); } catch (...) {} }
+        }
+    ));
+    // 上面需要把 promise 暴露出去，所以再拿一次引用
+    // 为了简单，这里拆两步：先创建 promise，再再投个事件设置值
+    auto prom = std::make_shared<std::promise<R>>();
+    auto fut = prom->get_future();
+    this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(
+        EventType::FunctionCall,
+        [prom, fn = std::move(fn)]() mutable {
+            try { prom->set_value(fn()); }
+            catch (...) { try { prom->set_exception(std::current_exception()); } catch (...) {} }
+        }
+    ));
+    return fut.get();
+}
+
+inline void DownloadManager::runAsyncOnLoop(std::function<void()> fn)
+{
+    this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(
+        EventType::FunctionCall, std::move(fn)));
+}
 
 } // namespace dcdn
 

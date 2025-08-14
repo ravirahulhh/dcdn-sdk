@@ -29,6 +29,9 @@ struct EventType
 
         // WebSocketManager
         AckMsg = 40000,
+
+        // DownloadManager / 通用函数调度
+        FunctionCall = 50000,   // 把 std::function<void()> 丢到事件队列执行
     };
 };
 
@@ -101,6 +104,14 @@ struct UploadFileArg
     size_t BlockStart;
     size_t BlockEnd;
 };
+
+using FunctionEvent = ArgEvent<std::function<void()>>;
+
+inline std::shared_ptr<FunctionEvent> MakeFunctionEvent(std::function<void()> fn)
+{
+    return std::make_shared<FunctionEvent>(EventType::FunctionCall, std::move(fn));
+}
+
 
 NS_END
 

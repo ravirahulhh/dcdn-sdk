@@ -18,17 +18,17 @@ int main()
 
     // 配置为 HTTP_ONLY 策略，最大并发 4
     mgr.SetStrategy(dcdn::DownloadStrategy::HTTP_ONLY);
-    mgr.SetMaxConcurrentDownloads(5);
+    mgr.SetMaxConcurrentDownloads(4);
 
     // 想下载的 HTTP 文件 URL
     // std::string url = "https://testfileorg.netwet.net/500MB-CZIPtestfile.org.zip";
-    std::string url = "https://hil-speed.hetzner.com/1GB.bin";
-
+    // std::string url = "https://hil-speed.hetzner.com/1GB.bin";
+    std::string url = "https://d1.xia12345.com/video/202310/6524242c37926f1bd8c374d8/hd.mp4";
     // 输出到本地 test.bin，内部并发分片大小 10MB (Preferred Chunk Size, 不一定严格遵守)
-    // dcdn::FileDownloadOptions opts;
-    // opts.outputPath = "chunk.bin";
-    // opts.chunkSize = 10 *1024 * 1024;
-
+    dcdn::FileDownloadOptions opts;
+    opts.OutputPath = "chunk.bin";
+    opts.ChunkSize = 10 *1024 * 1024;
+    auto taskId = mgr.AddDownloadTask(url, "", opts);
     // 其他示例
     // 下载整个文件
     // dcdn::FileDownloadOptions opt;
@@ -36,16 +36,16 @@ int main()
     // auto taskId = mgr.addDownloadTask(url, "", opt);
 
     // 下载区间 [start, end]，并把结果写成一个小文件（相对偏移）：
-    dcdn::FileDownloadOptions opt;
-    opt.OutputPath = "chunk.bin";
-    opt.HasRange = true;
-    // opt.rangeStart = 0ULL;
-    opt.RangeStart = 73741824ULL;
-    opt.RangeEnd   = 1073741823ULL;
-    // opt.rangeEnd   = 73741823ULL;
-    opt.ChunkSize = 10 * 1024 * 1024;
-    opt.WriteRangeToSeparateFile = true; // 默认即为 true
-    auto taskId = mgr.AddDownloadTask(url, "", opt);
+    // dcdn::FileDownloadOptions opt;
+    // opt.OutputPath = "chunk.bin";
+    // opt.HasRange = true;
+    // // opt.rangeStart = 0ULL;
+    // opt.RangeStart = 73741824ULL;
+    // opt.RangeEnd   = 1073741823ULL;
+    // // opt.rangeEnd   = 73741823ULL;
+    // opt.ChunkSize = 10 * 1024 * 1024;
+    // opt.WriteRangeToSeparateFile = true; // 默认即为 true
+    // auto taskId = mgr.AddDownloadTask(url, "", opt);
 
     // 下载区间 [start, EOF]（end 未知）：
     // FileDownloadOptions opt;
@@ -86,7 +86,7 @@ int main()
         //    if (success) std::cout << "main: 取消任务成功" << std::endl;
         //    else std::cout << "main: 取消任务失败" << std::endl;
         // }
-
+// 
         // 暂停/继续示例
         if (percent > 0.5 && firstPause) {
            auto success = mgr.PauseDownloadTask(taskId);
