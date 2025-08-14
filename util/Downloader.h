@@ -35,8 +35,14 @@ class DownloaderTaskBuffer
 public:
     virtual ~DownloaderTaskBuffer()
     {
-        while (mNext) {
-            mNext = mNext->Next();
+        auto p = mNext;
+        mNext = nullptr;
+        while (p) {
+            if (p.use_count() == 1) {
+                p = p->mNext;
+            } else {
+                break;
+            }
         }
     }
     std::shared_ptr<DownloaderTaskBuffer> Next()
