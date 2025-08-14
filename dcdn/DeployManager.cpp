@@ -302,6 +302,12 @@ void DeployManager::checkDownloadStatus()
                     std::ifstream file(task.downloadPath, std::ios::binary);
                     if (!file.is_open()) {
                         logError << "Failed to open file for MD5 calculation: " << task.downloadPath;
+                        FileDownloadFailedArg failArg;
+                        failArg.filePath = task.downloadPath;
+
+                        mFileMgr->PostEvent(
+                            std::make_shared<ArgEvent<FileDownloadFailedArg>>(
+                                EventType::FileDownloadFailed, std::move(failArg)));
                         updateDeployTaskStatus(task.jobId, DeployStatus::FAILED);
                         reportToServer(task.jobId, false);
                         break;
@@ -336,8 +342,27 @@ void DeployManager::checkDownloadStatus()
                     reportToServer(task.jobId, false);
                     break;
                 }
+
+                std::string fileHash = task.fileHash;
+                if (task.blockStart == 0 && task.blockEnd == 0) {
+                    if (task.fileHash.empty()) {
+                        fileHash = fileMd5;
+                    } else if (!task.fileHash.empty() && task.fileHash != fileMd5) {
+                        logError << "File hash mismatch (jobId: " << task.jobId << ")";
+                        FileDownloadFailedArg failArg;
+                        failArg.filePath = task.downloadPath;
+
+                        mFileMgr->PostEvent(
+                            std::make_shared<ArgEvent<FileDownloadFailedArg>>(
+                                EventType::FileDownloadFailed, std::move(failArg)));
+                        updateDeployTaskStatus(task.jobId, DeployStatus::FAILED);
+                        reportToServer(task.jobId, false);
+                        break;
+                    }
+                }
+
                 FileDownloadDoneArg doneArg;
-                doneArg.fileHash = task.fileHash;
+                doneArg.fileHash = fileHash;
                 doneArg.blockInfo.hash = fileMd5;
                 doneArg.blockInfo.start = task.blockStart;
                 doneArg.blockInfo.end = task.blockEnd;

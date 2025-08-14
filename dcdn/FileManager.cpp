@@ -282,9 +282,11 @@ int FileManager::createTable()
         last_report INTEGER,
         create_at DATETIME DEFAULT currentTimeSTAMP
         );
-        CREATE INDEX IF NOT EXISTS idx_file_start ON files(fileHash, blockStart);
-        CREATE INDEX IF NOT EXISTS idx_last_access ON files(lastAccess);
-        CREATE INDEX IF NOT EXISTS idx_last_report ON files(lastReport);
+        CREATE INDEX IF NOT EXISTS idx_file_hash ON files(file_hash);
+        CREATE INDEX IF NOT EXISTS idx_block_start ON files(block_start);
+        CREATE INDEX IF NOT EXISTS idx_block_end ON files(block_end);
+        CREATE INDEX IF NOT EXISTS idx_last_access ON files(last_access);
+        CREATE INDEX IF NOT EXISTS idx_last_report ON files(last_report);
     )";
     rc = sqlite3_exec(db, sql, nullptr, 0, &errMsg);
     if (rc != SQLITE_OK) {
