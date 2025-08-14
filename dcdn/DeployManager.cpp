@@ -213,8 +213,8 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
 
         // 解析block_info（下划线形式的嵌套字段）
         std::string blockHash;
-        int64_t blockStart = 0;
-        int64_t blockEnd = 0;
+        uint64_t blockStart = 0;
+        uint64_t blockEnd = 0;
 
         if (payload.contains("block_info") && payload["block_info"].is_object()) {
             const json& blockInfo = payload["block_info"];
@@ -222,10 +222,10 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
                 blockHash = blockInfo["hash"].get<std::string>();
             }
             if (blockInfo.contains("start") && blockInfo["start"].is_number()) {
-                blockStart = blockInfo["start"].get<int64_t>();
+                blockStart = blockInfo["start"].get<uint64_t>();
             }
             if (blockInfo.contains("end") && blockInfo["end"].is_number()) {
-                blockEnd = blockInfo["end"].get<int64_t>();
+                blockEnd = blockInfo["end"].get<uint64_t>();
             }
         }
 
@@ -237,7 +237,7 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
         }
 
         // 获取下载路径
-        std::string downloadPath = mFileMgr->NewDownloadPath(0);
+        std::string downloadPath = mFileMgr->NewDownloadPath(blockEnd > blockStart ? blockEnd - blockStart : 0);
         if (downloadPath.empty()) {
             logWarn << "Failed to get download path (job_id: " << jobId << ")";
             reportToServer(jobId, false);
