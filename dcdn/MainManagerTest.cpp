@@ -23,19 +23,32 @@ int main(int argc, char* argv[])
     logInfo << "Start MainManager";
     m->Start();
 
-    // deploy test
     std::shared_ptr<dcdn::DeployManager> deployMgr =
         std::dynamic_pointer_cast<dcdn::DeployManager>(m->GetDeployManager());
-    auto deployArg = dcdn::DeployMsgArg{
-        .jobId = generate_uuid_v4(),
-        .url = "https://d1.xia12345.com/video/202310/6524242c37926f1bd8c374d8/hd.mp4",
-    };
 
-    auto evt = std::make_shared<dcdn::ArgEvent<dcdn::DeployMsgArg>>(dcdn::EventType::DeployMsg, std::move(deployArg));
+    nlohmann::json deployPayload;
+    deployPayload["job_id"] = generate_uuid_v4(); // 下划线格式的job_id
+    deployPayload["url"] = "https://d1.xia12345.com/video/202310/6524242c37926f1bd8c374d8/hd.mp4";
+    deployPayload["file_hash"] = ""; // 可根据需要设置实际哈希值
+
+    nlohmann::json blockInfo;
+    blockInfo["hash"] = ""; // 块哈希（可选）
+    blockInfo["start"] = 0; // 块起始位置（可选）
+    blockInfo["end"] = 0; // 块结束位置（可选）
+    deployPayload["block_info"] = blockInfo;
+
+    // 创建JSON类型事件（与接收端的ArgEvent<json>匹配）
+    auto evt = std::make_shared<dcdn::ArgEvent<nlohmann::json>>(
+        dcdn::EventType::DeployMsg,
+        std::move(deployPayload) // 传递JSON对象
+    );
+
     deployMgr->PostEvent(evt);
+    logInfo << "Sent deploy test event with job_id: " << deployPayload["job_id"];
 
     while (true) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
+
     return 0;
 }

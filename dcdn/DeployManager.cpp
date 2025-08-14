@@ -169,83 +169,139 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
 {
     logInfo << "Received DeployMsg event";
 
-    auto* e = static_cast<ArgEvent<DeployMsgArg>*>(evt.get());
-    if (!e) {
-        logWarn << "Invalid DeployMsg event: wrong argument type";
-        return;
-    }
-    const auto& arg = e->Arg();
-
-    if (arg.jobId.empty()) {
-        logWarn << "DeployMsg missing required field: jobId";
+    // 转换为包含JSON payload的事件类型
+    auto* jsonEvent = static_cast<ArgEvent<json>*>(evt.get());
+    if (!jsonEvent) {
+        logWarn << "Invalid DeployMsg event: wrong argument type (expected ArgEvent<json>)";
         return;
     }
 
-    if (arg.fileHash.empty() && arg.url.empty()) {
-        logWarn << "DeployMsg invalid: missing url or hash (jobId: " << arg.jobId << ")";
-        reportToServer(arg.jobId, false);
-        return;
-    }
+    try {
+        // 获取JSON payload
+        const json& payload = jsonEvent->Arg();
+        logInfo << "Deploy message payload: " << payload.dump(2);
 
-    if (!mFileMgr) {
-        logError << "FileManager is not available (jobId: " << arg.jobId << ")";
-        reportToServer(arg.jobId, false);
-        return;
-    }
+        // 解析必填字段job_id（下划线形式）
+        std::string jobId;
+        if (!payload.contains("job_id") || !payload["job_id"].is_string()) {
+            logWarn << "DeployMsg missing required field: job_id";
+            return;
+        }
+        jobId = payload["job_id"].get<std::string>();
+        if (jobId.empty()) {
+            logWarn << "DeployMsg has empty job_id";
+            return;
+        }
 
-    std::string downloadPath = mFileMgr->NewDownloadPath(0);
-    if (downloadPath.empty()) {
-        logWarn << "Failed to get download path (jobId: " << arg.jobId << ")";
-        reportToServer(arg.jobId, false);
-        return;
-    }
+        // 解析file_hash和url（下划线形式）
+        std::string fileHash;
+        if (payload.contains("file_hash") && payload["file_hash"].is_string()) {
+            fileHash = payload["file_hash"].get<std::string>();
+        }
 
-    DeployTask task;
-    task.jobId = arg.jobId;
-    task.fileHash = arg.fileHash;
-    task.blockHash = arg.blockInfo.hash;
-    task.blockStart = arg.blockInfo.start;
-    task.blockEnd = arg.blockInfo.end;
-    task.url = arg.url;
-    task.status = DeployStatus::DOWNLOADING;
-    task.downloadPath = downloadPath;
-    task.createTime = getCurrentTimestamp();
-    task.updateTime = task.createTime;
+        std::string url;
+        if (payload.contains("url") && payload["url"].is_string()) {
+            url = payload["url"].get<std::string>();
+        }
 
-    if (!saveDeployTask(task)) {
-        logWarn << "Failed to save deploy task (jobId: " << arg.jobId << ")";
-        reportToServer(arg.jobId, false);
-        return;
-    }
+        // 验证file_hash和url至少存在一个
+        if (fileHash.empty() && url.empty()) {
+            logWarn << "DeployMsg invalid: missing url or file_hash (job_id: " << jobId << ")";
+            reportToServer(jobId, false);
+            return;
+        }
 
-    if (!mDownloadMgr) {
-        logError << "DownloadManager is not available (jobId: " << arg.jobId << ")";
-        updateDeployTaskStatus(arg.jobId, DeployStatus::FAILED);
-        reportToServer(arg.jobId, false);
-        return;
-    }
+        // 解析block_info（下划线形式的嵌套字段）
+        std::string blockHash;
+        int64_t blockStart = 0;
+        int64_t blockEnd = 0;
 
-    FileDownloadOptions opts;
-    opts.OutputPath = downloadPath;
-    if (task.blockStart > 0 || task.blockEnd > 0) {
-        opts.HasRange = true;
-        opts.RangeStart = task.blockStart;
-        opts.RangeEnd = task.blockEnd;
-    }
+        if (payload.contains("block_info") && payload["block_info"].is_object()) {
+            const json& blockInfo = payload["block_info"];
+            if (blockInfo.contains("hash") && blockInfo["hash"].is_string()) {
+                blockHash = blockInfo["hash"].get<std::string>();
+            }
+            if (blockInfo.contains("start") && blockInfo["start"].is_number()) {
+                blockStart = blockInfo["start"].get<int64_t>();
+            }
+            if (blockInfo.contains("end") && blockInfo["end"].is_number()) {
+                blockEnd = blockInfo["end"].get<int64_t>();
+            }
+        }
 
-    uint64_t taskId = mDownloadMgr->AddDownloadTask(task.url, task.fileHash, opts);
-    if (taskId == 0) {
-        logWarn << "Failed to create download task (jobId: " << arg.jobId << ")";
-        updateDeployTaskStatus(arg.jobId, DeployStatus::FAILED);
-        reportToServer(arg.jobId, false);
-        return;
-    }
+        // 检查FileManager是否可用
+        if (!mFileMgr) {
+            logError << "FileManager is not available (job_id: " << jobId << ")";
+            reportToServer(jobId, false);
+            return;
+        }
 
-    {
-        std::lock_guard<std::mutex> lock(mTaskMutex);
-        mJobToTaskMap[arg.jobId] = taskId;
+        // 获取下载路径
+        std::string downloadPath = mFileMgr->NewDownloadPath(0);
+        if (downloadPath.empty()) {
+            logWarn << "Failed to get download path (job_id: " << jobId << ")";
+            reportToServer(jobId, false);
+            return;
+        }
+
+        // 构建部署任务
+        DeployTask task;
+        task.jobId = jobId;
+        task.fileHash = fileHash;
+        task.blockHash = blockHash;
+        task.blockStart = blockStart;
+        task.blockEnd = blockEnd;
+        task.url = url;
+        task.status = DeployStatus::DOWNLOADING;
+        task.downloadPath = downloadPath;
+        task.createTime = getCurrentTimestamp();
+        task.updateTime = task.createTime;
+
+        // 保存任务
+        if (!saveDeployTask(task)) {
+            logWarn << "Failed to save deploy task (job_id: " << jobId << ")";
+            reportToServer(jobId, false);
+            return;
+        }
+
+        // 检查DownloadManager是否可用
+        if (!mDownloadMgr) {
+            logError << "DownloadManager is not available (job_id: " << jobId << ")";
+            updateDeployTaskStatus(jobId, DeployStatus::FAILED);
+            reportToServer(jobId, false);
+            return;
+        }
+
+        // 配置下载选项
+        FileDownloadOptions opts;
+        opts.OutputPath = downloadPath;
+        if (task.blockStart > 0 || task.blockEnd > 0) {
+            opts.HasRange = true;
+            opts.RangeStart = task.blockStart;
+            opts.RangeEnd = task.blockEnd;
+        }
+
+        // 添加下载任务
+        uint64_t taskId = mDownloadMgr->AddDownloadTask(task.url, task.fileHash, opts);
+        if (taskId == 0) {
+            logWarn << "Failed to create download task (job_id: " << jobId << ")";
+            updateDeployTaskStatus(jobId, DeployStatus::FAILED);
+            reportToServer(jobId, false);
+            return;
+        }
+
+        // 记录job与task的映射关系
+        {
+            std::lock_guard<std::mutex> lock(mTaskMutex);
+            mJobToTaskMap[jobId] = taskId;
+        }
+        logInfo << "Deploy task initialized (job_id: " << jobId << ", taskId: " << taskId << ")";
+
+    } catch (const std::exception& e) {
+        logError << "Error processing deploy message: " << e.what();
+    } catch (...) {
+        logError << "Unknown error processing deploy message";
     }
-    logInfo << "Deploy task initialized (jobId: " << arg.jobId << ", taskId: " << taskId << ")";
 }
 
 void DeployManager::checkDownloadStatus()
