@@ -43,7 +43,7 @@ src/curl-8.15.0/lib/.libs/libcurl.a: src/curl-8.15.0/Makefile
 	cd src/curl-8.15.0; make
 
 src/curl-8.15.0/Makefile: src/curl-8.15.0/configure
-	cd src/curl-8.15.0; ./configure --prefix=$(InstallDir) --enable-shared=no $(OpenSsl) --disable-ldap --disable-ldaps --disable-ftp --disable-ipfs --disable-rtsp --disable-dict --disable-telnet --disable-tftp --disable-pop3 --disable-imap --disable-smb --disable-smtp --disable-gopher --disable-mqtt --disable-docs --without-libpsl
+	cd src/curl-8.15.0; ./configure --prefix=$(InstallDir) --enable-shared=no $(OpenSsl) --disable-ldap --disable-ldaps --disable-ftp --disable-ipfs --disable-rtsp --disable-dict --disable-telnet --disable-tftp --disable-pop3 --disable-imap --disable-smb --disable-smtp --disable-gopher --disable-mqtt --disable-docs --without-libpsl  --without-libidn2 --without-winidn --without-apple-idn --without-nghttp2
 
 src/curl-8.15.0/configure: src/curl-8.15.0.tar.bz2
 	cd src; tar jxvf curl-8.15.0.tar.bz2

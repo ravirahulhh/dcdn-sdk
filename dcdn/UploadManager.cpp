@@ -217,7 +217,7 @@ void UploadManager::setupPeerConnection(UploadFileTaskPtr task)
     }
 
     task->Pc = std::make_shared<rtc::PeerConnection>(config);
-
+    task->Pc->setRemoteDescription(task->RemoteSdp);
     task->Pc->onDataChannel([this, task](std::shared_ptr<rtc::DataChannel> dc) { handleDataChannel(dc, task); });
 }
 
