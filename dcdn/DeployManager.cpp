@@ -180,14 +180,14 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
         // 获取JSON payload
         const json& payload = jsonEvent->Arg();
         logInfo << "Deploy message payload: " << payload.dump(2);
-
+        const json& deployFile = payload["deploy_file"];
         // 解析必填字段job_id（下划线形式）
         std::string jobId;
-        if (!payload.contains("job_id") || !payload["job_id"].is_string()) {
+        if (!deployFile.contains("job_id") || !deployFile["job_id"].is_string()) {
             logWarn << "DeployMsg missing required field: job_id";
             return;
         }
-        jobId = payload["job_id"].get<std::string>();
+        jobId = deployFile["job_id"].get<std::string>();
         if (jobId.empty()) {
             logWarn << "DeployMsg has empty job_id";
             return;
@@ -195,13 +195,13 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
 
         // 解析file_hash和url（下划线形式）
         std::string fileHash;
-        if (payload.contains("file_hash") && payload["file_hash"].is_string()) {
-            fileHash = payload["file_hash"].get<std::string>();
+        if (deployFile.contains("file_hash") && deployFile["file_hash"].is_string()) {
+            fileHash = deployFile["file_hash"].get<std::string>();
         }
 
         std::string url;
-        if (payload.contains("url") && payload["url"].is_string()) {
-            url = payload["url"].get<std::string>();
+        if (deployFile.contains("url") && deployFile["url"].is_string()) {
+            url = deployFile["url"].get<std::string>();
         }
 
         // 验证file_hash和url至少存在一个
@@ -216,8 +216,8 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
         uint64_t blockStart = 0;
         uint64_t blockEnd = 0;
 
-        if (payload.contains("block_info") && payload["block_info"].is_object()) {
-            const json& blockInfo = payload["block_info"];
+        if (deployFile.contains("block_info") && deployFile["block_info"].is_object()) {
+            const json& blockInfo = deployFile["block_info"];
             if (blockInfo.contains("hash") && blockInfo["hash"].is_string()) {
                 blockHash = blockInfo["hash"].get<std::string>();
             }
@@ -578,7 +578,7 @@ void DeployManager::reportToServer(const std::string& jobId, bool success)
     try {
         // 将event定义为数组，并在其中添加事件对象
         json events = json::array();
-        events.push_back({{"type", "deploy_result"}, {"kvs", {{"job_id", jobId}, {"code", success ? "0" : "1"}}}});
+        events.push_back({{"type", "deploy_result"}, {"kvs", {{"job_id", jobId}, {"code", success ? "1" : "-1"}}}});
 
         json request;
         request["events"] = events; // 直接使用数组赋值

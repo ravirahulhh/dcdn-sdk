@@ -122,6 +122,7 @@ void WebSocketManager::handleRecvMsg(std::variant<rtc::binary, std::string>& mes
         }
         std::string str = std::move(std::get<std::string>(message));
         json msg = json::parse(str);
+        logInfo << "websocket recv msg: " << msg.dump();
         int msgType = msg["type"];
         int etype = EventType::None;
         switch (msgType) {
