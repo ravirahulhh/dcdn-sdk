@@ -69,20 +69,20 @@ private:
 
 struct FileDownloadDoneArg
 {
-    std::string url;
-    std::string filePath;
-    std::string fileHash;
-    BlockInfo blockInfo;
+    std::string Url;
+    std::string FilePath;
+    std::string FileHash;
+    BlockInfo BlockInfo;
 };
 
 struct FileDownloadFailedArg
 {
-    std::string filePath;
+    std::string FilePath;
 };
 
 struct RemoveFileArg
 {
-    std::string blockHash;
+    std::string BlockHash;
 };
 
 struct UploadFileArg

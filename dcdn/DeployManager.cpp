@@ -357,7 +357,7 @@ void DeployManager::checkDownloadStatus()
                 int hashError = calculateFileHash(task.downloadPath, localFileHash);
                 if (hashError != ErrorCodeOk) {
                     FileDownloadFailedArg failArg;
-                    failArg.filePath = task.downloadPath;
+                    failArg.FilePath = task.downloadPath;
 
                     mFileMgr->PostEvent(
                         std::make_shared<ArgEvent<FileDownloadFailedArg>>(
@@ -374,7 +374,7 @@ void DeployManager::checkDownloadStatus()
                     int getFileSizeError = getFileSize(task.downloadPath, filesize);
                     if (getFileSizeError != ErrorCodeOk) {
                         FileDownloadFailedArg failArg;
-                        failArg.filePath = task.downloadPath;
+                        failArg.FilePath = task.downloadPath;
 
                         mFileMgr->PostEvent(
                             std::make_shared<ArgEvent<FileDownloadFailedArg>>(
@@ -393,7 +393,7 @@ void DeployManager::checkDownloadStatus()
                     } else if (!task.fileHash.empty() && task.fileHash != localFileHash) {
                         logError << "File hash mismatch (jobId: " << task.jobId << ")";
                         FileDownloadFailedArg failArg;
-                        failArg.filePath = task.downloadPath;
+                        failArg.FilePath = task.downloadPath;
 
                         mFileMgr->PostEvent(
                             std::make_shared<ArgEvent<FileDownloadFailedArg>>(
@@ -405,12 +405,12 @@ void DeployManager::checkDownloadStatus()
                 }
 
                 FileDownloadDoneArg doneArg;
-                doneArg.fileHash = fileHash;
-                doneArg.blockInfo.hash = localFileHash;
-                doneArg.blockInfo.start = task.blockStart;
-                doneArg.blockInfo.end = blockEnd;
-                doneArg.url = task.url;
-                doneArg.filePath = task.downloadPath;
+                doneArg.FileHash = fileHash;
+                doneArg.BlockInfo.Hash = localFileHash;
+                doneArg.BlockInfo.Start = task.blockStart;
+                doneArg.BlockInfo.End = blockEnd;
+                doneArg.Url = task.url;
+                doneArg.FilePath = task.downloadPath;
 
                 mFileMgr->PostEvent(
                     std::make_shared<ArgEvent<FileDownloadDoneArg>>(EventType::FileDownloadDone, std::move(doneArg)));
@@ -433,7 +433,7 @@ void DeployManager::checkDownloadStatus()
                         << static_cast<int>(downloadStatus.Status);
 
                 FileDownloadFailedArg failArg;
-                failArg.filePath = task.downloadPath;
+                failArg.FilePath = task.downloadPath;
 
                 mFileMgr->PostEvent(
                     std::make_shared<ArgEvent<FileDownloadFailedArg>>(
