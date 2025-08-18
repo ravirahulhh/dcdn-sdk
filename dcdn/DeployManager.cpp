@@ -286,6 +286,10 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
             opts.RangeEnd = task.blockEnd;
         }
 
+        if (!task.fileHash.empty()) {
+            opts.Strategy = DownloadStrategy::P2P_ONLY;
+        }
+
         // 添加下载任务
         uint64_t taskId = mDownloadMgr->AddDownloadTask(task.url, task.fileHash, opts);
         if (taskId == 0) {
