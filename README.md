@@ -67,6 +67,8 @@ mkdir build
 cd build 
 cmake ..
 make -j8
+
+# cmake -DDEBUG_LOCAL_P2P=ON  ..
 ```
 
 # git hook 配置

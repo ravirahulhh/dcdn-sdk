@@ -18,7 +18,7 @@ int main()
     plog::Severity lvl = plog::debug;
     // plog::init<DCDN_LOGGER_ID>(lvl, consoleAppender);
     plog::init<DCDN_LOGGER_ID>(lvl, &consoleAppender);
-     dcdn::MainManagerOption opt;
+    dcdn::MainManagerOption opt;
     opt.WorkDir = "./data";
     opt.ApiKey = "123456";
     opt.DeviceId = "device123";
@@ -34,22 +34,15 @@ int main()
     dcdn::MainManager* m = dcdn::MainManager::Singlet();
     logInfo << "Start MainManager";
     m->Start();
-    // m->login();
-    std::this_thread::sleep_for(std::chrono::seconds(6));
 
+    const auto cp = static_cast<dcdn::WebRtcManager*>(dcdn::MainManager::Singlet()->GetWebRtcManager().get())->Cert();
+    std::cout << "Main" << "keyPemFile" << cp.keyPem << "certPemFile" << cp.certPem << std::endl;
     
-    auto webRTCManager = std::make_shared<dcdn::WebRtcManager>(dcdn::MainManager::Singlet());
-    if (!webRTCManager) {
-        std::cout << "WebRtcManager init failed" << std::endl;
-        return 0;
-    }
-    webRTCManager->Start(true);
-    // auto cert =     webRTCManager->Cert();
     dcdn::DownloadManager mgr;
 
     // 配置为 HTTP_ONLY 策略，最大并发 4
     // mgr.SetStrategy(dcdn::DownloadStrategy::P2P_ONLY);
-    mgr.SetMaxConcurrentDownloads(1);
+    mgr.SetMaxConcurrentDownloads(10);
 
     // 想下载的 HTTP 文件 URL
     // std::string url = "https://testfileorg.netwet.net/500MB-CZIPtestfile.org.zip";
@@ -61,9 +54,12 @@ int main()
     dcdn::FileDownloadOptions opts;
     opts.OutputPath = "chunk.bin";
     opts.HasRange = true;
+    opts.RangeStart = 0;
+    opts.RangeEnd = 2097152 - 1;
     opts.WriteRangeToSeparateFile = true; // 默认即为 true
     opts.Strategy = dcdn::DownloadStrategy::P2P_ONLY;
-    auto taskId = mgr.AddDownloadTask("", "66c5ba166f59a940499e34625b5bcda9", opts);
+    // auto taskId = mgr.AddDownloadTask("", "cd4a7faf4ed9cd3486cb08ff1dcfd040", opts);
+    auto taskId = mgr.AddDownloadTask("", "AXKXNz-vQ9V2YRLZTZLen8aO1CgB", opts);
 
     // 添加下载任务
     std::cout << "任务已创建，taskId = " << taskId << std::endl;

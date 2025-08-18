@@ -23,6 +23,14 @@ add_library(dcdn  STATIC
     DownloadManager.cpp
     DeployManager.cpp
 )
+# Enable local P2P debug code paths via option or Debug config
+# option(DEBUG_LOCAL_P2P "Enable local P2P debug code paths" OFF)
+option(DEBUG_LOCAL_P2P "Enable local P2P debug code paths" OFF)
+message(STATUS "DEBUG_LOCAL_P2P = ${DEBUG_LOCAL_P2P}")
+
+if (DEBUG_LOCAL_P2P)
+    target_compile_definitions(dcdn PUBLIC DEBUG_LOCAL_P2P=1)
+endif()
 
 include_directories(
     ${CMAKE_SOURCE_DIR}
@@ -63,4 +71,5 @@ target_link_libraries(http_test PRIVATE dcdn)
 
 
 add_executable(p2p_dl_manager_test DownloadeManagerTestP2P.cpp)
+target_compile_definitions(p2p_dl_manager_test PRIVATE DEBUG_LOCAL_P2P)
 target_link_libraries(p2p_dl_manager_test PRIVATE dcdn)

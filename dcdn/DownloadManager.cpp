@@ -1752,7 +1752,7 @@ bool DownloadManager::p2pQueryPeersAsync_(uint64_t taskId, size_t offset)
     }
 
     // nlohmann::json arg;
-    auto arg = BuildQueryPeersRequest("", t.Url, t.ContentHash, std::to_string(offset), "", true);
+    auto arg = BuildQueryPeersRequest("192.168.1.1", t.Url, t.ContentHash, std::to_string(offset), "", true);
 
     void* reqId = nullptr;
     auto succ = [this, taskId, offset](nlohmann::json& res) { this->onP2PPeerQuerySuccess_(taskId, res, offset); };
@@ -1802,6 +1802,7 @@ void DownloadManager::onP2PPeerQueryFail_(uint64_t taskId, int errCode, size_t o
 // TODO: add param len
 void DownloadManager::onP2PPeerQuerySuccess_(uint64_t taskId, nlohmann::json& res, size_t offset)
 {
+    std::cout << res.dump();
     logDebug << "query peers success taskId=" << taskId << " offset=" << offset << std::endl;
     // TODO: 当前假设个peer拥有完整文件，否则本最小化的demo示例将无法正常运行
     // 下面假设plan是完整文件的分片，但目前实际上只是包含offset的peer
@@ -1860,10 +1861,6 @@ void DownloadManager::onP2PPeerQuerySuccess_(uint64_t taskId, nlohmann::json& re
 
 void DownloadManager::scheduleP2PChunks_(uint64_t taskId, const std::vector<PeerChunk>& plan, size_t offset)
 {
-    if (plan.empty()) {
-        logError << "scheduleP2PChunks_ taskId=" << taskId << " plan is empty";
-        return;
-    }
 
     std::vector<PeerChunk> planO = plan;
 #ifdef DEBUG_LOCAL_P2P
@@ -1881,10 +1878,16 @@ void DownloadManager::scheduleP2PChunks_(uint64_t taskId, const std::vector<Peer
     while (std::getline(std::cin, line) && !line.empty()) {
         remote_sdp += line + "\r\n";
     }
-    planO.back().connMeta = remote_sdp;
-    planO.back().connMeta.pop_back(); // \n
-    planO.back().connMeta.pop_back(); // \r
+    planO.back().remoteSdp = remote_sdp;
+    planO.back().remoteSdp.pop_back(); // \n
+    planO.back().remoteSdp.pop_back(); // \r
 #endif
+
+    if (planO.empty()) {
+        logError << "scheduleP2PChunks_ taskId=" << taskId << " plan is empty";
+        return;
+    }
+
 
     auto longestPlan_ = planO[0];
     for (auto& pc : planO) {
@@ -1988,16 +1991,17 @@ bool DownloadManager::startOneP2PChunk_(uint64_t taskId, const PeerChunk& pc)
     download::P2PDownloaderTaskOption opt;
     opt.PeerID = pc.peerId;
     opt.PeerSdp = pc.remoteSdp;
-    // // TODO: not hard code
-    // opt.IceUfrag = "kul9";
-    // opt.IcePwd = "HArM7vdA12b4f+NrSE1hMu";
+#ifdef DEBUG_LOCAL_P2P
+    opt.IceUfrag = "kul9";
+    opt.IcePwd = "HArM7vdA12b4f+NrSE1hMu";
+    opt.ContentHash = "cd4a7faf4ed9cd3486cb08ff1dcfd040";
+#else
     opt.IceUfrag = pc.iceUfrag;
     opt.IcePwd = pc.icePwd;
+    opt.ContentHash = pc.hash;
+#endif
     opt.Start = pc.start;
     opt.End = pc.end;
-    // // TODO: not hard code
-    // opt.ContentHash = "66c5ba166f59a940499e34625b5bcda9";
-    opt.ContentHash = pc.hash;
     opt.Notify = &DownloadManager::coreNotifyCallbackP2p;
     opt.Receiver = this;
 

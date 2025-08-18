@@ -183,7 +183,7 @@ void MainManager::run()
     mWebSkt->Start();
     logDebug << "connect to cmd channel OK";
 
-    // mWebRtc->Start();
+    mWebRtc->Start();
     mFileMgr->Start();
     mUploadMgr->Start();
     mDeployMgr->Start();
