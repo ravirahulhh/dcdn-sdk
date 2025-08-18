@@ -1,5 +1,7 @@
 #include "DownloadManager.h"
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdio> // std::remove
@@ -9,11 +11,15 @@
 #include <iostream>
 #include <memory>
 #include <sstream>
-#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
+#include "MainManager.h"
 using namespace dcdn;
+using nlohmann::json;
+
+// TODO: read from config ?
+static constexpr const char* kApiPeersByHashOrUrl = "/api/v1/query_peers_by_file";
 
 // ============ 工具：生成 64 位 TaskId ============
 namespace {
@@ -82,6 +88,64 @@ DownloadTask DownloadTask::Deserialize(const std::string& data)
     return task;
 }
 
+// ====== P2P 查询：query_peers_by_file 的请求/响应解析 ======
+
+// （可选）构造 query_peers_by_file 请求体
+// 说明：接口所有数值字段目前都是字符串（示例即是字符串），这里遵循服务端约定。
+static inline json BuildQueryPeersRequest(
+    const std::string& ip,
+    const std::string& url,
+    const std::string& hash,
+    const std::string& start,
+    const std::string& scenario,
+    bool showBlocksHash)
+{
+    json j;
+    j["ip"] = ip; // string
+    j["url"] = url; // string
+    j["hash"] = hash; // string (文件 hash)
+    j["start"] = start; // string (起始偏移，字符串表示)
+    j["scenario"] = scenario; // string
+    j["showBlocksHash"] = showBlocksHash; // bool
+    return j;
+}
+
+// 解析 query_peers_by_file 的 JSON 对象（internal use）
+static inline download_manager::QueryPeersResponse ParseQueryPeersJsonObject(const json& j)
+{
+    download_manager::QueryPeersResponse resp;
+    //
+    // 顶层基础字段
+    // resp.fileHash  = j.value("fileHash",  "");
+    // resp.size      = j.value("size",      "");
+    // resp.nextStart = j.value("nextStart", "");
+
+    // // peers 数组
+    // if (j.contains("peers") && j["peers"].is_array()) {
+    //     for (const auto& p : j["peers"]) {
+    //         PeerInfo peer;
+    //         peer.peerId   = p.value("peerId",   "");
+    //         peer.start    = p.value("start",    "");
+    //         peer.end      = p.value("end",      "");
+    //         peer.connMeta = p.value("connMeta", "");
+    //         resp.peers.push_back(std::move(peer));
+    //     }
+    // }
+
+    // // blocks 数组
+    // if (j.contains("blocks") && j["blocks"].is_array()) {
+    //     for (const auto& b : j["blocks"]) {
+    //         dcdn::BlockInfo block;
+    //         block.start = b.value("start", "");
+    //         block.end   = b.value("end",   "");
+    //         block.hash  = b.value("hash",  "");
+    //         resp.blocks.push_back(std::move(block));
+    //     }
+    // }
+
+    return resp;
+}
+
 // ============ PersistenceHelper（占位） ============
 DownloadManager::PersistenceHelper::PersistenceHelper(const std::string& dbPath)
 {
@@ -128,12 +192,19 @@ DownloadManager::DownloadManager(): BaseManager(nullptr)
     }
     mHttpDownloader->Start();
 
+    download::P2PDownloader::Option p2pOpt;
+    mP2pDownloader = std::make_unique<download::P2PDownloader>(p2pOpt);
+    p2pOpt.ConnectionTimeout = "30";
+    mP2pDownloader->Init(&p2pOpt);
+    mP2pDownloader->Start();
+
     // 注册事件处理器：FunctionCall
     this->registerHandler(EventType::FunctionCall, &DownloadManager::handleFunctionCall);
 
     // 启动事件线程（后台）
     Start(true);
 }
+
 
 DownloadManager::~DownloadManager()
 {
@@ -155,31 +226,39 @@ void DownloadManager::run()
         // 等待：若无 FunctionCall 事件，可被下载器通知（mCv）唤醒
         {
             std::unique_lock<std::mutex> lk(mMtx);
-            mCv.wait_for(lk,reapInterval, [&] { return !mDlEventsHttp.empty() || !mEvents.empty(); });
+            mCv.wait_for(lk, reapInterval, [&] { return !mDlEventsHttp.empty() || !mEvents.empty(); });
         }
 
         // 处理 1 个 FunctionCall 事件(若有)
         this->waitEvent(10ms);
 
-        // pop downloader read events 
+        // pop downloader read events
         std::vector<std::shared_ptr<util::DownloaderTask>> httpBatch;
         std::vector<std::shared_ptr<util::DownloaderTask>> p2pBatch;
         {
             std::lock_guard<std::mutex> g(mMtx);
             httpBatch.reserve(mDlEventsHttp.size());
-            for (auto& kv : mDlEventsHttp) httpBatch.push_back(kv.second);
+            for (auto& kv : mDlEventsHttp)
+                httpBatch.push_back(kv.second);
             mDlEventsHttp.clear();
 
             p2pBatch.reserve(mDlEventsP2p.size());
-            for (auto& kv : mDlEventsP2p) p2pBatch.push_back(kv.second);
+            for (auto& kv : mDlEventsP2p)
+                p2pBatch.push_back(kv.second);
             mDlEventsP2p.clear();
         }
 
         for (auto& t : httpBatch) {
-            try { processHttpEvent(t); } catch (...) {}
+            try {
+                processHttpEvent(t);
+            } catch (...) {
+            }
         }
         for (auto& t : p2pBatch) {
-            try { processP2pEvent(t); } catch (...) {}
+            try {
+                processP2pEvent(t);
+            } catch (...) {
+            }
         }
 
         // —— 看门狗：回收卡死的分片
@@ -199,6 +278,11 @@ void DownloadManager::run()
             for (auto& st : snapshot) {
                 if (st.isProbe || st.length == 0)
                     continue;
+                // TODO: 实现p2p模式的watchdog
+                if (st.transport == ActiveSubTask::Transport::P2P){
+                    logInfo << "[P2P]watchdog skip in p2p mode (un-implemented)" << std::endl;
+                    continue;
+                }
 
                 // 若任务被暂停/取消，跳过（不误判）
                 bool paused = false, cancelled = false;
@@ -220,7 +304,8 @@ void DownloadManager::run()
 
                     const size_t missStart = st.offset + got;
                     const size_t missEnd = st.offset + st.length - 1;
-                    logWarn << "看门狗扫描：子任务 " << st.index << " 无任何进展，miss[" << missStart << ", " << missEnd << "]";
+                    logWarn << "看门狗扫描：子任务 " << st.index << " 无任何进展，miss[" << missStart << ", " << missEnd
+                            << "]";
                     // 回填 + 续排（注意：续排前再次读 paused/cancelled）
                     {
                         std::lock_guard<std::mutex> l(mMtx);
@@ -312,7 +397,8 @@ void DownloadManager::run()
                                     mDlByTaskHttp[st.parentTaskId].push_back(sub);
                                 }
                                 mHttpDownloader->AddTask(sub);
-                                logWarn << "[watchdog] 子任务无进展，回填续排原来index任务：" << st.index << ", 回填range: " << r.start << "-" << r.end;
+                                logWarn << "[watchdog] 子任务无进展，回填续排原来index任务：" << st.index
+                                        << ", 回填range: " << r.start << "-" << r.end;
                             } else {
                                 logWarn << "[watchdog] CreateTask 失败，稍后重试 range: " << r.start << "-" << r.end;
                                 std::lock_guard<std::mutex> l(mMtx);
@@ -369,8 +455,19 @@ void DownloadManager::coreNotifyCallbackHttp(std::shared_ptr<dcdn::util::Downloa
     self->mCv.notify_all();
 }
 
-void DownloadManager::coreNotifyCallbackP2p(std::shared_ptr<dcdn::util::DownloaderTask> task, void* receiver) {
-
+void DownloadManager::coreNotifyCallbackP2p(std::shared_ptr<dcdn::util::DownloaderTask> task, void* receiver)
+{
+    // logInfo << "coreNotifyCallbackP2p, task=" << task.get() << ", receiver=" << receiver;
+    if (!task || !receiver)
+        return;
+    auto* self = static_cast<DownloadManager*>(receiver);
+    {
+        std::lock_guard<std::mutex> g(self->mMtx);
+        if (self->mCancelledRawP2p.count(task.get()))
+            return;
+        self->mDlEventsP2p[task.get()] = std::move(task);
+    }
+    self->mCv.notify_all();
 }
 
 // 包装（预留）
@@ -700,14 +797,242 @@ void DownloadManager::processHttpEvent(std::shared_ptr<dcdn::util::DownloaderTas
     }
 }
 
-void DownloadManager::processP2pEvent(std::shared_ptr<util::DownloaderTask> ev) {
+// TODO: some duplicate with processHttpEvent
+void DownloadManager::processP2pEvent(std::shared_ptr<util::DownloaderTask> ev)
+{
+    logInfo << "enter processP2pEvent";
+    auto* raw = ev.get();
 
+    // 任务取消后的迟到通知直接丢弃
+    {
+        std::lock_guard<std::mutex> g(mMtx);
+        if (mCancelledRawP2p.count(raw))
+            return;
+    }
+
+    ActiveSubTask active;
+    {
+        std::lock_guard<std::mutex> g(mMtx);
+        auto it = mActiveByPtrP2p.find(raw);
+        if (it == mActiveByPtrP2p.end()) {
+            // 可能是迟到事件，直接早退
+            return;
+        }
+        active = it->second;
+    }
+
+    // 读取并写入
+    auto buffer = ev->Read();
+    size_t readSum = 0;
+
+    FileDownloadOptions opts;
+    std::shared_ptr<std::fstream> file;
+    {
+        std::lock_guard<std::mutex> lk(mTasksMutex);
+        auto itOpt = mTaskOptions.find(active.parentTaskId);
+        if (itOpt != mTaskOptions.end())
+            opts = itOpt->second;
+    }
+    {
+        std::lock_guard<std::mutex> l(mMtx);
+        auto itF = mParentFiles.find(active.parentTaskId);
+        if (itF != mParentFiles.end())
+            file = itF->second;
+    }
+
+    // 我这段允许写入的绝对区间
+    const size_t segBeg = active.offset;
+    const size_t segEnd = active.offset + active.length - 1;
+
+    while (buffer) {
+        size_t len = buffer->Length();
+        size_t off = buffer->Offset(); // 假定为"资源内绝对偏移"
+        size_t bufBeg = off;
+        size_t bufEnd = off + (len ? (len - 1) : 0);
+
+        // 与我负责的区间做交集
+        size_t wrBeg = (bufBeg > segBeg) ? bufBeg : segBeg;
+        size_t wrEnd = (bufEnd < segEnd) ? bufEnd : segEnd;
+
+        if (wrBeg <= wrEnd) {
+            size_t accept = wrEnd - wrBeg + 1;
+            size_t srcOff = wrBeg - bufBeg; // 从 buffer 内的这个位置开始拷
+            size_t dstOff;
+
+            if (opts.HasRange && opts.WriteRangeToSeparateFile) {
+                // 写相对文件：把“绝对位置”映射到用户 Range 的相对
+                dstOff = (wrBeg >= opts.RangeStart) ? (wrBeg - opts.RangeStart) : 0;
+            } else {
+                // 共享大文件：按绝对偏移写
+                dstOff = wrBeg;
+            }
+
+            if (file && file->good()) {
+                try {
+                    file->seekp(static_cast<std::streamoff>(dstOff), std::ios::beg);
+                } catch (...) {
+                }
+                file->write(reinterpret_cast<const char*>(buffer->Data()) + srcOff, accept);
+                // 不必每块都 flush，性能更好；如需稳妥可保留 flush()
+                // file->flush();
+            } else if (opts.OutputStream) {
+                opts.OutputStream->write(reinterpret_cast<const char*>(buffer->Data()) + srcOff, accept);
+                // opts.OutputStream->flush();
+            } else if (!opts.OutputPath.empty()) {
+                std::fstream ofs(opts.OutputPath, std::ios::in | std::ios::out | std::ios::binary);
+                if (!ofs) {
+                    std::ofstream create(opts.OutputPath, std::ios::binary);
+                    create.close();
+                    ofs.open(opts.OutputPath, std::ios::in | std::ios::out | std::ios::binary);
+                }
+                if (ofs) {
+                    ofs.seekp(static_cast<std::streamoff>(dstOff), std::ios::beg);
+                    ofs.write(reinterpret_cast<const char*>(buffer->Data()) + srcOff, accept);
+                }
+            }
+
+            readSum += accept;
+
+            if (active.parentTaskId != 0) {
+                notifyBufferReady(active.parentTaskId, wrBeg, wrEnd);
+            }
+        }
+
+        buffer = buffer->Next();
+    }
+
+    // 记录分片实际读到的量 + 心跳
+    if (readSum > 0) {
+        std::lock_guard<std::mutex> l(mMtx);
+        auto it = mActiveByPtrP2p.find(raw);
+        if (it != mActiveByPtrP2p.end()) {
+            it->second.actualGot += readSum;
+            it->second.lastTouched = std::chrono::steady_clock::now();
+        }
+    }
+    if (readSum > 0 && active.parentTaskId != 0) {
+        updateTaskProgress(active.parentTaskId, readSum);
+        notifyBufferReady(active.parentTaskId, active.offset, active.offset + readSum);
+    }
+
+    // 结束/短读判定
+    bool isEnd = ev->IsEnd();
+    uint64_t got = 0;
+    {
+        std::lock_guard<std::mutex> l(mMtx);
+        auto it = mActiveByPtrP2p.find(raw);
+        if (it != mActiveByPtrP2p.end())
+            got = it->second.actualGot;
+    }
+    bool endByLength = (!active.isProbe && active.length > 0 && got >= active.length);
+    bool shortRead = (!active.isProbe && active.length > 0 && isEnd && got < active.length);
+
+    if ((isEnd || endByLength) && active.parentTaskId != 0) {
+        // TODO: refactor duplication code in if else
+        if (shortRead) {
+            const size_t missStart = active.offset + got;
+            const size_t missEnd = active.offset + active.length - 1;
+            {
+                // insert missing to pending
+                std::lock_guard<std::mutex> l(mMtx);
+                mPendingRanges[active.parentTaskId].push_front(Range{missStart, missEnd});
+                // cancel this
+                mActiveByPtrP2p.erase(raw);
+                auto& vec = mDlByTaskP2p[active.parentTaskId];
+                vec.erase(
+                    std::remove_if(
+                        vec.begin(),
+                        vec.end(),
+                        [raw](const std::shared_ptr<dcdn::util::DownloaderTask>& p) { return p.get() == raw; }),
+                    vec.end());
+            }
+            logWarn << "[P2P]子任务 " << active.index << " 短读, got=" << got << " < need=" << active.length
+                    << ", 回填缺口: [" << (active.offset + got) << ", " << (active.offset + active.length - 1) << "]";
+        } else {
+            uint64_t actualGot = got;
+            {
+                std::lock_guard<std::mutex> l(mMtx);
+                mActiveByPtrP2p.erase(raw);
+                auto& vec = mDlByTaskP2p[active.parentTaskId];
+                vec.erase(
+                    std::remove_if(
+                        vec.begin(),
+                        vec.end(),
+                        [raw](const std::shared_ptr<dcdn::util::DownloaderTask>& p) { return p.get() == raw; }),
+                    vec.end());
+            }
+            if (!active.isProbe && active.length > 0) {
+                logInfo << "[P2P]子任务 " << active.index << " 结束, start: " << active.offset
+                        << ", end: " << (active.offset + active.length - 1) << ", actually got: " << actualGot
+                        << ", expect length: " << active.length << (endByLength && !isEnd ? " (size-guard)" : "");
+            } else {
+                logInfo << "[P2P]子任务 " << active.index << " 结束 (probe)";
+            }
+        }
+
+        // —— 续排一个 pending（先看是否暂停/取消）
+        bool paused = false, cancelled = false;
+        {
+            std::lock_guard<std::mutex> lk(mTasksMutex);
+            auto it = mTasks.find(active.parentTaskId);
+            if (it != mTasks.end()) {
+                paused = it->second.Paused.load();
+                cancelled = it->second.Cancelled.load();
+            }
+        }
+        if (!paused && !cancelled) {
+            Range r;
+            bool hasNext = false;
+            size_t idxNext = 0;
+            {
+                std::lock_guard<std::mutex> l(mMtx);
+                auto& q = mPendingRanges[active.parentTaskId];
+                if (!q.empty()) {
+                    r = q.front();
+                    q.pop_front();
+                    idxNext = mNextRangeIdx[active.parentTaskId]++;
+                    hasNext = true;
+                }
+            }
+            if (hasNext) {
+                logDebug << "[P2P][Re-queue] pending: " << r.start << "-" << r.end << ", idxNext: " << idxNext;
+                auto succ = p2pQueryPeersAsync_(active.parentTaskId, r.start);
+                if (!succ) {
+                    logWarn << "[P2P][Re-queue] p2pQueryPeersAsync failed" << ", taskId: " << active.parentTaskId << ", offset: " << r.start;
+                }
+            }
+        }
+
+        bool hasRunning = false, hasPending = false, hasQueryOnFlight = false;
+        {
+            std::lock_guard<std::mutex> l(mMtx);
+            auto itD = mDlByTaskP2p.find(active.parentTaskId);
+            hasRunning = (itD != mDlByTaskP2p.end() && !itD->second.empty());
+            auto itP = mPendingRanges.find(active.parentTaskId);
+            hasPending = (itP != mPendingRanges.end() && !itP->second.empty());
+
+            auto it = p2pStates_.find(active.parentTaskId);
+            if (it != p2pStates_.end()) {
+                const auto& inner = it->second;
+                hasQueryOnFlight =
+                    std::any_of(inner.begin(), inner.end(), [](const auto& kv) { return kv.second.queryInFlight; });
+            }
+        }
+
+        if (!hasRunning && !hasPending && !hasQueryOnFlight) {
+            maybeFinalizeTask(active.parentTaskId);
+        }
+    }
+
+    if (active.parentTaskId != 0) {
+        maybeFinalizeTask(active.parentTaskId);
+    }
 }
 
 // ============ 配置接口 ============
 void DownloadManager::SetStrategy(DownloadStrategy strategy)
 {
-    mStrategy = strategy;
+    // mStrategy = strategy;
 }
 void DownloadManager::SetMaxConcurrentDownloads(size_t max)
 {
@@ -719,7 +1044,6 @@ void DownloadManager::SetPersistPath(const std::string& path)
     mDbHelper = std::make_unique<PersistenceHelper>(path);
 }
 
-// ============ 任务管理（HTTP_ONLY 实现） ============
 uint64_t DownloadManager::AddDownloadTask(
     const std::string& url,
     const std::string& contentHash,
@@ -727,9 +1051,9 @@ uint64_t DownloadManager::AddDownloadTask(
 {
     auto prom = std::make_shared<std::promise<uint64_t>>();
     auto fut = prom->get_future();
-
+    auto strategy = options.Strategy;
     this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(
-        EventType::FunctionCall, [this, prom, url, contentHash, options]() {
+        EventType::FunctionCall, [this, prom, url, contentHash, options, strategy]() {
             DownloadTask task;
             task.Id = genTaskId();
             task.Url = url;
@@ -761,7 +1085,7 @@ uint64_t DownloadManager::AddDownloadTask(
                 }
             }
 
-            if (mStrategy == DownloadStrategy::HTTP_ONLY) {
+            if (strategy == DownloadStrategy::HTTP_ONLY) {
                 const bool wantRange = options.HasRange;
                 const size_t userStart = options.RangeStart;
                 const bool endKnown = options.HasRange && options.RangeEnd != SIZE_MAX;
@@ -832,18 +1156,29 @@ uint64_t DownloadManager::AddDownloadTask(
                 }
                 prom->set_value(task.Id);
                 return;
+            } else if (strategy == DownloadStrategy::P2P_ONLY) {
+                {
+                    std::lock_guard<std::mutex> lk(mTasksMutex);
+                    auto itT = mTasks.find(task.Id);
+                    if (itT != mTasks.end())
+                        itT->second.Status = TaskStatus::Running;
+                }
+                startP2pDownload(task.Id);
+                prom->set_value(task.Id);
+                return;
+            } else { // HYBRID（place holder）
+                {
+                    std::lock_guard<std::mutex> lk(mTasksMutex);
+                    auto itT = mTasks.find(task.Id);
+                    if (itT != mTasks.end())
+                        itT->second.Status = TaskStatus::Pending;
+                }
+                startHybridDownload(task.Id); // TODO
+                prom->set_value(task.Id);
+                return;
             }
-
-            // 其他策略暂未实现
-            {
-                std::lock_guard<std::mutex> lk(mTasksMutex);
-                auto itT = mTasks.find(task.Id);
-                if (itT != mTasks.end())
-                    itT->second.Status = TaskStatus::Pending;
-            }
-            prom->set_value(task.Id);
         }));
-
+    // TODO: return task id without wait
     return fut.get();
 }
 
@@ -1081,10 +1416,35 @@ void DownloadManager::startHttpDownload(const uint64_t& taskId)
 {
     (void)taskId;
 }
+
 void DownloadManager::startP2pDownload(const uint64_t& taskId)
 {
-    (void)taskId;
+    FileDownloadOptions opt;
+    DownloadTask t;
+    {
+        std::lock_guard<std::mutex> lk(mTasksMutex);
+        auto it = mTasks.find(taskId);
+        if (it == mTasks.end())
+            return;
+        t = it->second;
+        auto itOpt = mTaskOptions.find(taskId);
+        if (itOpt != mTaskOptions.end())
+            opt = itOpt->second;
+    }
+
+    logDebug << "P2P peers 查询开始 taskId=" << taskId << "offset =" << (opt.HasRange ? opt.RangeStart : 0)
+             << std::endl;
+    if (!p2pQueryPeersAsync_(taskId, opt.HasRange ? opt.RangeStart : 0)) {
+        std::lock_guard<std::mutex> lk(mTasksMutex);
+        auto it = mTasks.find(taskId);
+        if (it != mTasks.end()) {
+            logError << "P2P peers 查询失败 taskId=" << taskId << std::endl;
+            // TODO: NEED retry
+            it->second.Status = TaskStatus::Pending;
+        }
+    }
 }
+
 void DownloadManager::startHybridDownload(const uint64_t& taskId)
 {
     (void)taskId;
@@ -1166,7 +1526,7 @@ void DownloadManager::splitTask(uint64_t taskId, size_t totalSize, size_t baseOf
     const size_t absBegin = baseOffset;
     const size_t absEnd = baseOffset + totalSize - 1;
 
-     // 用 probe 已有字节前移起点，避免重复下载 / 计数错位
+    // 用 probe 已有字节前移起点，避免重复下载 / 计数错位
     // 排除 probe 已下载部分
     size_t rangeStart = absBegin + already;
     if (rangeStart > absEnd) {
@@ -1285,43 +1645,389 @@ void DownloadManager::splitTask(uint64_t taskId, size_t totalSize, size_t baseOf
 // ============ 幂等的完成判定 ============
 bool DownloadManager::maybeFinalizeTask(uint64_t taskId)
 {
-    bool hasRunning = false;
-    bool hasPending = false;
-    {
-        std::lock_guard<std::mutex> l(mMtx);
-        auto itD = mDlByTaskHttp.find(taskId);
-        hasRunning = (itD != mDlByTaskHttp.end() && !itD->second.empty());
-        auto itP = mPendingRanges.find(taskId);
-        hasPending = (itP != mPendingRanges.end() && !itP->second.empty());
-    }
-    if (hasRunning || hasPending)
+    // TODO: refactor, duplicate code in if-else clause
+    auto opts = mTaskOptions.find(taskId);
+    if (opts == mTaskOptions.end())
         return false;
 
+    if (opts->second.Strategy == DownloadStrategy::HTTP_ONLY) {
+        bool hasRunning = false;
+        bool hasPending = false;
+        {
+            std::lock_guard<std::mutex> l(mMtx);
+            auto itD = mDlByTaskHttp.find(taskId);
+            hasRunning = (itD != mDlByTaskHttp.end() && !itD->second.empty());
+            auto itP = mPendingRanges.find(taskId);
+            hasPending = (itP != mPendingRanges.end() && !itP->second.empty());
+        }
+        if (hasRunning || hasPending)
+            return false;
+
+        {
+            std::lock_guard<std::mutex> lk(mTasksMutex);
+            auto itT = mTasks.find(taskId);
+            if (itT == mTasks.end())
+                return false;
+
+            auto& t = itT->second;
+            if (t.Cancelled) {
+                t.Status = TaskStatus::Cancelled;
+                return true;
+            }
+            // —— 兜底对齐：既然没有在跑/待排队的分片，说明下载流程上的“工作”已完成
+            // 若计数略小于总长（常见于 probe + 预分配/短读边界），直接对齐。
+            if (t.TotalSize > 0 && t.Downloaded < t.TotalSize) {
+                logWarn << "任务" << taskId << "下载完成(无running 和pending),但计数不对齐，修正为" << t.TotalSize;
+                t.Downloaded = t.TotalSize;
+            }
+            t.Status = TaskStatus::Completed;
+        }
+        // 幂等清理
+        {
+            std::lock_guard<std::mutex> l(mMtx);
+            mDlByTaskHttp.erase(taskId);
+            mPendingRanges.erase(taskId);
+            mParentFiles.erase(taskId);
+        }
+    } else if (opts->second.Strategy == DownloadStrategy::P2P_ONLY) {
+        bool hasRunning = false;
+        bool hasPending = false;
+        {
+            std::lock_guard<std::mutex> l(mMtx);
+            auto itD = mDlByTaskP2p.find(taskId);
+            hasRunning = (itD != mDlByTaskP2p.end() && !itD->second.empty());
+            auto itP = mPendingRanges.find(taskId);
+            hasPending = (itP != mPendingRanges.end() && !itP->second.empty());
+        }
+        if (hasRunning || hasPending)
+            return false;
+
+        {
+            std::lock_guard<std::mutex> lk(mTasksMutex);
+            auto itT = mTasks.find(taskId);
+            if (itT == mTasks.end())
+                return false;
+
+            auto& t = itT->second;
+            if (t.Cancelled) {
+                t.Status = TaskStatus::Cancelled;
+                return true;
+            }
+            // —— 兜底对齐：既然没有在跑/待排队的分片，说明下载流程上的“工作”已完成
+            // 若计数略小于总长（常见于 probe + 预分配/短读边界），直接对齐。
+            if (t.TotalSize > 0 && t.Downloaded < t.TotalSize) {
+                logWarn << "任务" << taskId << "下载完成(无running 和pending),但计数不对齐，修正为" << t.TotalSize;
+                t.Downloaded = t.TotalSize;
+            }
+            t.Status = TaskStatus::Completed;
+        }
+        // 幂等清理
+        {
+            std::lock_guard<std::mutex> l(mMtx);
+            mDlByTaskP2p.erase(taskId);
+            mPendingRanges.erase(taskId);
+            mParentFiles.erase(taskId);
+        }
+    }
+
+    return true;
+}
+
+// TODO: add param len
+bool DownloadManager::p2pQueryPeersAsync_(uint64_t taskId, size_t offset)
+{
+    logDebug << "enter p2pQueryPeersAsync_ taskId=" << taskId << " offset=" << offset << std::endl;
+    // TODO: need some refactor, the outer caller has the same code snippet
+    DownloadTask t;
+    FileDownloadOptions opt;
+    {
+        std::lock_guard<std::mutex> lk(mTasksMutex);
+        auto it = mTasks.find(taskId);
+        if (it == mTasks.end())
+            return false;
+        t = it->second;
+        auto itOpt = mTaskOptions.find(taskId);
+        if (itOpt != mTaskOptions.end())
+            opt = itOpt->second;
+    }
+
+    // nlohmann::json arg;
+    auto arg = BuildQueryPeersRequest("", t.Url, t.ContentHash, std::to_string(offset), "", true);
+
+    void* reqId = nullptr;
+    auto succ = [this, taskId, offset](nlohmann::json& res) { this->onP2PPeerQuerySuccess_(taskId, res, offset); };
+    auto fail = [this, taskId, offset](int code) { this->onP2PPeerQueryFail_(taskId, code, offset); };
+
+    auto mm = MainManager::Singlet();
+    if (mm == nullptr) {
+        logError << "[P2P] MainManager::Singlet() is null";
+        return false;
+    }
+    int rc = mm->AsyncApiPostWithToken(&reqId, kApiPeersByHashOrUrl, arg, this, succ, fail);
+
+    // rc 1 is success?
+    if (rc != 1) {
+        logWarn << "[P2P] async query failed rc=" << rc << " taskId=" << taskId;
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(mTasksMutex);
+        p2pStates_[taskId][offset].queryReqId = reqId;
+        p2pStates_[taskId][offset].queryInFlight = true;
+        p2pStates_[taskId][offset].offset = offset;
+        p2pStates_[taskId][offset].lastQueryErr = 0;
+    }
+    return true;
+}
+
+void DownloadManager::onP2PPeerQueryFail_(uint64_t taskId, int errCode, size_t offset)
+{
+    logError << "[P2P] peers 查询失败 err=" << errCode << " taskId=" << taskId << std::endl;
+
+    {
+        std::lock_guard<std::mutex> lk(mTasksMutex);
+        p2pStates_[taskId][offset].queryInFlight = false;
+        p2pStates_[taskId][offset].queryDone = true;
+        p2pStates_[taskId][offset].lastQueryErr = errCode;
+
+        auto it = mTasks.find(taskId);
+        if (it != mTasks.end()) {
+            // P2P_ONLY模式简单处理：标记失败；如果在 HYBRID 里回退 HTTP，在此触发 HTTP 流程
+            it->second.Status = TaskStatus::Failed;
+        }
+    }
+}
+
+// TODO: add param len
+void DownloadManager::onP2PPeerQuerySuccess_(uint64_t taskId, nlohmann::json& res, size_t offset)
+{
+    logDebug << "query peers success taskId=" << taskId << " offset=" << offset << std::endl;
+    // TODO: 当前假设个peer拥有完整文件，否则本最小化的demo示例将无法正常运行
+    // 下面假设plan是完整文件的分片，但目前实际上只是包含offset的peer
+    // 需要多次发起query来获取完整的分片
+    std::vector<PeerChunk> plan;
+    // total size of the file (if we request a block, it means the size of the file that the block belong to)
+    size_t totalSizeFromApi = 0;
+
+    try {
+        if (res.contains("size")) {
+            totalSizeFromApi = std::stoull(res.value("size", "0"));
+        }
+        if (res.contains("peers") && res["peers"].is_array()) {
+            for (auto& p : res["peers"]) {
+                PeerChunk pc;
+                pc.peerId = p.value("peerId", "");
+                pc.url = p.value("url", "");
+                pc.hash = p.value("hash", "");
+                pc.iceUfrag = p.value("iceUfrag", "");
+                pc.icePwd = p.value("icePwd", "");
+                pc.remoteSdp = p.value("connMeta", "");
+                pc.start = std::stoull(p.value("start", "0"));
+                pc.end = std::stoull(p.value("end", "0"));
+            }
+        }
+    } catch (const std::exception& ex) {
+        logWarn << "[P2P] parse response error: " << ex.what() << " taskId=" << taskId;
+        onP2PPeerQueryFail_(taskId, -2, offset);
+        return;
+    }
+
+    logDebug << "onP2PPeerQuerySuccess_ taskId=" << taskId << " offset =" << offset << " plan size=" << plan.size();
+
+    {
+        std::lock_guard<std::mutex> lk(mTasksMutex);
+        auto it = mTasks.find(taskId);
+        if (it == mTasks.end())
+            return;
+
+        if (it->second.TotalSize == 0 && totalSizeFromApi > 0) {
+            it->second.TotalSize = totalSizeFromApi;
+        }
+
+        p2pStates_[taskId][offset].queryInFlight = false;
+        p2pStates_[taskId][offset].queryDone = true;
+        p2pStates_[taskId][offset].lastQueryErr = 0;
+        p2pStates_[taskId][offset].plan = plan;
+
+        if (it->second.Status == TaskStatus::Pending) {
+            it->second.Status = TaskStatus::Running;
+        }
+    }
+
+    scheduleP2PChunks_(taskId, plan, offset);
+}
+
+void DownloadManager::scheduleP2PChunks_(uint64_t taskId, const std::vector<PeerChunk>& plan, size_t offset)
+{
+    if (plan.empty()) {
+        logError << "scheduleP2PChunks_ taskId=" << taskId << " plan is empty";
+        return;
+    }
+
+    std::vector<PeerChunk> planO = plan;
+#ifdef DEBUG_LOCAL_P2P
+    // TODO: PeerChunk 手动注入,非DEBUg请删除
+    // plan.push_back({.peerId = "peer1", .start = 0, .end = 1024});
+    planO.clear();
+    planO.push_back({.peerId = "peer1", .start = 0, .end = 2147483647});
+
+    logInfo << "scheduleP2PChunks_ taskId=" << taskId << " plan size=" << planO.size();
+    // TODO: 仅测试
+    std::cout << "INPUT connMeta " << std::endl;
+    // read until non-empty line
+    std::string remote_sdp;
+    std::string line;
+    while (std::getline(std::cin, line) && !line.empty()) {
+        remote_sdp += line + "\r\n";
+    }
+    planO.back().connMeta = remote_sdp;
+    planO.back().connMeta.pop_back(); // \n
+    planO.back().connMeta.pop_back(); // \r
+#endif
+
+    auto longestPlan_ = planO[0];
+    for (auto& pc : planO) {
+        if (pc.end > longestPlan_.end) {
+            longestPlan_ = pc;
+        }
+    }
+
+    FileDownloadOptions opts;
+    DownloadTask t;
     {
         std::lock_guard<std::mutex> lk(mTasksMutex);
         auto itT = mTasks.find(taskId);
         if (itT == mTasks.end())
-            return false;
-
-        auto& t = itT->second;
-        if (t.Cancelled) {
-            t.Status = TaskStatus::Cancelled;
-            return true;
-        }
-        // —— 兜底对齐：既然没有在跑/待排队的分片，说明下载流程上的“工作”已完成
-        // 若计数略小于总长（常见于 probe + 预分配/短读边界），直接对齐。
-        if (t.TotalSize > 0 && t.Downloaded < t.TotalSize) {
-            logWarn << "任务" << taskId << "下载完成(无running 和pending),但计数不对齐，修正为" << t.TotalSize;
-            t.Downloaded = t.TotalSize;
-        }
-        t.Status = TaskStatus::Completed;
+            return;
+        t = itT->second;
+        auto itOpt = mTaskOptions.find(taskId);
+        if (itOpt != mTaskOptions.end())
+            opts = itOpt->second;
     }
-    // 幂等清理
+
+    if (t.Paused || t.Cancelled)
+        return;
+
+    size_t runningP2p = 0;
     {
         std::lock_guard<std::mutex> l(mMtx);
-        mDlByTaskHttp.erase(taskId);
-        mPendingRanges.erase(taskId);
-        mParentFiles.erase(taskId);
+        auto it = mDlByTaskP2p.find(taskId);
+        if (it != mDlByTaskP2p.end())
+            runningP2p = it->second.size();
+        if (mNextRangeIdx.find(taskId) == mNextRangeIdx.end())
+            mNextRangeIdx[taskId] = 0;
     }
+
+    PeerChunk clipped = longestPlan_;
+    size_t s = offset, e = longestPlan_.end;
+    if (opts.HasRange) {
+        if (opts.RangeEnd != SIZE_MAX && e > opts.RangeEnd)
+            e = opts.RangeEnd;
+    }
+    clipped.start = s;
+    clipped.end = e;
+
+    const size_t room = (mMaxConcurrent > runningP2p) ? (mMaxConcurrent - runningP2p) : 0;
+    if (room == 0) {
+        logError << "未实现的P2p并发限制分支, 请先将并发调大绕过";
+        // 把 plan 全部扔进 pending，等回调/看门狗来续排
+        std::lock_guard<std::mutex> l(mMtx);
+        auto& q = mPendingRanges[taskId];
+
+        logDebug << "scheduleP2PChunks_ pending ranges, taskId=" << taskId << " offset=" << offset << " s=" << s
+                 << " e=" << e;
+
+        // TODO: implement
+        // q.push_back(pc);
+        return;
+    }
+
+    if (startOneP2PChunk_(taskId, clipped)) {
+        return;
+    } else {
+        logError << "startOneP2PChunk_ failed taskId=" << taskId << " offset=" << offset << "chunk=" << clipped.start
+                 << "-" << clipped.end << "peer " << clipped.peerId << std::endl;
+    }
+
+    // 兜底 finalize
+    maybeFinalizeTask(taskId);
+}
+
+bool DownloadManager::startOneP2PChunk_(uint64_t taskId, const PeerChunk& pc)
+{
+    // 被暂停/取消则不启动
+    // no launch
+    {
+        std::lock_guard<std::mutex> lk(mTasksMutex);
+        auto it = mTasks.find(taskId);
+        if (it == mTasks.end())
+            return false;
+        if (it->second.Paused || it->second.Cancelled)
+            return false;
+    }
+
+    // output file fd
+    std::shared_ptr<std::fstream> parentFile;
+    {
+        std::lock_guard<std::mutex> l(mMtx);
+        auto itF = mParentFiles.find(taskId);
+        if (itF != mParentFiles.end())
+            parentFile = itF->second;
+    }
+
+    // find task
+    // download::P2PDownloaderTaskOption opts;
+    // auto    optIt =  mP2pTaskOptions.find(taskId);
+    // if (optIt != mP2pTaskOptions.end()) opts = optIt->second;
+    // else{
+    //     logError << "no p2p task option found for " << taskId << " may be you not registered the task opts in
+    //     AddDownloadTask? ";
+    // }
+
+    download::P2PDownloaderTaskOption opt;
+    opt.PeerID = pc.peerId;
+    opt.PeerSdp = pc.remoteSdp;
+    // // TODO: not hard code
+    // opt.IceUfrag = "kul9";
+    // opt.IcePwd = "HArM7vdA12b4f+NrSE1hMu";
+    opt.IceUfrag = pc.iceUfrag;
+    opt.IcePwd = pc.icePwd;
+    opt.Start = pc.start;
+    opt.End = pc.end;
+    // // TODO: not hard code
+    // opt.ContentHash = "66c5ba166f59a940499e34625b5bcda9";
+    opt.ContentHash = pc.hash;
+    opt.Notify = &DownloadManager::coreNotifyCallbackP2p;
+    opt.Receiver = this;
+
+    auto sub = mP2pDownloader->CreateTask(&opt);
+    if (!sub) {
+        logWarn << "[P2P] CreateTask failed peer=" << pc.peerId << " range=" << pc.start << "-" << pc.end;
+        return false;
+    }
+
+    size_t idx = 0;
+    {
+        std::lock_guard<std::mutex> l(mMtx);
+        idx = mNextRangeIdx[taskId]++;
+
+        ActiveSubTask st;
+        st.parentTaskId = taskId;
+        st.offset = pc.start;
+        st.length = pc.end - pc.start + 1;
+        st.index = static_cast<int>(idx);
+        st.downloader = sub;
+        st.file = parentFile;
+        st.isProbe = false;
+        st.lastTouched = std::chrono::steady_clock::now();
+
+        mActiveByPtrP2p[sub.get()] = std::move(st);
+        mDlByTaskP2p[taskId].push_back(sub);
+    }
+
+    mP2pDownloader->AddTask(sub);
+    logDebug << "[P2P][Launch] idx=" << idx << " range " << pc.start << "-" << pc.end << " peer=" << pc.peerId
+             << " peerSdp" << pc.remoteSdp << "ufrag=" << pc.iceUfrag << "pwd=" << pc.icePwd << std::endl;
     return true;
 }

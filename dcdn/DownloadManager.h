@@ -1,6 +1,7 @@
 #ifndef _DCDN_SDK_DOWNLOAD_MANAGER_H_
 #define _DCDN_SDK_DOWNLOAD_MANAGER_H_
 
+#include <nlohmann/json.hpp>
 #include <sqlite3.h>
 
 #include <atomic>
@@ -21,7 +22,6 @@
 #include "EventLoop.h"
 #include "P2PDownloader.h"
 #include "util/HttpDownloader.h"
-
 namespace dcdn {
 
 // -------------------- P2P 查询返回结构 --------------------
@@ -140,9 +140,33 @@ struct FileDownloadOptions
     DownloadStrategy Strategy = DownloadStrategy::HTTP_ONLY;
 
     FileDownloadOptions()
-        : ChunkSize(10 * 1024 * 1024), RangeStart(0), RangeEnd(SIZE_MAX), Strategy(DownloadStrategy::HTTP_ONLY)
+        : ChunkSize(10 * 1024 * 1024), RangeStart(0), RangeEnd(SIZE_MAX)
     {
     }
+};
+
+// P2P 元数据：某个 peer 拥有的块区间描述（为调度器生成分片计划用）
+struct PeerChunk
+{
+    std::string peerId;
+    std::string url;
+    std::string hash;
+    std::string iceUfrag; // ufrag that download side uses
+    std::string icePwd; // password that download side uses
+    std::string remoteSdp; // peer connection meta info (sdp)(uploader side)
+    size_t start = 0; // 该 peer 拥有的数据区间起点（绝对偏移）
+    size_t end = 0; // 该 peer 拥有的数据区间终点（绝对偏移，含）
+};
+
+// P2P 任务状态：记录该任务在 P2P_ONLY / HYBRID 下的查询与调度信息
+struct P2PTaskState
+{
+    size_t offset = 0;  // 当前的请求偏移
+    void* queryReqId = nullptr; // 通过 MainManager::AsyncApiPost 发起的查询请求句柄（用于取消）
+    bool queryInFlight = false; // 是否正在查询 peers
+    bool queryDone = false; // peers 查询是否已完成（成功或失败）
+    int lastQueryErr = 0; // 最近一次查询错误码（0 表示成功）
+    std::vector<PeerChunk> plan; // 基于查询结果生成的拉取计划（按区间/peer 切分）
 };
 
 // ===================== DownloadManager =====================
@@ -155,6 +179,7 @@ public:
     ~DownloadManager();
 
     // ===== 配置 =====
+    // TODO: remove
     void SetStrategy(DownloadStrategy strategy);
     void SetMaxConcurrentDownloads(size_t max);
     void SetPersistPath(const std::string& path);
@@ -209,6 +234,26 @@ private:
         sqlite3* mDb = nullptr;
         std::mutex mDbMutex;
     };
+
+private:
+    // 异步 P2P 查询
+    // int p2pQueryPeersAsync_(
+    //     uint64_t taskId,
+    //     void** reqIdOut,
+    //     std::function<void(uint64_t, const download_manager::QueryPeersResponse&)> succ,
+    //     std::function<void(uint64_t, int)> fail);
+
+    // 基于 taskId 发起默认 P2P 查询（使用内部回调 onP2PPeerQuerySuccess_/Fail_）
+    // TODO: add param len
+    bool p2pQueryPeersAsync_(uint64_t taskId, size_t offset = 0);
+
+    // 查询成功/失败回调
+    void onP2PPeerQuerySuccess_(uint64_t taskId, nlohmann::json& res, size_t offset);
+    void onP2PPeerQueryFail_(uint64_t taskId, int errCode, size_t offset);
+
+    // 调度 peer 计划
+    void scheduleP2PChunks_(uint64_t taskId, const std::vector<PeerChunk>& plan, size_t offset);
+    bool startOneP2PChunk_(uint64_t taskId, const PeerChunk& pc);
 
 private:
     // ===================== 事件循环/线程 =====================
@@ -306,7 +351,6 @@ private:
 
 private:
     // ===================== 任务/配置/下载器句柄 =====================
-    DownloadStrategy mStrategy = DownloadStrategy::HTTP_ONLY;
     size_t mMaxConcurrent = 4;
     std::string mPersistPath;
 
@@ -320,6 +364,10 @@ private:
     std::unordered_map<uint64_t, FileDownloadOptions> mTaskOptions; // 每个任务的下载选项
     std::unordered_map<uint64_t, BufferReadyCallback> mBufferCallbacks; // 缓存就绪回调
 
+    // P2P 专用的任务状态容器（按任务维度记录查询/计划/调度）
+    // taskID,offset->state
+    std::unordered_map<uint64_t, std::unordered_map<size_t, P2PTaskState>> p2pStates_;
+
     float mHttpBandwidthRatio = 0.5f; // HTTP 带宽占比
     float mP2pBandwidthRatio = 0.5f; // P2P 带宽占比
 };
@@ -327,20 +375,18 @@ private:
 template<typename R>
 R DownloadManager::runSyncOnLoop(std::function<R()> fn)
 {
-    // 使用 FunctionCall 事件把任务丢进事件循环串行执行
-    this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(
-        EventType::FunctionCall, [prom = std::make_shared<std::promise<R>>(), fn = std::move(fn)]() mutable {
-            try {
-                prom->set_value(fn());
-            } catch (...) {
-                try {
-                    prom->set_exception(std::current_exception());
-                } catch (...) {
-                }
-            }
-        }));
-    // 上面需要把 promise 暴露出去，所以再拿一次引用
-    // 为了简单，这里拆两步：先创建 promise，再再投个事件设置值
+    // // 使用 FunctionCall 事件把任务丢进事件循环串行执行
+    // this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(
+    //     EventType::FunctionCall, [prom = std::make_shared<std::promise<R>>(), fn = std::move(fn)]() mutable {
+    //         try {
+    //             prom->set_value(fn());
+    //         } catch (...) {
+    //             try {
+    //                 prom->set_exception(std::current_exception());
+    //             } catch (...) {
+    //             }
+    //         }
+    //     }));
     auto prom = std::make_shared<std::promise<R>>();
     auto fut = prom->get_future();
     this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(

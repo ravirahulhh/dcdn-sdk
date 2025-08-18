@@ -60,3 +60,7 @@ target_link_libraries(dl_manager_test PRIVATE dcdn)
 
 add_executable(http_test  ${CMAKE_SOURCE_DIR}/util/HttpDownloaderTest.cpp)
 target_link_libraries(http_test PRIVATE dcdn)
+
+
+add_executable(p2p_dl_manager_test DownloadeManagerTestP2P.cpp)
+target_link_libraries(p2p_dl_manager_test PRIVATE dcdn)
