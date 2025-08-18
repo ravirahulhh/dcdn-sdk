@@ -37,10 +37,12 @@ int main(int argc, char* argv[])
     blockInfo["end"] = 0; // 块结束位置（可选）
     deployPayload["block_info"] = blockInfo;
 
+    nlohmann::json payload;
+    payload["deploy_file"] = deployPayload;
     // 创建JSON类型事件（与接收端的ArgEvent<json>匹配）
     auto evt = std::make_shared<dcdn::ArgEvent<nlohmann::json>>(
         dcdn::EventType::DeployMsg,
-        std::move(deployPayload) // 传递JSON对象
+        std::move(payload) // 传递JSON对象
     );
 
     deployMgr->PostEvent(evt);

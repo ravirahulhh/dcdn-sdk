@@ -180,6 +180,11 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
         // 获取JSON payload
         const json& payload = jsonEvent->Arg();
         logInfo << "Deploy message payload: " << payload.dump(2);
+        if (!payload.contains("deploy_file") || !payload["deploy_file"].is_object()) {
+            logWarn << "DeployMsg missing required field: deploy_file (must be an object)";
+            return;
+        }
+
         const json& deployFile = payload["deploy_file"];
         // 解析必填字段job_id（下划线形式）
         std::string jobId;
