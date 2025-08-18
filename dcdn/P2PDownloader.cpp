@@ -7,6 +7,7 @@
 
 #include "MainManager.h"
 #include "P2PSingleTask.h"
+#include "WebRtcManager.h"
 #include "common/Logger.h"
 
 NS_BEGIN(dcdn)
@@ -65,7 +66,7 @@ void P2PDownloader::initPeerConnection(const P2PDownloaderTaskOption& request, s
 {
     rtc::Configuration config;
     config.enableIceUdpMux = true;
-    const auto cp = mOption.Certificate;
+    const auto cp = static_cast<WebRtcManager*>(MainManager::Singlet()->GetWebRtcManager().get())->Cert();
     config.certificatePemFile = cp.certPem;
     config.keyPemFile = cp.keyPem;
     config.iceUfrag = request.IceUfrag;

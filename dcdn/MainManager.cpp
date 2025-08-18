@@ -42,7 +42,7 @@ MainManager::MainManager(): BaseManager(this)
     mWebRtc = std::make_shared<WebRtcManager>(this);
     mFileMgr = std::make_shared<FileManager>(this);
     mUploadMgr = std::make_shared<UploadManager>(
-        this, static_cast<FileManager*>(mFileMgr.get()), static_cast<WebRtcManager*>(mFileMgr.get())->Cert());
+        this, static_cast<FileManager*>(mFileMgr.get()), static_cast<WebRtcManager*>(mWebRtc.get())->Cert());
     mDeployMgr = std::make_shared<DeployManager>(this);
     mDownloadMgr = std::make_shared<dcdn::DownloadManager>();
     mDownloadMgr->SetMaxConcurrentDownloads(1);
@@ -226,6 +226,11 @@ std::shared_ptr<dcdn::DownloadManager> MainManager::GetDownloadManager() const
 std::shared_ptr<BaseManager> MainManager::GetDeployManager() const
 {
     return mDeployMgr;
+}
+
+std::shared_ptr<BaseManager> MainManager::GetWebRtcManager() const
+{
+    return mWebRtc;
 }
 
 NS_END
