@@ -15,6 +15,7 @@
 #include "Config.h"
 #include "EventLoop.h"
 #include "dcdn.h"
+#include "dcdn/P2PDownloader.h"
 #include "util/HttpClient.h"
 
 NS_BEGIN(dcdn)
@@ -90,12 +91,14 @@ public:
     }
 
     std::shared_ptr<BaseManager> GetFileManager() const;
-    std::shared_ptr<DownloadManager> GetDownloadManager() const;
+    std::shared_ptr<BaseManager> GetDownloadManager() const;
     std::shared_ptr<BaseManager> GetDeployManager() const;
     std::shared_ptr<BaseManager> GetWebRtcManager() const;
+    std::shared_ptr<util::HttpDownloader> GetHttpDownloader() const;
+    std::shared_ptr<dcdn::download::P2PDownloader> GetP2pDownloader() const;
 
 private:
-    void run();
+    void run() override;
 
 public:
     static int Init(const MainManagerOption& opt);
@@ -127,6 +130,7 @@ private:
 
     util::HttpClient mClient;
     std::shared_ptr<util::HttpDownloader> mHttpDownloader;
+    std::shared_ptr<dcdn::download::P2PDownloader> mP2pDownloader;
     std::shared_ptr<ApiClient> mApiClient;
 
     std::shared_ptr<BaseManager> mWebSkt;

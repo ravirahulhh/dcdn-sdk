@@ -36,6 +36,9 @@ int MainManager::Init(const MainManagerOption& opt)
 MainManager::MainManager(): BaseManager(this)
 {
     mHttpDownloader = std::make_shared<util::HttpDownloader>();
+    download::P2PDownloader::Option p2pOpt;
+    p2pOpt.ConnectionTimeout = "30";
+    mP2pDownloader = std::make_unique<download::P2PDownloader>(p2pOpt);
     mApiClient = std::make_shared<ApiClient>(mHttpDownloader.get());
 
     mWebSkt = std::make_shared<WebSocketManager>(this);
@@ -44,8 +47,7 @@ MainManager::MainManager(): BaseManager(this)
     mUploadMgr = std::make_shared<UploadManager>(
         this, static_cast<FileManager*>(mFileMgr.get()), static_cast<WebRtcManager*>(mWebRtc.get())->Cert());
     mDeployMgr = std::make_shared<DeployManager>(this);
-    mDownloadMgr = std::make_shared<dcdn::DownloadManager>();
-    mDownloadMgr->SetMaxConcurrentDownloads(1);
+    mDownloadMgr = std::make_shared<dcdn::DownloadManager>(mHttpDownloader, mP2pDownloader);
 
     RegisterGlobalHandler(
         EventType::AsyncApiRequest,
@@ -95,6 +97,8 @@ int MainManager::init(const MainManagerOption& opt)
         LOGE << "Failed to initialize DeployManager";
         return -1;
     }
+
+    mDownloadMgr->Init();
     return ErrorCodeOk;
 }
 
@@ -176,6 +180,7 @@ void MainManager::run()
     logInfo << "MainManager running";
     mHttpDownloader->Start();
 
+    mP2pDownloader->Start();
     logDebug << "login to server ...";
     login();
 
@@ -187,7 +192,7 @@ void MainManager::run()
     mFileMgr->Start();
     mUploadMgr->Start();
     mDeployMgr->Start();
-    // mDownloadMgr->Start();
+    mDownloadMgr->Start();
     while (true) {
         waitAllEvents(std::chrono::milliseconds(1000));
     }
@@ -218,7 +223,7 @@ std::shared_ptr<BaseManager> MainManager::GetFileManager() const
     return mFileMgr;
 }
 
-std::shared_ptr<dcdn::DownloadManager> MainManager::GetDownloadManager() const
+std::shared_ptr<BaseManager> MainManager::GetDownloadManager() const
 {
     return mDownloadMgr;
 }
@@ -233,4 +238,13 @@ std::shared_ptr<BaseManager> MainManager::GetWebRtcManager() const
     return mWebRtc;
 }
 
+std::shared_ptr<util::HttpDownloader> MainManager::GetHttpDownloader() const
+{
+    return mHttpDownloader;
+}
+
+std::shared_ptr<dcdn::download::P2PDownloader> MainManager::GetP2pDownloader() const
+{
+    return mP2pDownloader;
+}
 NS_END

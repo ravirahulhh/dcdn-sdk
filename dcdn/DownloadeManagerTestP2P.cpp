@@ -38,11 +38,11 @@ int main()
     const auto cp = static_cast<dcdn::WebRtcManager*>(dcdn::MainManager::Singlet()->GetWebRtcManager().get())->Cert();
     std::cout << "Main" << "keyPemFile" << cp.keyPem << "certPemFile" << cp.certPem << std::endl;
     
-    dcdn::DownloadManager mgr;
+   auto mgr = std::dynamic_pointer_cast<dcdn::DownloadManager>(m->GetDownloadManager());
 
     // 配置为 HTTP_ONLY 策略，最大并发 4
     // mgr.SetStrategy(dcdn::DownloadStrategy::P2P_ONLY);
-    mgr.SetMaxConcurrentDownloads(10);
+    mgr->SetMaxConcurrentDownloads(10);
 
     // 想下载的 HTTP 文件 URL
     // std::string url = "https://testfileorg.netwet.net/500MB-CZIPtestfile.org.zip";
@@ -59,14 +59,14 @@ int main()
     opts.WriteRangeToSeparateFile = true; // 默认即为 true
     opts.Strategy = dcdn::DownloadStrategy::P2P_ONLY;
     // auto taskId = mgr.AddDownloadTask("", "cd4a7faf4ed9cd3486cb08ff1dcfd040", opts);
-    auto taskId = mgr.AddDownloadTask("", "AXKXNz-vQ9V2YRLZTZLen8aO1CgB", opts);
+    auto taskId = mgr->AddDownloadTask("", "AXKXNz-vQ9V2YRLZTZLen8aO1CgB", opts);
 
     // 添加下载任务
     std::cout << "任务已创建，taskId = " << taskId << std::endl;
 
     bool firstPause = true;
     while (true) {
-        auto task = mgr.GetTaskStatus(taskId);
+        auto task = mgr->GetTaskStatus(taskId);
 
         double percent = 0.0;
         if (task.TotalSize > 0) {

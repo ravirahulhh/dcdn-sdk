@@ -182,29 +182,15 @@ bool DownloadManager::PersistenceHelper::loadSubTasks(uint64_t taskId, std::vect
 }
 
 // ============ DownloadManager 构造 / 析构 / 线程 ============
-DownloadManager::DownloadManager(): BaseManager(nullptr)
+DownloadManager::DownloadManager(
+    std::shared_ptr<util::HttpDownloader> http,
+    std::shared_ptr<download::P2PDownloader> p2p)
+    : BaseManager(nullptr), mHttpDownloader(http), mP2pDownloader(p2p)
 {
-    // 初始化 HTTP 引擎
-    mHttpDownloader = std::make_unique<util::HttpDownloader>();
-    int ret = mHttpDownloader->Init(nullptr);
-    if (ret != 1) {
-        std::cerr << "Warning: HttpDownloader Init returned " << ret << std::endl;
-    }
-    mHttpDownloader->Start();
-
-    download::P2PDownloader::Option p2pOpt;
-    mP2pDownloader = std::make_unique<download::P2PDownloader>(p2pOpt);
-    p2pOpt.ConnectionTimeout = "30";
-    mP2pDownloader->Init(&p2pOpt);
-    mP2pDownloader->Start();
-
-    // 注册事件处理器：FunctionCall
     this->registerHandler(EventType::FunctionCall, &DownloadManager::handleFunctionCall);
-
-    // 启动事件线程（后台）
-    Start(true);
 }
 
+void DownloadManager::Init() {}
 
 DownloadManager::~DownloadManager()
 {
@@ -279,7 +265,7 @@ void DownloadManager::run()
                 if (st.isProbe || st.length == 0)
                     continue;
                 // TODO: 实现p2p模式的watchdog
-                if (st.transport == ActiveSubTask::Transport::P2P){
+                if (st.transport == ActiveSubTask::Transport::P2P) {
                     logInfo << "[P2P]watchdog skip in p2p mode (un-implemented)" << std::endl;
                     continue;
                 }
@@ -998,7 +984,8 @@ void DownloadManager::processP2pEvent(std::shared_ptr<util::DownloaderTask> ev)
                 logDebug << "[P2P][Re-queue] pending: " << r.start << "-" << r.end << ", idxNext: " << idxNext;
                 auto succ = p2pQueryPeersAsync_(active.parentTaskId, r.start);
                 if (!succ) {
-                    logWarn << "[P2P][Re-queue] p2pQueryPeersAsync failed" << ", taskId: " << active.parentTaskId << ", offset: " << r.start;
+                    logWarn << "[P2P][Re-queue] p2pQueryPeersAsync failed" << ", taskId: " << active.parentTaskId
+                            << ", offset: " << r.start;
                 }
             }
         }
@@ -1157,11 +1144,27 @@ uint64_t DownloadManager::AddDownloadTask(
                 prom->set_value(task.Id);
                 return;
             } else if (strategy == DownloadStrategy::P2P_ONLY) {
-                {
-                    std::lock_guard<std::mutex> lk(mTasksMutex);
-                    auto itT = mTasks.find(task.Id);
-                    if (itT != mTasks.end())
-                        itT->second.Status = TaskStatus::Running;
+                const bool wantRange = options.HasRange;
+                const size_t userStart = options.RangeStart;
+                const bool endKnown = options.HasRange && options.RangeEnd != SIZE_MAX;
+
+                if (wantRange && endKnown) {
+                    const size_t length = (options.RangeEnd >= userStart) ? (options.RangeEnd - userStart + 1) : 0;
+                    if (length == 0) {
+                        std::lock_guard<std::mutex> lk(mTasksMutex);
+                        auto itT = mTasks.find(task.Id);
+                        if (itT != mTasks.end())
+                            itT->second.Status = TaskStatus::Failed;
+                        prom->set_value(task.Id);
+                        return;
+                    }
+                    {
+                        std::lock_guard<std::mutex> lk(mTasksMutex);
+                        mTasks[task.Id].TotalSize = length;
+                        auto itT = mTasks.find(task.Id);
+                        if (itT != mTasks.end())
+                            itT->second.Status = TaskStatus::Running;
+                    }
                 }
                 startP2pDownload(task.Id);
                 prom->set_value(task.Id);
@@ -1861,7 +1864,6 @@ void DownloadManager::onP2PPeerQuerySuccess_(uint64_t taskId, nlohmann::json& re
 
 void DownloadManager::scheduleP2PChunks_(uint64_t taskId, const std::vector<PeerChunk>& plan, size_t offset)
 {
-
     std::vector<PeerChunk> planO = plan;
 #ifdef DEBUG_LOCAL_P2P
     // TODO: PeerChunk 手动注入,非DEBUg请删除
@@ -1887,7 +1889,6 @@ void DownloadManager::scheduleP2PChunks_(uint64_t taskId, const std::vector<Peer
         logError << "scheduleP2PChunks_ taskId=" << taskId << " plan is empty";
         return;
     }
-
 
     auto longestPlan_ = planO[0];
     for (auto& pc : planO) {

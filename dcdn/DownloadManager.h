@@ -175,9 +175,10 @@ struct P2PTaskState
 class DownloadManager: public BaseManager, public EventLoop<DownloadManager>
 {
 public:
-    explicit DownloadManager();
+    explicit DownloadManager(std::shared_ptr<util::HttpDownloader> http, std::shared_ptr<download::P2PDownloader> p2p);
     ~DownloadManager();
 
+    void Init();
     // ===== 配置 =====
     // TODO: remove
     void SetStrategy(DownloadStrategy strategy);
@@ -354,8 +355,8 @@ private:
     size_t mMaxConcurrent = 4;
     std::string mPersistPath;
 
-    std::unique_ptr<download::P2PDownloader> mP2pDownloader;
-    std::unique_ptr<util::HttpDownloader> mHttpDownloader;
+    std::shared_ptr<download::P2PDownloader> mP2pDownloader;
+    std::shared_ptr<util::HttpDownloader> mHttpDownloader;
     std::unique_ptr<PersistenceHelper> mDbHelper;
 
     mutable std::mutex mTasksMutex;

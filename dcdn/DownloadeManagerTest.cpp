@@ -7,6 +7,8 @@
 #include <thread>
 
 #include "DownloadManager.h"
+#include "dcdn/MainManager.h"
+#include "dcdn/WebRtcManager.h"
 
 int main()
 {
@@ -14,11 +16,30 @@ int main()
     plog::Severity lvl = plog::debug;
     plog::init<DCDN_LOGGER_ID>(lvl, &consoleAppender);
 
-    dcdn::DownloadManager mgr;
+    dcdn::MainManagerOption mOpts;
+    mOpts.WorkDir = "./data";
+    mOpts.ApiKey = "123456";
+    mOpts.DeviceId = "device123";
+    mOpts.DeviceInfo = DcdnDeviceInfo{
+        const_cast<char*>("device123"), const_cast<char*>("Linux"), const_cast<char*>("Linux"), 8, 16384};
+    mOpts.DiskInfo = DcdnDiskInfo{1000000000, 800000000, 200000000};
+    int ret = dcdn::MainManager::Init(mOpts);
+    if (ret != 1) {
+        logError << "Init MainManager fail";
+        return 1;
+    }
+
+    dcdn::MainManager* m = dcdn::MainManager::Singlet();
+    logInfo << "Start MainManager";
+    m->Start();
+
+    const auto cp = static_cast<dcdn::WebRtcManager*>(dcdn::MainManager::Singlet()->GetWebRtcManager().get())->Cert();
+    std::cout << "Main" << "keyPemFile" << cp.keyPem << "certPemFile" << cp.certPem << std::endl;
+    auto mgr = std::dynamic_pointer_cast<dcdn::DownloadManager>(m->GetDownloadManager());
 
     // 配置为 HTTP_ONLY 策略，最大并发 4
-    mgr.SetStrategy(dcdn::DownloadStrategy::HTTP_ONLY);
-    mgr.SetMaxConcurrentDownloads(8);
+    mgr->SetStrategy(dcdn::DownloadStrategy::HTTP_ONLY);
+    mgr->SetMaxConcurrentDownloads(8);
 
     // 想下载的 HTTP 文件 URL
     // std::string url = "https://testfileorg.netwet.net/500MB-CZIPtestfile.org.zip";
@@ -49,7 +70,7 @@ int main()
     // opt.RangeEnd   = 73741823ULL;
     opt.ChunkSize = 10 * 1024 * 1024;
     opt.WriteRangeToSeparateFile = true; // 默认即为 true
-    auto taskId = mgr.AddDownloadTask(url, "", opt);
+    auto taskId = mgr->AddDownloadTask(url, "", opt);
 
     // 下载区间 [start, EOF]（end 未知）：
     // FileDownloadOptions opt;
@@ -65,7 +86,7 @@ int main()
     // 每秒打印一次任务状态，直到完成/失败
     bool firstPause = true;
     while (true) {
-        auto task = mgr.GetTaskStatus(taskId);
+        auto task = mgr->GetTaskStatus(taskId);
 
         double percent = 0.0;
         if (task.TotalSize > 0) {

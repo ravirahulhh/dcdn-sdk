@@ -68,7 +68,7 @@ cd build
 cmake ..
 make -j8
 
-# cmake -DDEBUG_LOCAL_P2P=ON  ..
+# cmake -DDEBUG_LOCAL_P2P=ON  .. (downloader local p2p test only)
 ```
 
 # git hook 配置
