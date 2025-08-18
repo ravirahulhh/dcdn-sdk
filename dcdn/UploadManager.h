@@ -32,7 +32,7 @@ public:
         size_t tokensToConsume = std::min(tokens, availableTokens);
 
         if (tokensToConsume > 0) {
-            mTokens -= tokensToConsume;
+            mTokens -= static_cast<double>(tokensToConsume);
         }
 
         return tokensToConsume;
@@ -61,7 +61,7 @@ private:
 
 private:
     std::mutex mMutex;
-    double mTokens = 0;
+    double mTokens{0.0};
     double mLastTime;
 };
 

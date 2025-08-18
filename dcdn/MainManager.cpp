@@ -228,4 +228,9 @@ std::shared_ptr<BaseManager> MainManager::GetDeployManager() const
     return mDeployMgr;
 }
 
+std::shared_ptr<BaseManager> MainManager::GetWebRtcManager() const
+{
+    return mWebRtc;
+}
+
 NS_END

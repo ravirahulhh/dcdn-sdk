@@ -6,6 +6,8 @@
 
 NS_BEGIN(dcdn)
 
+static const std::string webRtcConnProtocol = "webrtc";
+
 WebRtcManager::WebRtcManager(MainManager* man): BaseManager(man)
 {
     mCert = generate_ecdsa_certificate();
@@ -102,7 +104,11 @@ void WebRtcManager::report()
 {
     try {
         json msg;
-        msg["description"] = mSdp;
+        msg["infos"] = json::array();
+        json info;
+        info["protocol"] = webRtcConnProtocol;
+        info["connMeta"] = mSdp;
+        msg["infos"].push_back(info);
         mMan->ApiPost(mClient, "/api/v1/report_net_info", msg, nullptr);
     } catch (std::exception& excp) {
         logWarn << "webrtc report exception: " << excp.what();

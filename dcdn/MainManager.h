@@ -92,6 +92,7 @@ public:
     std::shared_ptr<BaseManager> GetFileManager() const;
     std::shared_ptr<DownloadManager> GetDownloadManager() const;
     std::shared_ptr<BaseManager> GetDeployManager() const;
+    std::shared_ptr<BaseManager> GetWebRtcManager() const;
 
 private:
     void run();

@@ -40,7 +40,6 @@ public:
     public:
         std::string ConnectionTimeout;
         std::string MaxPeerConnectionIdleTime;
-        CertificatePair Certificate;
     };
 
     explicit P2PDownloader(const Option& option);

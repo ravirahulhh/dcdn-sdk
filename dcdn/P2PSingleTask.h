@@ -47,6 +47,11 @@ public:
     bool Resume();
     bool Cancel();
 
+    const P2PDownloaderTaskOption* Option() const
+    {
+        return &mTaskOpt;
+    }
+
     void Init(TaskParam param, std::shared_ptr<rtc::DataChannel> dc);
     void HandleIncomingData(std::variant<std::vector<std::byte>, std::string>&& data);
 
