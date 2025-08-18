@@ -113,6 +113,17 @@ int MainManager::ApiPost(util::HttpClient& cli, const char* uri, json& arg, util
     return ret;
 }
 
+int MainManager::ApiPostWithToken(util::HttpClient& cli, const char* uri, json& arg, util::HttpResponse* resp)
+{
+    std::string url = mCfg.ApiRootUrl();
+    url += uri;
+    util::HttpRequest req(url.c_str(), arg.dump(), "application/json");
+    std::string token = "Bearer " + mCfg.Token();
+    req.SetHeader("Authorization", token.c_str());
+    int ret = cli.Do(req, resp);
+    return ret;
+}
+
 int MainManager::ApiPost(util::HttpClient& cli, const char* uri, json& arg, json& result)
 {
     util::HttpResponse resp;

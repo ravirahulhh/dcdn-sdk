@@ -112,7 +112,7 @@ void WebRtcManager::report()
         info["protocol"] = webRtcConnProtocol;
         info["connMeta"] = mSdp;
         msg["infos"].push_back(info);
-        mMan->ApiPost(mClient, "/api/v1/report_net_info", msg, nullptr);
+        mMan->ApiPostWithToken(mClient, "/api/v1/report_net_info", msg, nullptr);
     } catch (std::exception& excp) {
         logWarn << "webrtc report exception: " << excp.what();
     } catch (...) {

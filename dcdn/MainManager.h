@@ -45,6 +45,7 @@ public:
     }
 
     int ApiPost(util::HttpClient& cli, const char* uri, json& arg, util::HttpResponse* resp);
+    int ApiPostWithToken(util::HttpClient& cli, const char* uri, json& arg, util::HttpResponse* resp);
     int ApiPost(util::HttpClient& cli, const char* uri, json& arg, json& result);
 
     /**************************
