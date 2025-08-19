@@ -6,7 +6,7 @@
 
 NS_BEGIN(dcdn)
 
-static const std::string webRtcConnProtocol = "webrtc";
+static const std::string webRtcConnProtocol = "ProtocolWebRTC";
 
 WebRtcManager::WebRtcManager(MainManager* man): BaseManager(man)
 {
