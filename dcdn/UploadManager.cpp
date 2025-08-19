@@ -5,7 +5,7 @@
 NS_BEGIN(dcdn)
 
 UploadManager::UploadManager(MainManager* man, FileManager* mf, CertificatePair cert)
-    : BaseManager(man), mFileMgr(mf), mCert(cert)
+    : BaseManager(man), mFileMgr(mf), mCert(cert), mTokenBucket(std::make_shared<TokenBucket>())
 {
     registerHandler(EventType::UploadMsg, &UploadManager::handleUploadMsgEvent);
 }
@@ -14,26 +14,54 @@ UploadManager::~UploadManager() {}
 
 void UploadManager::handleUploadMsgEvent(std::shared_ptr<Event> evt)
 {
-    auto argEvent = static_cast<ArgEvent<UploadFileArg>*>(evt.get());
-    if (!argEvent) {
-        logError << "Invalid UploadMsg event type";
-        return;
+    try {
+        auto argEvent = static_cast<ArgEvent<json>*>(evt.get());
+        if (!argEvent) {
+            logError << "Invalid UploadMsg event type";
+            return;
+        }
+
+        // 从 json 中解析 arg
+        const json& j = argEvent->Arg();
+        UploadFileArg arg;
+        arg.FileHash = j.value("hash", "");
+        arg.BlockStart = 0;
+        arg.BlockEnd = 0;
+        if (j.contains("conn_meta") && j["conn_meta"].contains("conn_meta")) {
+            arg.RemoteSdp = j["conn_meta"]["conn_meta"].get<std::string>();
+        }
+        if (j.contains("ice_ufrag")) {
+            arg.IceUfrag = j["ice_ufrag"].get<std::string>();
+        }
+        if (j.contains("ice_pwd")) {
+            arg.IcePwd = j["ice_pwd"].get<std::string>();
+        }
+        if (j.contains("peer_id")) {
+            arg.PeerID = j["peer_id"].get<std::string>();
+        }
+        if (j.contains("end")) {
+            arg.BlockEnd = j["end"].get<size_t>();
+        }
+        // BlockStart 默认 0
+        logDebug << "Received upload request for: " << arg.FileHash << " [" << arg.BlockStart << "-" << arg.BlockEnd
+                 << "]";
+
+        auto task = std::make_shared<UploadFileTask>(
+            arg.PeerID, arg.FileHash, arg.BlockStart, arg.BlockEnd, arg.IceUfrag, arg.IcePwd, arg.RemoteSdp);
+
+        task->SetState(UploadFileTask::Pending);
+
+        {
+            std::lock_guard<std::mutex> lock(mLabelTaskMapMutex);
+            mLabelTaskMap[task->Label()] = task;
+        }
+
+        mCv.notify_one();
+    } catch (const std::exception& e) {
+        logError << "Exception in handleUploadMsgEvent: " << e.what();
+    } catch (...) {
+        logError << "Unknown exception in handleUploadMsgEvent";
     }
-
-    const UploadFileArg& arg = argEvent->Arg();
-    logDebug << "Received upload request for: " << arg.FileHash << " [" << arg.BlockStart << "-" << arg.BlockEnd << "]";
-
-    auto task = std::make_shared<UploadFileTask>(
-        arg.PeerID, arg.FileHash, arg.BlockStart, arg.BlockEnd, arg.IceUfrag, arg.IcePwd, arg.RemoteSdp);
-
-    task->SetState(UploadFileTask::Pending);
-
-    {
-        std::lock_guard<std::mutex> lock(mLabelTaskMapMutex);
-        mLabelTaskMap[task->Label()] = task;
-    }
-
-    mCv.notify_one();
 }
 
 std::vector<UploadFileTaskPtr> UploadManager::getTasksToProcess()

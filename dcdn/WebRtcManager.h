@@ -14,11 +14,12 @@
 
 #include "BaseManager.h"
 #include "Cert.h"
+#include "EventLoop.h"
 #include "util/HttpClient.h"
 
 NS_BEGIN(dcdn)
 
-class WebRtcManager: public BaseManager
+class WebRtcManager: public BaseManager, public EventLoop<WebRtcManager>
 {
 public:
     using json = nlohmann::json;

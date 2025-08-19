@@ -17,6 +17,8 @@
 
 NS_BEGIN(dcdn)
 
+using json = nlohmann::json;
+
 class TokenBucket
 {
 public:
@@ -46,8 +48,8 @@ private:
         mLastTime = currentTime;
 
         mTokens += elapsed * rate;
-        if (mTokens > 2 * rate) {
-            mTokens = 2 * rate;
+        if (mTokens > rate) {
+            mTokens = rate;
         }
     }
 
