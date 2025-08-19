@@ -344,7 +344,7 @@ std::optional<FileResourceInfo> FileManager::GetUploadFileResource(const std::st
     if (!db) {
         return std::nullopt;
     }
-
+    logDebug << "GetUploadFileResource for fileHash: " << fileHash << ", reqStart: " << reqStart;
     try {
         std::lock_guard<std::mutex> lockFOpt(mFileDBOptMutex);
         auto files = db->stor.select(
