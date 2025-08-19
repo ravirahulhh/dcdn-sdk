@@ -9,6 +9,11 @@
 #include <cstring>
 #include <vector>
 
+#include "common/Common.h"
+
+NS_BEGIN(dcdn)
+NS_BEGIN(util)
+
 class Secp256k1PubKey
 {
 public:
@@ -220,5 +225,8 @@ private:
 private:
     EC_KEY* mKey;
 };
+
+NS_END
+NS_END
 
 #endif
