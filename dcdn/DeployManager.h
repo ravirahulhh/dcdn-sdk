@@ -117,8 +117,7 @@ private:
 
     int calculateFileHash(const std::string& filePath, std::string& hashResult)
     {
-        // 直接调用FileHash::calculate，保持相同的返回值和参数结构
-        int result = FileHash::calculate(filePath, hashResult);
+        int result = util::FileHash::CalculateFileHash(filePath, hashResult);
 
         // 可以在这里添加额外的日志或处理逻辑
         if (result != ErrorCodeOk) {
@@ -130,7 +129,7 @@ private:
 
     int getFileSize(const std::string& filePath, uint64_t& fileSize)
     {
-        int result = FileHash::getFileSize(filePath, fileSize);
+        int result = util::FileHash::GetFileSize(filePath, fileSize);
 
         // 添加额外的日志记录
         if (result != ErrorCodeOk) {
