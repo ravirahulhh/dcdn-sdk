@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <sstream>
+#include "Hex.h"
 
 template<class Iter>
 std::string bytes2hex(Iter begin, Iter end)
@@ -17,6 +18,8 @@ std::string bytes2hex(Iter begin, Iter end)
 
 int main(int argc, char* argv[])
 {
+    using dcdn::util::Bytes2Hex;
+    using dcdn::util::Secp256k1PubKey;
     Secp256k1PubKey pkey;
     unsigned char skey[32];
     memset(skey, 0, 32);
@@ -26,7 +29,7 @@ int main(int argc, char* argv[])
     std::vector<unsigned char> data;
     ret = pkey.Serialize(data, true);
     std::cout << "Serialize ret:" << ret << std::endl;
-    std::cout << bytes2hex(data.begin(), data.end()) << std::endl;
+    std::cout << Bytes2Hex(data.data(), data.size()) << std::endl;
     ret = pkey.Parse(data);
     std::cout << "Parse ret:" << ret << std::endl;
     std::cout << "Generate" << std::endl;
@@ -35,13 +38,13 @@ int main(int argc, char* argv[])
         std::cout << "Generate fail ret:" << ret << std::endl;
         return 1;
     }
-    std::cout << "skey: 0x" << bytes2hex(skey, skey + 32) << std::endl;
+    std::cout << "skey: 0x" << Bytes2Hex(skey, 32) << std::endl;
     ret = pkey.Serialize(data, true);
     if (ret != 1) {
         std::cout << "Serialize ret:" << ret << std::endl;
         return 1;
     }
-    std::cout << bytes2hex(data.begin(), data.end()) << std::endl;
+    std::cout << Bytes2Hex(data.data(), data.size()) << std::endl;
     std::cout << "Sign" << std::endl;
     std::vector<unsigned char> sig;
     ret = Secp256k1PubKey::Sign(sig, skey, skey);
@@ -49,7 +52,7 @@ int main(int argc, char* argv[])
         std::cout << "Sign fail ret:" << ret << std::endl;
         return 1;
     }
-    std::cout << bytes2hex(sig.begin(), sig.end()) << std::endl;
+    std::cout << Bytes2Hex(sig.data(), sig.size()) << std::endl;
     std::cout << "Verify" << std::endl;
     ret = pkey.Verify(sig, skey);
     if (ret != 1) {
