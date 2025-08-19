@@ -32,16 +32,14 @@ int main()
     dcdn::MainManager* m = dcdn::MainManager::Singlet();
     logInfo << "Start MainManager";
     m->Start();
+    std::this_thread::sleep_for(std::chrono::seconds(5)); // wait login
 
     const auto cp = static_cast<dcdn::WebRtcManager*>(dcdn::MainManager::Singlet()->GetWebRtcManager().get())->Cert();
     std::cout << "Main" << "keyPemFile" << cp.keyPem << "certPemFile" << cp.certPem << std::endl;
     auto mgr = std::dynamic_pointer_cast<dcdn::DownloadManager>(m->GetDownloadManager());
 
-    // 配置为 HTTP_ONLY 策略，最大并发 4
-    mgr->SetStrategy(dcdn::DownloadStrategy::HTTP_ONLY);
     mgr->SetMaxConcurrentDownloads(8);
 
-    // 想下载的 HTTP 文件 URL
     // std::string url = "https://testfileorg.netwet.net/500MB-CZIPtestfile.org.zip";
     // std::string url = "https://hil-speed.hetzner.com/100MB.bin";
     // std::string url = "http://localhost:8080/100MB.bin";
