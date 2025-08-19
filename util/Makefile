@@ -19,6 +19,8 @@ testTargets = \
 			  HttpClientTest \
 			  HttpDownloaderTest \
 			  Secp256k1PubKeyTest \
+			  Blake2sHashTest \
+			  Base64Test \
 
 test: $(testTargets)
 
@@ -29,6 +31,12 @@ HttpDownloaderTest: HttpDownloaderTest.o
 	$(CXX) -o $@ $^ $(LIBFLAGS)
 
 Secp256k1PubKeyTest: Secp256k1PubKeyTest.o
+	$(CXX) -o $@ $^ $(LIBFLAGS)
+
+Blake2sHashTest: Blake2sHashTest.o
+	$(CXX) -o $@ $^ $(LIBFLAGS)
+
+Base64Test: Base64Test.o
 	$(CXX) -o $@ $^ $(LIBFLAGS)
 
 %.o : %.cpp
