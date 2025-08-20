@@ -178,7 +178,7 @@ void P2PDownloader::addSingleTask(
     const P2PDownloaderTaskOption& request,
     std::shared_ptr<P2PSingleTask> task)
 {
-    std::string label = request.ContentHash + "-" + std::to_string(request.Start) + "-" + std::to_string(request.End);
+    std::string label = request.ContentHash + ":" + std::to_string(request.Start) + ":" + std::to_string(request.End);
     logInfo << "create data channel label: " << label;
     auto dc = pc->createDataChannel(label);
 

@@ -21,7 +21,6 @@ using nlohmann::json;
 // TODO: read from config ?
 static constexpr const char* kApiPeersByHashOrUrl = "/api/v1/query_peers_by_file";
 
-// ============ 工具：生成 64 位 TaskId ============
 namespace {
 static uint64_t genTaskId()
 {
@@ -31,7 +30,6 @@ static uint64_t genTaskId()
 }
 } // namespace
 
-// ============ 本文件内部使用的类型 ============
 struct Range
 {
     size_t start;
@@ -89,9 +87,6 @@ DownloadTask DownloadTask::Deserialize(const std::string& data)
 }
 
 // ====== P2P 查询：query_peers_by_file 的请求/响应解析 ======
-
-// （可选）构造 query_peers_by_file 请求体
-// 说明：接口所有数值字段目前都是字符串（示例即是字符串），这里遵循服务端约定。
 static inline json BuildQueryPeersRequest(
     const std::string& ip,
     const std::string& url,
@@ -107,46 +102,11 @@ static inline json BuildQueryPeersRequest(
     j["start"] = start; // string (起始偏移，字符串表示)
     j["scenario"] = scenario; // string
     j["showBlocksHash"] = showBlocksHash; // bool
+    logDebug << "BuildQueryPeersRequest: " << j.dump();
     return j;
 }
 
-// 解析 query_peers_by_file 的 JSON 对象（internal use）
-static inline download_manager::QueryPeersResponse ParseQueryPeersJsonObject(const json& j)
-{
-    download_manager::QueryPeersResponse resp;
-    //
-    // 顶层基础字段
-    // resp.fileHash  = j.value("fileHash",  "");
-    // resp.size      = j.value("size",      "");
-    // resp.nextStart = j.value("nextStart", "");
-
-    // // peers 数组
-    // if (j.contains("peers") && j["peers"].is_array()) {
-    //     for (const auto& p : j["peers"]) {
-    //         PeerInfo peer;
-    //         peer.peerId   = p.value("peerId",   "");
-    //         peer.start    = p.value("start",    "");
-    //         peer.end      = p.value("end",      "");
-    //         peer.connMeta = p.value("connMeta", "");
-    //         resp.peers.push_back(std::move(peer));
-    //     }
-    // }
-
-    // // blocks 数组
-    // if (j.contains("blocks") && j["blocks"].is_array()) {
-    //     for (const auto& b : j["blocks"]) {
-    //         dcdn::BlockInfo block;
-    //         block.start = b.value("start", "");
-    //         block.end   = b.value("end",   "");
-    //         block.hash  = b.value("hash",  "");
-    //         resp.blocks.push_back(std::move(block));
-    //     }
-    // }
-
-    return resp;
-}
-
-// ============ PersistenceHelper（占位） ============
+// ============ PersistenceHelper ============
 DownloadManager::PersistenceHelper::PersistenceHelper(const std::string& dbPath)
 {
     mDb = nullptr;
@@ -199,7 +159,7 @@ DownloadManager::~DownloadManager()
     }
 }
 
-// BaseManager 线程主函数：统一处理 FunctionCall 事件 + 下载器事件 + 看门狗
+// function call + downloader data events + watchdog
 void DownloadManager::run()
 {
     using namespace std::chrono_literals;
@@ -209,14 +169,15 @@ void DownloadManager::run()
     const auto staleTimeout = 8s; // 分片 N 秒无任何进展视为卡死
 
     while (true) {
-        // 等待：若无 FunctionCall 事件，可被下载器通知（mCv）唤醒
         {
             std::unique_lock<std::mutex> lk(mMtx);
             mCv.wait_for(lk, reapInterval, [&] { return !mDlEventsHttp.empty() || !mEvents.empty(); });
         }
 
-        // 处理 1 个 FunctionCall 事件(若有)
-        this->waitEvent(10ms);
+        // process a control cmd
+        if (!mEvents.empty()) {
+            this->waitEvent(0ms);
+        }
 
         // pop downloader read events
         std::vector<std::shared_ptr<util::DownloaderTask>> httpBatch;
@@ -426,7 +387,6 @@ void DownloadManager::handleFunctionCall(std::shared_ptr<Event> evt)
         fn();
 }
 
-// ============ 统一 downloader 通知入口（HttpDownloader 使用） ============
 void DownloadManager::coreNotifyCallbackHttp(std::shared_ptr<dcdn::util::DownloaderTask> task, void* receiver)
 {
     if (!task || !receiver)
@@ -443,7 +403,6 @@ void DownloadManager::coreNotifyCallbackHttp(std::shared_ptr<dcdn::util::Downloa
 
 void DownloadManager::coreNotifyCallbackP2p(std::shared_ptr<dcdn::util::DownloaderTask> task, void* receiver)
 {
-    // logInfo << "coreNotifyCallbackP2p, task=" << task.get() << ", receiver=" << receiver;
     if (!task || !receiver)
         return;
     auto* self = static_cast<DownloadManager*>(receiver);
@@ -454,12 +413,6 @@ void DownloadManager::coreNotifyCallbackP2p(std::shared_ptr<dcdn::util::Download
         self->mDlEventsP2p[task.get()] = std::move(task);
     }
     self->mCv.notify_all();
-}
-
-// 包装（预留）
-void DownloadManager::onDownloaderNotify(std::shared_ptr<dcdn::util::DownloaderTask> task)
-{
-    (void)task;
 }
 
 // 实际处理一个 downloader 事件（读取 -> 写入 -> 进度/续排/完成判定）
@@ -786,10 +739,8 @@ void DownloadManager::processHttpEvent(std::shared_ptr<dcdn::util::DownloaderTas
 // TODO: some duplicate with processHttpEvent
 void DownloadManager::processP2pEvent(std::shared_ptr<util::DownloaderTask> ev)
 {
-    logInfo << "enter processP2pEvent";
     auto* raw = ev.get();
 
-    // 任务取消后的迟到通知直接丢弃
     {
         std::lock_guard<std::mutex> g(mMtx);
         if (mCancelledRawP2p.count(raw))
@@ -807,7 +758,6 @@ void DownloadManager::processP2pEvent(std::shared_ptr<util::DownloaderTask> ev)
         active = it->second;
     }
 
-    // 读取并写入
     auto buffer = ev->Read();
     size_t readSum = 0;
 
@@ -846,7 +796,7 @@ void DownloadManager::processP2pEvent(std::shared_ptr<util::DownloaderTask> ev)
             size_t dstOff;
 
             if (opts.HasRange && opts.WriteRangeToSeparateFile) {
-                // 写相对文件：把“绝对位置”映射到用户 Range 的相对
+                // 写相对文件：把"绝对位置"映射到用户 Range 的相对
                 dstOff = (wrBeg >= opts.RangeStart) ? (wrBeg - opts.RangeStart) : 0;
             } else {
                 // 共享大文件：按绝对偏移写
@@ -913,7 +863,7 @@ void DownloadManager::processP2pEvent(std::shared_ptr<util::DownloaderTask> ev)
     bool endByLength = (!active.isProbe && active.length > 0 && got >= active.length);
     bool shortRead = (!active.isProbe && active.length > 0 && isEnd && got < active.length);
 
-    if ((isEnd || endByLength) && active.parentTaskId != 0) {
+    if ((isEnd || endByLength) && active.parentTaskId != 0 && ev->Status() == util::DownloaderTask::Completed) {
         // TODO: refactor duplication code in if else
         if (shortRead) {
             const size_t missStart = active.offset + got;
@@ -982,7 +932,7 @@ void DownloadManager::processP2pEvent(std::shared_ptr<util::DownloaderTask> ev)
             }
             if (hasNext) {
                 logDebug << "[P2P][Re-queue] pending: " << r.start << "-" << r.end << ", idxNext: " << idxNext;
-                auto succ = p2pQueryPeersAsync_(active.parentTaskId, r.start);
+                auto succ = p2pQueryPeersAsync_(active.parentTaskId, r.start, r.end);
                 if (!succ) {
                     logWarn << "[P2P][Re-queue] p2pQueryPeersAsync failed" << ", taskId: " << active.parentTaskId
                             << ", offset: " << r.start;
@@ -1017,6 +967,7 @@ void DownloadManager::processP2pEvent(std::shared_ptr<util::DownloaderTask> ev)
 }
 
 // ============ 配置接口 ============
+
 void DownloadManager::SetStrategy(DownloadStrategy strategy)
 {
     // mStrategy = strategy;
@@ -1437,7 +1388,9 @@ void DownloadManager::startP2pDownload(const uint64_t& taskId)
 
     logDebug << "P2P peers 查询开始 taskId=" << taskId << "offset =" << (opt.HasRange ? opt.RangeStart : 0)
              << std::endl;
-    if (!p2pQueryPeersAsync_(taskId, opt.HasRange ? opt.RangeStart : 0)) {
+    auto start = (opt.HasRange ? opt.RangeStart : 0);
+    auto end = (opt.HasRange ? opt.RangeEnd : 0);
+    if (!p2pQueryPeersAsync_(taskId, start, end)) {
         std::lock_guard<std::mutex> lk(mTasksMutex);
         auto it = mTasks.find(taskId);
         if (it != mTasks.end()) {
@@ -1736,10 +1689,9 @@ bool DownloadManager::maybeFinalizeTask(uint64_t taskId)
     return true;
 }
 
-// TODO: add param len
-bool DownloadManager::p2pQueryPeersAsync_(uint64_t taskId, size_t offset)
+bool DownloadManager::p2pQueryPeersAsync_(uint64_t taskId, size_t start, size_t end)
 {
-    logDebug << "enter p2pQueryPeersAsync_ taskId=" << taskId << " offset=" << offset << std::endl;
+    logDebug << "enter p2pQueryPeersAsync_ taskId=" << taskId << " offset=" << start << std::endl;
     // TODO: need some refactor, the outer caller has the same code snippet
     DownloadTask t;
     FileDownloadOptions opt;
@@ -1755,11 +1707,11 @@ bool DownloadManager::p2pQueryPeersAsync_(uint64_t taskId, size_t offset)
     }
 
     // nlohmann::json arg;
-    auto arg = BuildQueryPeersRequest("192.168.1.1", t.Url, t.ContentHash, std::to_string(offset), "", true);
+    auto arg = BuildQueryPeersRequest("192.168.1.1", t.Url, t.ContentHash, std::to_string(start), "", true);
 
     void* reqId = nullptr;
-    auto succ = [this, taskId, offset](nlohmann::json& res) { this->onP2PPeerQuerySuccess_(taskId, res, offset); };
-    auto fail = [this, taskId, offset](int code) { this->onP2PPeerQueryFail_(taskId, code, offset); };
+    auto succ = [this, taskId, start, end](nlohmann::json& res) { this->onP2PPeerQuerySuccess_(taskId, res, start, end); };
+    auto fail = [this, taskId, start](int code) { this->onP2PPeerQueryFail_(taskId, code, start); };
 
     auto mm = MainManager::Singlet();
     if (mm == nullptr) {
@@ -1776,23 +1728,23 @@ bool DownloadManager::p2pQueryPeersAsync_(uint64_t taskId, size_t offset)
 
     {
         std::lock_guard<std::mutex> lk(mTasksMutex);
-        p2pStates_[taskId][offset].queryReqId = reqId;
-        p2pStates_[taskId][offset].queryInFlight = true;
-        p2pStates_[taskId][offset].offset = offset;
-        p2pStates_[taskId][offset].lastQueryErr = 0;
+        p2pStates_[taskId][start].queryReqId = reqId;
+        p2pStates_[taskId][start].queryInFlight = true;
+        p2pStates_[taskId][start].offset = start;
+        p2pStates_[taskId][start].lastQueryErr = 0;
     }
     return true;
 }
 
-void DownloadManager::onP2PPeerQueryFail_(uint64_t taskId, int errCode, size_t offset)
+void DownloadManager::onP2PPeerQueryFail_(uint64_t taskId, int errCode, size_t start)
 {
     logError << "[P2P] peers 查询失败 err=" << errCode << " taskId=" << taskId << std::endl;
 
     {
         std::lock_guard<std::mutex> lk(mTasksMutex);
-        p2pStates_[taskId][offset].queryInFlight = false;
-        p2pStates_[taskId][offset].queryDone = true;
-        p2pStates_[taskId][offset].lastQueryErr = errCode;
+        p2pStates_[taskId][start].queryInFlight = false;
+        p2pStates_[taskId][start].queryDone = true;
+        p2pStates_[taskId][start].lastQueryErr = errCode;
 
         auto it = mTasks.find(taskId);
         if (it != mTasks.end()) {
@@ -1802,14 +1754,10 @@ void DownloadManager::onP2PPeerQueryFail_(uint64_t taskId, int errCode, size_t o
     }
 }
 
-// TODO: add param len
-void DownloadManager::onP2PPeerQuerySuccess_(uint64_t taskId, nlohmann::json& res, size_t offset)
+void DownloadManager::onP2PPeerQuerySuccess_(uint64_t taskId, nlohmann::json& res, size_t start, size_t end)
 {
-    std::cout << res.dump();
-    logDebug << "query peers success taskId=" << taskId << " offset=" << offset << std::endl;
-    // TODO: 当前假设个peer拥有完整文件，否则本最小化的demo示例将无法正常运行
-    // 下面假设plan是完整文件的分片，但目前实际上只是包含offset的peer
-    // 需要多次发起query来获取完整的分片
+    std::cout << "raw query result:"<< res.dump();
+    logDebug << "query peers success taskId=" << taskId << " offset=" << start << std::endl;
     std::vector<PeerChunk> plan;
     // total size of the file (if we request a block, it means the size of the file that the block belong to)
     size_t totalSizeFromApi = 0;
@@ -1829,15 +1777,16 @@ void DownloadManager::onP2PPeerQuerySuccess_(uint64_t taskId, nlohmann::json& re
                 pc.remoteSdp = p.value("connMeta", "");
                 pc.start = std::stoull(p.value("start", "0"));
                 pc.end = std::stoull(p.value("end", "0"));
+                plan.emplace_back(std::move(pc)); 
             }
         }
     } catch (const std::exception& ex) {
         logWarn << "[P2P] parse response error: " << ex.what() << " taskId=" << taskId;
-        onP2PPeerQueryFail_(taskId, -2, offset);
+        onP2PPeerQueryFail_(taskId, -2, start);
         return;
     }
 
-    logDebug << "onP2PPeerQuerySuccess_ taskId=" << taskId << " offset =" << offset << " plan size=" << plan.size();
+    logDebug << "onP2PPeerQuerySuccess_ taskId=" << taskId << " offset =" << start << " plan size=" << plan.size();
 
     {
         std::lock_guard<std::mutex> lk(mTasksMutex);
@@ -1849,32 +1798,28 @@ void DownloadManager::onP2PPeerQuerySuccess_(uint64_t taskId, nlohmann::json& re
             it->second.TotalSize = totalSizeFromApi;
         }
 
-        p2pStates_[taskId][offset].queryInFlight = false;
-        p2pStates_[taskId][offset].queryDone = true;
-        p2pStates_[taskId][offset].lastQueryErr = 0;
-        p2pStates_[taskId][offset].plan = plan;
+        p2pStates_[taskId][start].queryInFlight = false;
+        p2pStates_[taskId][start].queryDone = true;
+        p2pStates_[taskId][start].lastQueryErr = 0;
+        p2pStates_[taskId][start].plan = plan;
 
         if (it->second.Status == TaskStatus::Pending) {
             it->second.Status = TaskStatus::Running;
         }
     }
 
-    scheduleP2PChunks_(taskId, plan, offset);
+    scheduleP2PChunks_(taskId, plan, start, end);
 }
 
-void DownloadManager::scheduleP2PChunks_(uint64_t taskId, const std::vector<PeerChunk>& plan, size_t offset)
+void DownloadManager::scheduleP2PChunks_(uint64_t taskId, const std::vector<PeerChunk>& plan, size_t start, size_t end)
 {
     std::vector<PeerChunk> planO = plan;
 #ifdef DEBUG_LOCAL_P2P
-    // TODO: PeerChunk 手动注入,非DEBUg请删除
-    // plan.push_back({.peerId = "peer1", .start = 0, .end = 1024});
     planO.clear();
-    planO.push_back({.peerId = "peer1", .start = 0, .end = 2147483647});
+    planO.push_back({.peerId = "peer1", .start = 0, .end = 2097152 - 1});
 
     logInfo << "scheduleP2PChunks_ taskId=" << taskId << " plan size=" << planO.size();
-    // TODO: 仅测试
     std::cout << "INPUT connMeta " << std::endl;
-    // read until non-empty line
     std::string remote_sdp;
     std::string line;
     while (std::getline(std::cin, line) && !line.empty()) {
@@ -1924,13 +1869,19 @@ void DownloadManager::scheduleP2PChunks_(uint64_t taskId, const std::vector<Peer
     }
 
     PeerChunk clipped = longestPlan_;
-    size_t s = offset, e = longestPlan_.end;
-    if (opts.HasRange) {
-        if (opts.RangeEnd != SIZE_MAX && e > opts.RangeEnd)
-            e = opts.RangeEnd;
-    }
+    size_t s = start, e = std::min(longestPlan_.end, end);
     clipped.start = s;
     clipped.end = e;
+
+    if (clipped.start > start){
+        logError << "un-expected scheduleP2PChunks_ clipped.start > start";
+    }else if (clipped.end < end){
+        size_t missStart = clipped.end + 1;    
+        size_t missEnd = end;
+        std::lock_guard<std::mutex> l(mMtx);
+        mPendingRanges[taskId].push_front(Range{missStart, missEnd});
+        logInfo << "clipped.end < end, pending range: [" << missStart << ", " << missEnd << "]" << " previous range: [" << start << ", " << end << "]";
+    }
 
     const size_t room = (mMaxConcurrent > runningP2p) ? (mMaxConcurrent - runningP2p) : 0;
     if (room == 0) {
@@ -1939,7 +1890,7 @@ void DownloadManager::scheduleP2PChunks_(uint64_t taskId, const std::vector<Peer
         std::lock_guard<std::mutex> l(mMtx);
         auto& q = mPendingRanges[taskId];
 
-        logDebug << "scheduleP2PChunks_ pending ranges, taskId=" << taskId << " offset=" << offset << " s=" << s
+        logDebug << "scheduleP2PChunks_ pending ranges, taskId=" << taskId << " offset=" << start << " s=" << s
                  << " e=" << e;
 
         // TODO: implement
@@ -1950,7 +1901,7 @@ void DownloadManager::scheduleP2PChunks_(uint64_t taskId, const std::vector<Peer
     if (startOneP2PChunk_(taskId, clipped)) {
         return;
     } else {
-        logError << "startOneP2PChunk_ failed taskId=" << taskId << " offset=" << offset << "chunk=" << clipped.start
+        logError << "startOneP2PChunk_ failed taskId=" << taskId << " offset=" << start << "chunk=" << clipped.start
                  << "-" << clipped.end << "peer " << clipped.peerId << std::endl;
     }
 
@@ -1960,7 +1911,6 @@ void DownloadManager::scheduleP2PChunks_(uint64_t taskId, const std::vector<Peer
 
 bool DownloadManager::startOneP2PChunk_(uint64_t taskId, const PeerChunk& pc)
 {
-    // 被暂停/取消则不启动
     // no launch
     {
         std::lock_guard<std::mutex> lk(mTasksMutex);
@@ -1980,15 +1930,6 @@ bool DownloadManager::startOneP2PChunk_(uint64_t taskId, const PeerChunk& pc)
             parentFile = itF->second;
     }
 
-    // find task
-    // download::P2PDownloaderTaskOption opts;
-    // auto    optIt =  mP2pTaskOptions.find(taskId);
-    // if (optIt != mP2pTaskOptions.end()) opts = optIt->second;
-    // else{
-    //     logError << "no p2p task option found for " << taskId << " may be you not registered the task opts in
-    //     AddDownloadTask? ";
-    // }
-
     download::P2PDownloaderTaskOption opt;
     opt.PeerID = pc.peerId;
     opt.PeerSdp = pc.remoteSdp;
@@ -2005,7 +1946,7 @@ bool DownloadManager::startOneP2PChunk_(uint64_t taskId, const PeerChunk& pc)
     opt.End = pc.end;
     opt.Notify = &DownloadManager::coreNotifyCallbackP2p;
     opt.Receiver = this;
-
+    logDebug << "[P2P] CreateTask peer=" << pc.peerId << " range=" << pc.start << "-" << pc.end << " sdp = " << opt.PeerSdp << " iceUfrag = " << opt.IceUfrag << " icePwd = " << opt.IcePwd << " hash = " << opt.ContentHash;
     auto sub = mP2pDownloader->CreateTask(&opt);
     if (!sub) {
         logWarn << "[P2P] CreateTask failed peer=" << pc.peerId << " range=" << pc.start << "-" << pc.end;

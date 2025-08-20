@@ -338,20 +338,20 @@ std::string FileManager::GetPathByBlockHash(const std::string& blockHash, bool n
     }
 }
 
-std::optional<FileResourceInfo> FileManager::GetUploadFileResource(const std::string& fileHash, uint64_t minStart)
+std::optional<FileResourceInfo> FileManager::GetUploadFileResource(const std::string& fileHash, uint64_t reqStart)
 {
     auto db = getDB();
     if (!db) {
         return std::nullopt;
     }
-
+    logDebug << "GetUploadFileResource for fileHash: " << fileHash << ", reqStart: " << reqStart;
     try {
         std::lock_guard<std::mutex> lockFOpt(mFileDBOptMutex);
         auto files = db->stor.select(
             columns(&FileItem::id, &FileItem::path, &FileItem::blockStart, &FileItem::blockEnd),
             where(
-                c(&FileItem::fileHash) == fileHash and c(&FileItem::blockStart) >= minStart and
-                c(&FileItem::status) == FileStatus::AVAILABLE),
+                c(&FileItem::fileHash) == fileHash and c(&FileItem::blockStart) <= reqStart and
+                c(&FileItem::blockEnd) >= reqStart and c(&FileItem::status) == FileStatus::AVAILABLE),
             order_by(&FileItem::blockEnd).desc(),
             limit(1));
 

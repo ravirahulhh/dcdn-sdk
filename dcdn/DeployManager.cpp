@@ -103,9 +103,6 @@ int DeployManager::Init(const DeployManagerOption& opt)
     // 注册事件处理器
     registerHandler(EventType::DeployMsg, &DeployManager::handleDeployMsgEvent);
 
-    // 重新提交未完成的任务
-    resubmitDownloadTasks();
-
     mInited = true;
     return 0;
 }
@@ -156,7 +153,8 @@ void DeployManager::run()
         logError << "DeployManager not initialized, cannot run";
         return;
     }
-
+    // 重新提交未完成的任务
+    resubmitDownloadTasks();
     logInfo << "DeployManager started";
     while (true) {
         checkDownloadStatus();

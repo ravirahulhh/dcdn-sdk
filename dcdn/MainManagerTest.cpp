@@ -33,7 +33,7 @@ int main(int argc, char* argv[])
 
     nlohmann::json deployPayload;
     deployPayload["job_id"] = generate_uuid_v4(); // 下划线格式的job_id
-    deployPayload["url"] = "https://d1.xia12345.com/video/202310/6524242c37926f1bd8c374d8/hd.mp4";
+    deployPayload["url"] = "https://d1.xia12345.com/video/202501/677c87f9e2519513f3edc65b/hd.mp4";
     deployPayload["file_hash"] = ""; // 可根据需要设置实际哈希值
 
     nlohmann::json blockInfo;

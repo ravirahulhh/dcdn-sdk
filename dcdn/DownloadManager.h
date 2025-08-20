@@ -181,7 +181,7 @@ public:
     void Init();
     // ===== 配置 =====
     // TODO: remove
-    void SetStrategy(DownloadStrategy strategy);
+   [[deprecated]] void SetStrategy(DownloadStrategy strategy)  ;
     void SetMaxConcurrentDownloads(size_t max);
     void SetPersistPath(const std::string& path);
 
@@ -237,33 +237,25 @@ private:
     };
 
 private:
-    // 异步 P2P 查询
-    // int p2pQueryPeersAsync_(
-    //     uint64_t taskId,
-    //     void** reqIdOut,
-    //     std::function<void(uint64_t, const download_manager::QueryPeersResponse&)> succ,
-    //     std::function<void(uint64_t, int)> fail);
-
     // 基于 taskId 发起默认 P2P 查询（使用内部回调 onP2PPeerQuerySuccess_/Fail_）
     // TODO: add param len
-    bool p2pQueryPeersAsync_(uint64_t taskId, size_t offset = 0);
+    bool p2pQueryPeersAsync_(uint64_t taskId, size_t start, size_t end);
 
     // 查询成功/失败回调
-    void onP2PPeerQuerySuccess_(uint64_t taskId, nlohmann::json& res, size_t offset);
-    void onP2PPeerQueryFail_(uint64_t taskId, int errCode, size_t offset);
+    void onP2PPeerQuerySuccess_(uint64_t taskId, nlohmann::json& res, size_t start, size_t end);
+    void onP2PPeerQueryFail_(uint64_t taskId, int errCode, size_t start);
 
     // 调度 peer 计划
-    void scheduleP2PChunks_(uint64_t taskId, const std::vector<PeerChunk>& plan, size_t offset);
+    void scheduleP2PChunks_(uint64_t taskId, const std::vector<PeerChunk>& plan, size_t start, size_t end);
     bool startOneP2PChunk_(uint64_t taskId, const PeerChunk& pc);
 
 private:
     // ===================== 事件循环/线程 =====================
-    void run() override; // BaseManager 要求实现线程主函数
+    void run() override; 
 
     // 处理 FunctionCall 事件：把 std::function<void()> 直接执行
     void handleFunctionCall(std::shared_ptr<Event> evt);
 
-    // 把 lambda 丢进事件线程串行执行（cmdQueue）
     template<typename R>
     R runSyncOnLoop(std::function<R()> fn);
     void runAsyncOnLoop(std::function<void()> fn);
@@ -275,8 +267,6 @@ private:
     // 消费事件
     void processHttpEvent(std::shared_ptr<dcdn::util::DownloaderTask> task);
     void processP2pEvent(std::shared_ptr<dcdn::util::DownloaderTask> task);
-
-    void onDownloaderNotify(std::shared_ptr<dcdn::util::DownloaderTask> task);
 
 private:
     // ===================== 原内部工具方法（保留小驼峰） =====================
@@ -313,8 +303,7 @@ private:
         size_t offset = 0;
         size_t length = 0;
         int index = 0;
-        // 对应 downloader 指针（HTTP 或 P2P）
-        std::shared_ptr<dcdn::util::DownloaderTask> downloader;
+        std::shared_ptr<dcdn::util::DownloaderTask> downloader; // http or p2p
         std::shared_ptr<std::fstream> file;
         bool isProbe = false; // HTTP probe task
         uint64_t actualGot = 0; // 实际读到（用于短读检测）
@@ -376,18 +365,6 @@ private:
 template<typename R>
 R DownloadManager::runSyncOnLoop(std::function<R()> fn)
 {
-    // // 使用 FunctionCall 事件把任务丢进事件循环串行执行
-    // this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(
-    //     EventType::FunctionCall, [prom = std::make_shared<std::promise<R>>(), fn = std::move(fn)]() mutable {
-    //         try {
-    //             prom->set_value(fn());
-    //         } catch (...) {
-    //             try {
-    //                 prom->set_exception(std::current_exception());
-    //             } catch (...) {
-    //             }
-    //         }
-    //     }));
     auto prom = std::make_shared<std::promise<R>>();
     auto fut = prom->get_future();
     this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(
