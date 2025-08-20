@@ -11,8 +11,9 @@ ifeq ($(PLT), Darwin)
 	INCFLAGS += -I$(OpenSslDir)/include
     LIBFLAGS += -L$(OpenSslDir)/lib -lssl -lcrypto
 	LIBFLAGS += -framework CoreFoundation -framework SystemConfiguration
+	LIBFLAGS += -L/opt/homebrew/opt/gperftools/lib -lprofiler -ltcmalloc
 else
-    LIBFLAGS += -lssl -lcrypto
+    LIBFLAGS += -lssl -lcrypto -lprofiler -ltcmalloc
 endif	
 
 libTargets = \
