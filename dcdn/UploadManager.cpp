@@ -21,42 +21,53 @@ void UploadManager::handleUploadMsgEvent(std::shared_ptr<Event> evt)
             return;
         }
 
-        // 从 json 中解析 arg
         const json& j = argEvent->Arg();
-        UploadFileArg arg;
-        arg.FileHash = j.value("hash", "");
-        arg.BlockStart = 0;
-        arg.BlockEnd = 0;
-        if (j.contains("conn_meta") && j["conn_meta"].contains("conn_meta")) {
-            arg.RemoteSdp = j["conn_meta"]["conn_meta"].get<std::string>();
+        std::string remoteSdp, iceUfrag, icePwd, peerID, fileHash;
+        size_t blockStart, blockEnd;
+        if (j.contains("push_conn_meta") && j["push_conn_meta"].is_object()) {
+            const auto& meta = j["push_conn_meta"];
+            fileHash = meta.value("hash", "");
+            remoteSdp = meta.value("conn_meta", "");
+            icePwd = meta.value("ice_pwd", "");
+            iceUfrag = meta.value("ice_ufrag", "");
+            peerID = meta.value("peer_id", "");
+            blockStart = meta.value("start", 0);
+            blockEnd = meta.value("end", 0);
         }
-        if (j.contains("ice_ufrag")) {
-            arg.IceUfrag = j["ice_ufrag"].get<std::string>();
-        }
-        if (j.contains("ice_pwd")) {
-            arg.IcePwd = j["ice_pwd"].get<std::string>();
-        }
-        if (j.contains("peer_id")) {
-            arg.PeerID = j["peer_id"].get<std::string>();
-        }
-        if (j.contains("end")) {
-            arg.BlockEnd = j["end"].get<size_t>();
-        }
-        // BlockStart 默认 0
-        logDebug << "Received upload request for: " << arg.FileHash << " [" << arg.BlockStart << "-" << arg.BlockEnd
-                 << "]";
 
-        auto task = std::make_shared<UploadFileTask>(
-            arg.PeerID, arg.FileHash, arg.BlockStart, arg.BlockEnd, arg.IceUfrag, arg.IcePwd, arg.RemoteSdp);
+        logDebug << "Received upload request from peer: " << peerID << " for file: " << fileHash
+                 << " from block: " << blockStart << " to block: " << blockEnd << " with iceUfrag: " << iceUfrag
+                 << " icePwd: " << icePwd << " remoteSdp: " << remoteSdp;
 
-        task->SetState(UploadFileTask::Pending);
+        if (fileHash.empty() || remoteSdp.empty() || iceUfrag.empty() || icePwd.empty() || peerID.empty()) {
+            logError << "Invalid UploadMsg event: " << j.dump();
+            return;
+        }
+
+        if (blockEnd != 0 && blockEnd <= blockStart) {
+            logError << "Invalid block range: start=" << blockStart << ", end=" << blockEnd;
+            return;
+        }
+
+        auto fileInfo = mFileMgr->GetUploadFileResource(fileHash, blockStart);
+        if (!fileInfo.has_value()) {
+            logError << "File not found: " << fileHash << " for peer: " << peerID;
+            return;
+        }
+
+        auto pc = setupPeerConnection(iceUfrag, icePwd, remoteSdp);
+        if (!pc.has_value()) {
+            logError << "Failed to setup PeerConnection for peer: " << peerID;
+            return;
+        }
+
+        auto ctx = std::make_shared<PeerConnectionCtx>(peerID, iceUfrag, icePwd, remoteSdp);
 
         {
-            std::lock_guard<std::mutex> lock(mLabelTaskMapMutex);
-            mLabelTaskMap[task->Label()] = task;
+            std::lock_guard<std::mutex> lock(mPeerConnectionMapMutex);
+            mPeerConnectionMap[pc.value()] = ctx;
         }
 
-        mCv.notify_one();
     } catch (const std::exception& e) {
         logError << "Exception in handleUploadMsgEvent: " << e.what();
     } catch (...) {
@@ -64,24 +75,109 @@ void UploadManager::handleUploadMsgEvent(std::shared_ptr<Event> evt)
     }
 }
 
-std::vector<UploadFileTaskPtr> UploadManager::getTasksToProcess()
+std::optional<std::shared_ptr<rtc::PeerConnection>>
+UploadManager::setupPeerConnection(const std::string& iceUfrag, const std::string& icePwd, const std::string& remoteSdp)
 {
-    std::vector<UploadFileTaskPtr> tasksToProcess;
-    {
-        std::lock_guard<std::mutex> lock(mLabelTaskMapMutex);
-        for (const auto& [label, task] : mLabelTaskMap) {
-            auto state = task->GetState();
-            if (state == UploadFileTask::Running || state == UploadFileTask::Init || state == UploadFileTask::Pending) {
-                tasksToProcess.push_back(task);
+    try {
+        rtc::Configuration config;
+        config.iceUfrag = iceUfrag;
+        config.icePwd = icePwd;
+        config.enableIceUdpMux = true;
+        config.certificatePemFile = mCert.certPem;
+        config.keyPemFile = mCert.keyPem;
+
+        auto ss = mMan->Cfg().StunServers();
+        for (auto s : ss) {
+            auto idx = s.find(':');
+            if (idx == std::string::npos) {
+                continue;
+            }
+            std::string host = s.substr(0, idx);
+            int port = atoi(s.c_str() + idx + 1);
+            if (port > 0 && port < 65536) {
+                rtc::IceServer serv(host, port);
+                serv.type = rtc::IceServer::Type::Stun;
+                config.iceServers.push_back(serv);
             }
         }
+
+        auto pc = std::make_shared<rtc::PeerConnection>(config);
+        pc->setRemoteDescription(remoteSdp);
+
+        if (!pc) {
+            logError << "Failed to create PeerConnection";
+            return std::nullopt;
+        }
+
+        pc->onDataChannel([this, pc](std::shared_ptr<rtc::DataChannel> dc) { handleDataChannel(dc, pc); });
+
+        return pc;
+    } catch (const std::exception& e) {
+        logError << "Exception in setupPeerConnection: " << e.what();
+        return std::nullopt;
+    } catch (...) {
+        logError << "Unknown exception in setupPeerConnection";
+        return std::nullopt;
     }
-    return tasksToProcess;
+}
+
+void UploadManager::handleDataChannel(std::shared_ptr<rtc::DataChannel> dc, std::shared_ptr<rtc::PeerConnection> pc)
+{
+    try {
+        auto label = dc->label();
+        logDebug << "DataChannel opened: " << label;
+        auto parsed = parseLabel(label);
+        if (!parsed) {
+            return;
+        }
+
+        auto [fileHash, start, end] = *parsed;
+
+        // 获取PeerConnection的上下文
+        PeerConnectionCtxPtr ctx;
+        {
+            std::lock_guard<std::mutex> lock(mPeerConnectionMapMutex);
+            auto it = mPeerConnectionMap.find(pc);
+            if (it == mPeerConnectionMap.end()) {
+                return;
+            }
+            ctx = it->second;
+        }
+
+        auto task = std::make_shared<UploadFileTask>(
+            ctx->PeerID, fileHash, start, end, ctx->IceUfrag, ctx->IcePwd, ctx->RemoteSdp);
+        task->Pc = pc;
+        task->Dc = dc;
+        task->TaskID = getTaskID();
+
+        if (!initFileOperations(task)) {
+            return;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mTaskMapMutex);
+            mTaskMap[task->TaskID] = task;
+        }
+
+        setupOnOpenCallback(dc, task);
+        setupOnBufferedAmountLowCallback(dc, task);
+        setupOnMessageCallback(dc, task);
+        setupOnClosedCallback(dc, task);
+    } catch (const std::exception& e) {
+        logError << "Exception in handleDataChannel: " << e.what();
+        dc->close();
+    } catch (...) {
+        logError << "Unknown exception in handleDataChannel";
+        dc->close();
+    }
 }
 
 bool UploadManager::initFileOperations(UploadFileTaskPtr task)
 {
-    if (!task->File.is_open()) {
+    try {
+        logDebug << "Init file operations for task: " << task->TaskID << " for file: " << task->FileHash
+                 << " from block: " << task->BlockStart << " to block: " << task->BlockEnd;
+
         auto fileInfo = mFileMgr->GetUploadFileResource(task->FileHash, task->BlockStart);
         if (!fileInfo.has_value()) {
             logError << "File not found: " << task->FileHash;
@@ -90,16 +186,22 @@ bool UploadManager::initFileOperations(UploadFileTaskPtr task)
             } catch (const std::exception& e) {
                 logError << "Send ERROR:FILE_NOT_EXIST failed: " << e.what();
             }
-            task->SetState(UploadFileTask::Failed);
-            if (task->Dc) {
-                task->Dc->close();
-            }
             return false;
         }
+
         auto resourceInfo = fileInfo.value();
         task->FileOffset = task->BlockStart - resourceInfo.start;
         task->FileEnd = task->BlockEnd - resourceInfo.start;
         task->FilePath = resourceInfo.path;
+
+        // 设置FileEnd
+        if (task->BlockEnd == 0) {
+            std::ifstream sizeCheck(task->FilePath, std::ios::binary | std::ios::ate);
+            size_t fileSize = sizeCheck.tellg();
+            sizeCheck.close();
+            task->FileEnd = fileSize - 1;
+        }
+
         task->File.open(task->FilePath, std::ios::binary);
         if (!task->File.is_open()) {
             logError << "Failed to open file: " << task->FilePath;
@@ -108,210 +210,107 @@ bool UploadManager::initFileOperations(UploadFileTaskPtr task)
             } catch (const std::exception& e) {
                 logError << "Send ERROR:FILE_OPEN_FAILED failed: " << e.what();
             }
-            task->SetState(UploadFileTask::Failed);
-            if (task->Dc) {
-                task->Dc->close();
-            }
             return false;
         }
+
         task->File.seekg(task->FileOffset);
         if (!task->File) {
             logError << "Failed to seek to position: " << task->FileOffset << " in file: " << task->FilePath;
             try {
-                task->Dc->send("ERROR:FILE_SEEK_FAILED");
+                if (task->SetState(UploadFileTask::State::Failed)) {
+                    if (task->Dc) {
+                        task->Dc->send("ERROR:FILE_SEEK_FAILED");
+                    }
+                }
             } catch (const std::exception& e) {
                 logError << "Send ERROR:FILE_SEEK_FAILED failed: " << e.what();
             }
-            task->SetState(UploadFileTask::Failed);
-            if (task->Dc) {
-                task->Dc->close();
-            }
             return false;
         }
+
+        return true;
+    } catch (const std::exception& e) {
+        logError << "Exception in initFileOperations: " << e.what();
+        return false;
+    } catch (...) {
+        logError << "Unknown exception in initFileOperations";
+        return false;
     }
-    return true;
 }
 
 void UploadManager::performFileSending(UploadFileTaskPtr task)
 {
-    size_t totalBytesInBlock = (task->BlockEnd - task->BlockStart) + 1;
-    size_t remainingBytes = totalBytesInBlock - task->BytesSent;
+    try {
+        while (task->Dc->bufferedAmount() < mMaxBufferedAmount.load() &&
+               task->GetState() == UploadFileTask::State::Running) {
+            size_t totalBytesInBlock = (task->BlockEnd - task->BlockStart) + 1;
+            size_t remainingBytes = totalBytesInBlock - task->BytesSent;
 
-    if (remainingBytes > 0) {
-        const size_t chunkSize = 16 * 1024;
-        size_t bytesToSend = std::min(chunkSize, remainingBytes);
-        size_t allowed = mTokenBucket->Consume(bytesToSend);
+            if (remainingBytes > 0) {
+                const size_t chunkSize = 64 * 1024;
+                size_t bytesToSend = std::min(chunkSize, remainingBytes);
+                size_t allowed = mTokenBucket->Consume(bytesToSend);
 
-        if (allowed > 0) {
-            std::vector<char> buffer(allowed);
-            task->File.read(buffer.data(), allowed);
-            size_t readBytes = task->File.gcount();
+                if (allowed > 0) {
+                    std::vector<char> buffer(allowed);
+                    task->File.read(buffer.data(), allowed);
+                    size_t readBytes = task->File.gcount();
 
-            if (readBytes > 0) {
-                try {
-                    task->Dc->send((std::byte*)buffer.data(), readBytes);
-                    task->BytesSent += readBytes;
-                } catch (const std::exception& e) {
-                    logError << "Send failed: " << e.what();
-                    task->SetState(UploadFileTask::Failed);
-                    if (task->Dc) {
-                        task->Dc->close();
+                    if (readBytes > 0) {
+                        try {
+                            task->Dc->send((std::byte*)buffer.data(), readBytes);
+                            task->BytesSent += readBytes;
+                        } catch (const std::exception& e) {
+                            logError << "Send failed: " << e.what();
+                            task->SetState(UploadFileTask::State::Failed);
+                            removeActiveTask(task->TaskID);
+                        }
                     }
                 }
             }
+
+            if (task->BytesSent >= totalBytesInBlock) {
+                logDebug << "File transfer completed: " << task->Label();
+                task->SetState(UploadFileTask::State::Completed);
+                removeActiveTask(task->TaskID);
+            }
         }
-    }
-
-    if (task->BytesSent >= totalBytesInBlock) {
-        task->SetState(UploadFileTask::Completed);
-        logInfo << "File transfer completed: " << task->Label();
-    }
-}
-
-void UploadManager::handleRunningTask(UploadFileTaskPtr task)
-{
-    if (!task->Dc || !task->Dc->isOpen()) {
-        return;
-    }
-
-    if (task->Dc->bufferedAmount() > mMaxBufferedAmount.load() * mBufferedThresholdRate.load()) {
-        task->SetState(UploadFileTask::BufferedAmount);
-        return;
-    }
-
-    if (initFileOperations(task)) {
-        performFileSending(task);
-    }
-}
-
-void UploadManager::handleTask(UploadFileTaskPtr task)
-{
-    auto state = task->GetState();
-
-    if (state == UploadFileTask::Init || state == UploadFileTask::Pending) {
-        if (!task->Pc) {
-            setupPeerConnection(task);
+        if (task->GetState() == UploadFileTask::State::Running) {
+            logDebug << "Buffered task: " << task->Label();
+            task->SetState(UploadFileTask::State::Buffered);
         }
-        return;
-    }
-
-    if (state == UploadFileTask::Running) {
-        handleRunningTask(task);
-    }
-}
-
-void UploadManager::run()
-{
-    logInfo << "UploadManager running";
-    while (!mStopFlag) {
-        waitAllEvents(std::chrono::milliseconds(100));
-
-        auto tasksToProcess = getTasksToProcess();
-
-        if (tasksToProcess.empty()) {
-            std::unique_lock<std::mutex> lock(mMtx);
-            mCv.wait(lock);
-            continue;
+        {
+            std::lock_guard<std::mutex> lock(mPeerConnectionMapMutex);
+            auto it = mPeerConnectionMap.find(task->Pc);
+            if (it != mPeerConnectionMap.end()) {
+                it->second->UpdateTime();
+            }
         }
-
-        for (auto& task : tasksToProcess) {
-            handleTask(task);
-        }
-    }
-    logInfo << "UploadManager exit";
-}
-
-void UploadManager::setupPeerConnection(UploadFileTaskPtr task)
-{
-    rtc::Configuration config;
-    config.iceUfrag = task->IceUfrag;
-    config.icePwd = task->IcePwd;
-    config.enableIceUdpMux = true;
-    config.certificatePemFile = mCert.certPem;
-    config.keyPemFile = mCert.keyPem;
-    auto ss = mMan->Cfg().StunServers();
-    for (auto s : ss) {
-        auto idx = s.find(':');
-        if (idx == std::string::npos) {
-            continue;
-        }
-        std::string host = s.substr(0, idx);
-        int port = atoi(s.c_str() + idx + 1);
-        if (port > 0 && port < 65536) {
-            rtc::IceServer serv(host, port);
-            serv.type = rtc::IceServer::Type::Stun;
-            config.iceServers.push_back(serv);
-        }
-    }
-
-    task->Pc = std::make_shared<rtc::PeerConnection>(config);
-    task->Pc->setRemoteDescription(task->RemoteSdp);
-    task->Pc->onDataChannel([this, task](std::shared_ptr<rtc::DataChannel> dc) { handleDataChannel(dc, task); });
-}
-
-std::optional<std::tuple<std::string, size_t, size_t>> UploadManager::parseLabel(const std::string& label)
-{
-    size_t first_dash = label.find('-');
-    size_t second_dash = label.find('-', first_dash + 1);
-    if (first_dash == std::string::npos || second_dash == std::string::npos || second_dash <= first_dash) {
-        logError << "Label format is incorrect, cannot create task: " << label;
-        return std::nullopt;
-    }
-
-    std::string fileHash = label.substr(0, first_dash);
-    std::string offset_str = label.substr(first_dash + 1, second_dash - first_dash - 1);
-    std::string len_str = label.substr(second_dash + 1);
-
-    try {
-        size_t offset = std::stoull(offset_str);
-        size_t end = std::stoull(len_str);
-        return std::make_tuple(fileHash, offset, end);
     } catch (const std::exception& e) {
-        logError << "Failed to parse label: " << label << ", error: " << e.what();
-        return std::nullopt;
-    }
-}
-
-std::optional<UploadFileTaskPtr> UploadManager::findOrCreateTask(
-    std::shared_ptr<rtc::DataChannel> dc,
-    UploadFileTaskPtr initial_task,
-    const std::string& label)
-{
-    std::lock_guard<std::mutex> lock(mLabelTaskMapMutex);
-    auto it = mLabelTaskMap.find(label);
-    if (it == mLabelTaskMap.end()) {
-        logError << "Task not found for label: " << label << ", creating new task";
-        auto parsed = parseLabel(label);
-        if (!parsed.has_value()) {
-            dc->close();
-            return std::nullopt;
-        }
-
-        auto [fileHash, offset, end] = parsed.value();
-        auto newTask = std::make_shared<UploadFileTask>(
-            initial_task->PeerID,
-            fileHash,
-            offset,
-            end,
-            initial_task->IceUfrag,
-            initial_task->IcePwd,
-            initial_task->RemoteSdp);
-        newTask->Pc = initial_task->Pc;
-        newTask->Dc = dc;
-        mLabelTaskMap[label] = newTask;
-        return newTask;
-    } else {
-        it->second->Dc = dc;
-        return it->second;
+        logError << "Exception in performFileSending: " << e.what();
+        task->SetState(UploadFileTask::State::Failed);
+        removeActiveTask(task->TaskID);
+    } catch (...) {
+        logError << "Unknown exception in performFileSending";
+        task->SetState(UploadFileTask::State::Failed);
+        removeActiveTask(task->TaskID);
     }
 }
 
 void UploadManager::setupOnOpenCallback(std::shared_ptr<rtc::DataChannel> dc, UploadFileTaskPtr channelTask)
 {
-    dc->onOpen([this, channelTask]() {
-        logInfo << "DataChannel opened for task: " << channelTask->Label();
-        channelTask->SetState(UploadFileTask::Running);
-        mCv.notify_one();
+    dc->onOpen([this, dc, channelTask]() {
+        try {
+            logDebug << "DataChannel opened for task: " << channelTask->Label();
+            if (channelTask->SetState(UploadFileTask::State::Running)) {
+                addActiveTask(channelTask);
+                mCv.notify_one();
+            }
+        } catch (const std::exception& e) {
+            logError << "Exception in onOpen callback: " << e.what();
+        } catch (...) {
+            logError << "Unknown exception in onOpen callback";
+        }
     });
 }
 
@@ -319,43 +318,61 @@ void UploadManager::setupOnBufferedAmountLowCallback(
     std::shared_ptr<rtc::DataChannel> dc,
     UploadFileTaskPtr channelTask)
 {
-    dc->setBufferedAmountLowThreshold(mMaxBufferedAmount.load());
-    dc->onBufferedAmountLow([this, channelTask]() {
-        logInfo << "DataChannel buffered amount low: " << channelTask->Label();
-        if (channelTask->GetState() == UploadFileTask::BufferedAmount) {
-            channelTask->SetState(UploadFileTask::Running);
-            mCv.notify_one();
+    dc->setBufferedAmountLowThreshold(mMaxBufferedAmount.load() * mBufferedThresholdRate.load()); // 16KB
+    dc->onBufferedAmountLow([this, dc, channelTask]() {
+        try {
+            logDebug << "DataChannel buffered amount low: " << channelTask->Label();
+            if (channelTask->GetState() == UploadFileTask::State::Buffered &&
+                channelTask->SetState(UploadFileTask::State::Running)) {
+                addActiveTask(channelTask);
+                mCv.notify_one();
+            }
+        } catch (const std::exception& e) {
+            logError << "Exception in onBufferedAmountLow callback: " << e.what();
+        } catch (...) {
+            logError << "Unknown exception in onBufferedAmountLow callback";
         }
     });
 }
 
 void UploadManager::setupOnMessageCallback(std::shared_ptr<rtc::DataChannel> dc, UploadFileTaskPtr channelTask)
 {
-    dc->onMessage([this, channelTask](auto data) {
-        if (std::holds_alternative<std::string>(data)) {
-            std::string msg = std::get<std::string>(data);
-            if (msg == "PAUSE") {
-                logInfo << "Received PAUSE for: " << channelTask->Label();
-                channelTask->SetState(UploadFileTask::Paused);
-                try {
-                    channelTask->Dc->send("PAUSE_ACK");
-                } catch (const std::exception& e) {
-                    logError << "Send PAUSE_ACK failed: " << e.what();
+    dc->onMessage([this, dc, channelTask](auto data) {
+        try {
+            if (std::holds_alternative<std::string>(data)) {
+                std::string msg = std::get<std::string>(data);
+                if (msg == "PAUSE") {
+                    logInfo << "Received PAUSE for: " << channelTask->Label();
+                    try {
+                        if (channelTask->SetState(UploadFileTask::State::Paused)) {
+                            removeActiveTask(channelTask->TaskID);
+                            dc->send("PAUSE_ACK");
+                        }
+                    } catch (const std::exception& e) {
+                        logError << "Send PAUSE_ACK failed: " << e.what();
+                    }
+                } else if (msg == "CANCEL") {
+                    logInfo << "Received CANCEL for: " << channelTask->Label();
+                    try {
+                        if (channelTask->SetState(UploadFileTask::State::Cancelled)) {
+                            removeActiveTask(channelTask->TaskID);
+                            dc->send("CANCEL_ACK");
+                        }
+                    } catch (const std::exception& e) {
+                        logError << "Send CANCEL_ACK failed: " << e.what();
+                    }
+                } else if (msg == "RESUME") {
+                    logInfo << "Received RESUME for: " << channelTask->Label();
+                    if (channelTask->SetState(UploadFileTask::State::Running)) {
+                        addActiveTask(channelTask);
+                        mCv.notify_one();
+                    }
                 }
-            } else if (msg == "CANCEL") {
-                logInfo << "Received CANCEL for: " << channelTask->Label();
-                channelTask->SetState(UploadFileTask::Cancelled);
-                try {
-                    channelTask->Dc->send("CANCEL_ACK");
-                } catch (const std::exception& e) {
-                    logError << "Send CANCEL_ACK failed: " << e.what();
-                }
-                mCv.notify_one();
-            } else if (msg == "RESUME") {
-                logInfo << "Received RESUME for: " << channelTask->Label();
-                channelTask->SetState(UploadFileTask::Running);
-                mCv.notify_one();
             }
+        } catch (const std::exception& e) {
+            logError << "Exception in onMessage callback: " << e.what();
+        } catch (...) {
+            logError << "Unknown exception in onMessage callback";
         }
     });
 }
@@ -363,32 +380,83 @@ void UploadManager::setupOnMessageCallback(std::shared_ptr<rtc::DataChannel> dc,
 void UploadManager::setupOnClosedCallback(std::shared_ptr<rtc::DataChannel> dc, UploadFileTaskPtr channelTask)
 {
     dc->onClosed([this, channelTask]() {
-        logInfo << "DataChannel closed: " << channelTask->Label();
-        if (channelTask->Dc) {
-            channelTask->Dc.reset();
-        }
-        {
-            std::lock_guard<std::mutex> lock(mLabelTaskMapMutex);
-            mLabelTaskMap.erase(channelTask->Label());
+        try {
+            logDebug << "DataChannel closed: " << channelTask->Label();
+
+            auto taskID = channelTask->TaskID;
+            removeTask(taskID);
+
+            if (channelTask->File.is_open()) {
+                channelTask->File.close();
+            }
+        } catch (const std::exception& e) {
+            logError << "Exception in onClosed callback: " << e.what();
+        } catch (...) {
+            logError << "Unknown exception in onClosed callback";
         }
     });
 }
 
-void UploadManager::handleDataChannel(std::shared_ptr<rtc::DataChannel> dc, UploadFileTaskPtr initial_task)
+std::optional<std::tuple<std::string, size_t, size_t>> UploadManager::parseLabel(const std::string& label)
 {
-    const std::string& label = dc->label();
-    logInfo << "DataChannel created: " << label;
+    try {
+        size_t first_dash = label.find(':');
+        size_t second_dash = label.find(':', first_dash + 1);
+        if (first_dash == std::string::npos || second_dash == std::string::npos || second_dash <= first_dash) {
+            logError << "Label format is incorrect: " << label;
+            return std::nullopt;
+        }
 
-    auto channelTaskOpt = findOrCreateTask(dc, initial_task, label);
-    if (!channelTaskOpt.has_value()) {
-        return;
+        std::string fileHash = label.substr(0, first_dash);
+        std::string offset_str = label.substr(first_dash + 1, second_dash - first_dash - 1);
+        std::string len_str = label.substr(second_dash + 1);
+
+        size_t offset = std::stoull(offset_str);
+        size_t end = std::stoull(len_str);
+        return std::make_tuple(fileHash, offset, end);
+    } catch (const std::exception& e) {
+        logError << "Failed to parse label: " << label << ", error: " << e.what();
+        return std::nullopt;
+    } catch (...) {
+        logError << "Unknown exception while parsing label: " << label;
+        return std::nullopt;
     }
-    auto channelTask = channelTaskOpt.value();
+}
 
-    setupOnOpenCallback(dc, channelTask);
-    setupOnBufferedAmountLowCallback(dc, channelTask);
-    setupOnMessageCallback(dc, channelTask);
-    setupOnClosedCallback(dc, channelTask);
+void UploadManager::run()
+{
+    logInfo << "UploadManager running";
+    while (!mStopFlag) {
+        try {
+            waitAllEvents(std::chrono::milliseconds(100));
+
+            // 处理活动任务
+            std::vector<UploadFileTaskPtr> activeTasks;
+            {
+                std::lock_guard<std::mutex> lock(mActiveTaskMutex);
+                mActiveTask.swap(activeTasks);
+            }
+
+            if (activeTasks.empty()) {
+                std::unique_lock<std::mutex> lock(mTaskMapMutex);
+                mCv.wait_for(lock, std::chrono::milliseconds(100));
+                continue;
+            }
+
+            for (auto task : activeTasks) {
+                if (task->Dc) {
+                    if (task->Dc->isOpen()) {
+                        performFileSending(task);
+                    }
+                }
+            }
+        } catch (const std::exception& e) {
+            logError << "Exception in run loop: " << e.what();
+        } catch (...) {
+            logError << "Unknown exception in run loop";
+        }
+    }
+    logInfo << "UploadManager exit";
 }
 
 NS_END

@@ -156,9 +156,6 @@ void P2PSingleTask::handleIncomingDataInternal(std::variant<std::vector<std::byt
 
         notify(shared_from_this());
 
-        double progress = static_cast<double>(Size()) / mTotalSize;
-        logDebug << "Received data. Progress: " << (progress * 100) << "%";
-
         if (Size() >= mTotalSize) {
             setStatus(DownloaderTask::Completed);
             notify(shared_from_this());

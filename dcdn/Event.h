@@ -85,18 +85,6 @@ struct RemoveFileArg
     std::string BlockHash;
 };
 
-struct UploadFileArg
-{
-    std::string PeerID;
-    std::string IceUfrag;
-    std::string IcePwd;
-    std::string RemoteSdp;
-
-    std::string FileHash;
-    size_t BlockStart;
-    size_t BlockEnd;
-};
-
 using FunctionEvent = ArgEvent<std::function<void()>>;
 
 inline std::shared_ptr<FunctionEvent> MakeFunctionEvent(std::function<void()> fn)
