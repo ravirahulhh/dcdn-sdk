@@ -29,6 +29,11 @@ typedef struct _DcdnUploadOption
     size_t MaxUploadSpeed; // BytesPerSecond, 0:unlimit
 } DcdnUploadOption;
 
+typedef struct _DcdnServerCfg {
+    const char* Api;
+    const char* Evt;
+    const char* Cmd;
+} DcdnServerCfg;
 
 typedef struct _DcdnDeviceInfo {
     char* Id;
@@ -51,6 +56,7 @@ typedef struct _DcdnInitOption
     DcdnDeviceInfo Device;
     DcdnDiskInfo Disk;
     DcdnUploadOption Upload;
+    DcdnServerCfg ServerCfg;
 } DcdnInitOption;
 
 typedef enum _DcdnProtocol {

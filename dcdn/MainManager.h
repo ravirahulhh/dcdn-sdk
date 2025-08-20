@@ -27,7 +27,9 @@ struct MainManagerOption
     std::string ApiKey;
     DcdnDeviceInfo DeviceInfo;
     DcdnDiskInfo DiskInfo;
+    DcdnServerCfg ServerCfg;
 };
+
 class DownloadManager;
 class MainManager: public BaseManager, public EventLoop<MainManager>
 {

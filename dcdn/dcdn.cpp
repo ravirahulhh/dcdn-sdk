@@ -14,6 +14,7 @@ int DcdnInit(const DcdnInitOption* opt)
     mopt.DeviceInfo = opt->Device;
     mopt.DeviceId = opt->Device.Id;
     mopt.DiskInfo = opt->Disk;
+    mopt.ServerCfg = opt->ServerCfg;
 
     logInfo << "init main_manager ...";
     int ret = MainManager::Init(mopt);

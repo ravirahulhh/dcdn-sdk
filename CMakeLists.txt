@@ -29,9 +29,9 @@ message(STATUS "OpenSSL libraries: ${OPENSSL_LIBRARIES}")
 
 include_directories(
         ${OPENSSL_INCLUDE_DIR}
-        ${CMAKE_SOURCE_DIR}/deps/src/libdatachannel-0.23.1/deps/json/include
-        ${CMAKE_SOURCE_DIR}
-        ${CMAKE_SOURCE_DIR}/deps/src/libdatachannel-0.23.1/deps/plog/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/deps/src/libdatachannel-0.23.1/deps/json/include
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/deps/src/libdatachannel-0.23.1/deps/plog/include
 )
 
 set(NO_EXAMPLES ON CACHE BOOL "Disable building datachannel examples" FORCE)

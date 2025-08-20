@@ -14,6 +14,11 @@ int main(int argc, char* argv[])
     opt.DeviceInfo = DcdnDeviceInfo{
         const_cast<char*>("device123"), const_cast<char*>("Linux"), const_cast<char*>("Linux"), 8, 16384};
     opt.DiskInfo = DcdnDiskInfo{1000000000, 800000000, 200000000};
+    opt.ServerCfg = DcdnServerCfg{
+        "https://api-pcdn.capell.io", // api
+        "https://api-pcdn.capell.io", // evt
+        "wss://cmd-pcdn.capell.io"    // cmd
+    };
     int ret = dcdn::MainManager::Init(opt);
     if (ret != 1) {
         logError << "Init MainManager fail";

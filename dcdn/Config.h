@@ -73,6 +73,25 @@ public:
             mKv["token"] = token;
         }
     }
+
+    void SetApiRootUrl(const std::string& url)
+    {
+        std::unique_lock<std::mutex> lck(mMtx);
+        if (url != mApiRootUrl) {
+            logDebug << "set api root url to " << url;
+            mApiRootUrl = url;
+        }
+    }
+
+    void SetWebSktUrl(const std::string& url)
+    {
+        std::unique_lock<std::mutex> lck(mMtx);
+        if (url != mWebSktUrl) {
+            logDebug << "set websocket url to " << url;
+            mWebSktUrl = url;
+        }
+    }
+
     unsigned WebRtcGatherPeriod() const
     {
         std::unique_lock<std::mutex> lck(mMtx);

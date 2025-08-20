@@ -24,12 +24,14 @@ int MainManager::Init(const MainManagerOption& opt)
     plog::init<DCDN_LOGGER_ID>(plog::debug, logFile.c_str());
     logInfo << "MainManager init";
     rtc::InitLogger(rtc::LogLevel::Debug);
+
     MainManager* n = nullptr;
     MainManager* m = new MainManager();
     if (!singlet.compare_exchange_strong(n, m)) {
         delete m;
         return 0;
     }
+
     return m->init(opt);
 }
 
@@ -64,6 +66,15 @@ MainManager::MainManager(): BaseManager(this)
 int MainManager::init(const MainManagerOption& opt)
 {
     mOpt = opt;
+    if ((mOpt.ServerCfg.Api != NULL) && (mOpt.ServerCfg.Api[0] != '\0')) {
+        logDebug << "[init] set opt.servercfg.api " << mOpt.ServerCfg.Api;
+        mCfg.SetApiRootUrl(mOpt.ServerCfg.Api);
+    }
+    if ((mOpt.ServerCfg.Cmd != NULL) && (mOpt.ServerCfg.Cmd[0] != '\0')) {
+        logDebug << "[init] set opt.servercfg.cmd " << mOpt.ServerCfg.Cmd;
+        mCfg.SetWebSktUrl(mOpt.ServerCfg.Cmd);
+    }
+
     int ret = mCfg.CreateTable(opt.WorkDir);
     if (ret != ErrorCodeOk) {
         logError << "init config fail";
