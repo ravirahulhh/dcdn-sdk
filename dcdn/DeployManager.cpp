@@ -13,7 +13,7 @@
 #include "Event.h"
 #include "MainManager.h"
 
-// ==== sqlite_orm 与 DeployStatus 枚举映射适配 START ====
+// sqlite_orm 与 DeployStatus 枚举映射适配 START
 namespace sqlite_orm {
 
 template<>
@@ -53,16 +53,34 @@ struct row_extractor<dcdn::DeployStatus>
 };
 
 } // namespace sqlite_orm
-// ==== sqlite_orm 与 DeployStatus 枚举映射适配 END ====
+// sqlite_orm 与 DeployStatus 枚举映射适配 END
 
 NS_BEGIN(dcdn)
 
-DeployManager::DeployManager(MainManager* man): BaseManager(man) {}
+DeployManager::DeployManager(MainManager* man): BaseManager(man), mShouldExit(false) {}
 
 DeployManager::~DeployManager()
 {
+    stop(); // 确保线程正确退出
+
     std::lock_guard<std::mutex> lock(mTaskMutex);
     mJobToTaskMap.clear();
+    mTaskToJobMap.clear();
+
+    std::lock_guard<std::mutex> eventLock(mEventMutex);
+    while (!mEventQueue.empty()) {
+        mEventQueue.pop();
+    }
+}
+
+void DeployManager::stop()
+{
+    mShouldExit = true;
+    mEventCond.notify_one(); // 唤醒等待的线程
+
+    if (mWorkerThread.joinable()) {
+        mWorkerThread.join();
+    }
 }
 
 int DeployManager::Init(const DeployManagerOption& opt)
@@ -72,11 +90,9 @@ int DeployManager::Init(const DeployManagerOption& opt)
         return 0;
     }
 
-    // 从option注入依赖
     mFileMgr = opt.fileMgr;
     mDownloadMgr = opt.downloadMgr;
 
-    // 校验依赖是否有效
     if (!mFileMgr) {
         logWarn << "FileManager instance is null in DeployManager";
         return -1;
@@ -86,13 +102,11 @@ int DeployManager::Init(const DeployManagerOption& opt)
         return -1;
     }
 
-    // 初始化数据库（改为主动加载，而非懒加载）
-    if (!initDB()) { // 新增：主动初始化数据库
+    if (!initDB()) {
         logError << "Failed to initialize database";
         return -1;
     }
 
-    // 初始化数据库表
     if (createTable() != 0) {
         logError << "DeployManager database initialization failed";
         return -1;
@@ -100,18 +114,15 @@ int DeployManager::Init(const DeployManagerOption& opt)
         logInfo << "DeployManager database initialized successfully";
     }
 
-    // 注册事件处理器
     registerHandler(EventType::DeployMsg, &DeployManager::handleDeployMsgEvent);
 
     mInited = true;
     return 0;
 }
 
-// 新增：主动初始化数据库实例
 bool DeployManager::initDB()
 {
     try {
-        // 直接创建数据库实例，而非懒加载
         auto storage = std::make_shared<DeployStorage>(makeDeployStorage(dbPath().string()));
         mDB = storage;
         logInfo << "Database instance created successfully at: " << dbPath().string();
@@ -124,7 +135,7 @@ bool DeployManager::initDB()
 
 int DeployManager::createTable()
 {
-    std::lock_guard<std::mutex> lock(mDbMutex); // 仅保护表结构同步
+    std::lock_guard<std::mutex> lock(mDbMutex);
 
     auto db = getDB();
     if (!db) {
@@ -141,7 +152,6 @@ int DeployManager::createTable()
     }
 }
 
-// 简化getDB：仅返回已初始化的实例，无需加锁（因为mDB仅在Init阶段赋值）
 DeployStoragePtr DeployManager::getDB()
 {
     return mDB;
@@ -153,21 +163,56 @@ void DeployManager::run()
         logError << "DeployManager not initialized, cannot run";
         return;
     }
+
+    // 启动工作线程
+    mWorkerThread = std::thread(&DeployManager::workerMain, this);
+    logInfo << "DeployManager worker thread started";
+    while (true) {
+        // Main loop only handles events, flush tasks are handled by separate threads
+        waitAllEvents(std::chrono::milliseconds(1000));
+    }
+}
+
+void DeployManager::workerMain()
+{
     // 重新提交未完成的任务
     resubmitDownloadTasks();
     logInfo << "DeployManager started";
-    while (true) {
-        checkDownloadStatus();
-        waitAllEvents(std::chrono::seconds(1));
+
+    // 事件处理循环
+    while (!mShouldExit) {
+        std::unique_lock<std::mutex> lock(mEventMutex);
+
+        // 等待事件或退出信号
+        mEventCond.wait(lock, [this]() { return !mEventQueue.empty() || mShouldExit; });
+
+        if (mShouldExit) {
+            break;
+        }
+
+        // 处理所有待处理事件
+        while (!mEventQueue.empty() && !mShouldExit) {
+            auto event = mEventQueue.front();
+            mEventQueue.pop();
+
+            // 解锁以允许新事件入队
+            lock.unlock();
+
+            // 处理任务状态变化
+            handleTaskStatusChange(event.taskId, event.fromStatus, event.toStatus);
+
+            // 重新加锁以检查下一个事件
+            lock.lock();
+        }
     }
-    logInfo << "DeployManager stopped";
+
+    logInfo << "DeployManager worker thread exited";
 }
 
 void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
 {
     logInfo << "Received DeployMsg event";
 
-    // 转换为包含JSON payload的事件类型
     auto* jsonEvent = static_cast<ArgEvent<json>*>(evt.get());
     if (!jsonEvent) {
         logWarn << "Invalid DeployMsg event: wrong argument type (expected ArgEvent<json>)";
@@ -175,7 +220,6 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
     }
 
     try {
-        // 获取JSON payload
         const json& payload = jsonEvent->Arg();
         logInfo << "Deploy message payload: " << payload.dump(2);
         if (!payload.contains("deploy_file") || !payload["deploy_file"].is_object()) {
@@ -184,7 +228,6 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
         }
 
         const json& deployFile = payload["deploy_file"];
-        // 解析必填字段job_id（下划线形式）
         std::string jobId;
         if (!deployFile.contains("job_id") || !deployFile["job_id"].is_string()) {
             logWarn << "DeployMsg missing required field: job_id";
@@ -196,7 +239,6 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
             return;
         }
 
-        // 解析file_hash和url（下划线形式）
         std::string fileHash;
         if (deployFile.contains("file_hash") && deployFile["file_hash"].is_string()) {
             fileHash = deployFile["file_hash"].get<std::string>();
@@ -207,14 +249,12 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
             url = deployFile["url"].get<std::string>();
         }
 
-        // 验证file_hash和url至少存在一个
         if (fileHash.empty() && url.empty()) {
             logWarn << "DeployMsg invalid: missing url or file_hash (job_id: " << jobId << ")";
             reportToServer(jobId, false);
             return;
         }
 
-        // 解析block_info（下划线形式的嵌套字段）
         std::string blockHash;
         uint64_t blockStart = 0;
         uint64_t blockEnd = 0;
@@ -232,14 +272,12 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
             }
         }
 
-        // 检查FileManager是否可用
         if (!mFileMgr) {
             logError << "FileManager is not available (job_id: " << jobId << ")";
             reportToServer(jobId, false);
             return;
         }
 
-        // 获取下载路径
         std::string downloadPath = mFileMgr->NewDownloadPath(blockEnd > blockStart ? blockEnd - blockStart : 0);
         if (downloadPath.empty()) {
             logWarn << "Failed to get download path (job_id: " << jobId << ")";
@@ -247,7 +285,6 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
             return;
         }
 
-        // 构建部署任务
         DeployTask task;
         task.jobId = jobId;
         task.fileHash = fileHash;
@@ -260,14 +297,12 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
         task.createTime = getCurrentTimestamp();
         task.updateTime = task.createTime;
 
-        // 保存任务
         if (!saveDeployTask(task)) {
             logWarn << "Failed to save deploy task (job_id: " << jobId << ")";
             reportToServer(jobId, false);
             return;
         }
 
-        // 检查DownloadManager是否可用
         if (!mDownloadMgr) {
             logError << "DownloadManager is not available (job_id: " << jobId << ")";
             updateDeployTaskStatus(jobId, DeployStatus::FAILED);
@@ -275,9 +310,12 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
             return;
         }
 
-        // 配置下载选项
         FileDownloadOptions opts;
         opts.OutputPath = downloadPath;
+        // 设置回调函数
+        opts.taskStateChangeEventCallback =
+            std::bind(&DeployManager::taskStateChangeEventCallback, this, std::placeholders::_1);
+
         if (task.blockStart > 0 || task.blockEnd > 0) {
             opts.HasRange = true;
             opts.RangeStart = task.blockStart;
@@ -288,7 +326,6 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
             opts.Strategy = DownloadStrategy::P2P_ONLY;
         }
 
-        // 添加下载任务
         uint64_t taskId = mDownloadMgr->AddDownloadTask(task.url, task.fileHash, opts);
         if (taskId == 0) {
             logWarn << "Failed to create download task (job_id: " << jobId << ")";
@@ -297,10 +334,10 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
             return;
         }
 
-        // 记录job与task的映射关系
         {
             std::lock_guard<std::mutex> lock(mTaskMutex);
             mJobToTaskMap[jobId] = taskId;
+            mTaskToJobMap[taskId] = jobId; // 记录反向映射
         }
         logInfo << "Deploy task initialized (job_id: " << jobId << ", taskId: " << taskId << ")";
 
@@ -311,58 +348,58 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
     }
 }
 
-void DeployManager::checkDownloadStatus()
+// 回调函数实现 - 仅负责将事件入队
+void DeployManager::taskStateChangeEventCallback(const dcdn::DMEvent& ev)
 {
-    logInfo << "Starting download status check";
+    if (auto* p = dynamic_cast<const dcdn::ETaskStatusChanged*>(&ev)) {
+        logInfo << "Task id :" << p->id << " status changed from:" << static_cast<int>(p->from)
+                << " to:" << static_cast<int>(p->to);
 
-    auto tasks = loadDownloadingTasks();
-    logInfo << "Loaded " << tasks.size() << " downloading tasks for status check";
+        // 将事件放入队列并唤醒工作线程
+        std::lock_guard<std::mutex> lock(mEventMutex);
+        mEventQueue.push({p->id, p->from, p->to});
+        mEventCond.notify_one();
+    }
+}
 
-    if (tasks.empty()) {
-        logInfo << "No downloading tasks to check, exiting status check";
+// 状态处理函数 - 在工作线程中执行
+void DeployManager::handleTaskStatusChange(uint64_t taskId, TaskStatus fromStatus, TaskStatus toStatus)
+{
+    logInfo << "Handling task status change - taskId: " << taskId << ", from: " << static_cast<int>(fromStatus)
+            << ", to: " << static_cast<int>(toStatus);
+
+    // 获取对应的任务
+    auto taskOpt = getTaskByTaskId(taskId);
+    if (!taskOpt.has_value()) {
+        logWarn << "No deploy task found for taskId: " << taskId;
         return;
     }
+    const auto& task = taskOpt.value();
 
-    if (!mDownloadMgr || !mFileMgr) {
-        logWarn << "FileManager or DownloadManager is unavailable, skip status check";
-        return;
-    }
+    switch (toStatus) {
+        case TaskStatus::Completed: {
+            logInfo << "Task (jobId: " << task.jobId << ") has completed downloading";
 
-    for (const auto& task : tasks) {
-        logInfo << "Checking status for task (jobId: " << task.jobId << ", fileHash: " << task.fileHash
-                << ", url: " << task.url << ", path: " << task.downloadPath << ")";
+            std::string localFileHash;
+            int hashError = calculateFileHash(task.downloadPath, localFileHash);
+            if (hashError != ErrorCodeOk) {
+                FileDownloadFailedArg failArg;
+                failArg.FilePath = task.downloadPath;
 
-        uint64_t taskId = 0;
-        {
-            std::lock_guard<std::mutex> lock(mTaskMutex);
-            auto it = mJobToTaskMap.find(task.jobId);
-            if (it == mJobToTaskMap.end()) {
-                logWarn << "No download task ID found for job: " << task.jobId;
-                continue;
+                mFileMgr->PostEvent(
+                    std::make_shared<ArgEvent<FileDownloadFailedArg>>(
+                        EventType::FileDownloadFailed, std::move(failArg)));
+
+                updateDeployTaskStatus(task.jobId, DeployStatus::FAILED);
+                logInfo << "Updated task status to FAILED (jobId: " << task.jobId << ")";
+                break;
             }
-            taskId = it->second;
-            logInfo << "Found corresponding download task ID: " << taskId << " for jobId: " << task.jobId;
-        }
 
-        auto downloadStatus = mDownloadMgr->GetTaskStatus(taskId);
-
-        double percent = 0.0;
-        if (downloadStatus.TotalSize > 0) {
-            percent = (100.0 * downloadStatus.Downloaded) / downloadStatus.TotalSize;
-        }
-        logInfo << "Current status for task taskId: " << taskId << "% "
-                << "percent: " << percent << "% "
-                << "Downloaded: " << downloadStatus.Downloaded << "/" << downloadStatus.TotalSize << " bytes "
-                << "Speed: " << downloadStatus.Speed / 1024.0 << " KB/s "
-                << "Status: " << static_cast<int>(downloadStatus.Status);
-
-        switch (downloadStatus.Status) {
-            case TaskStatus::Completed: {
-                logInfo << "Task (jobId: " << task.jobId << ") has completed downloading";
-
-                std::string localFileHash;
-                int hashError = calculateFileHash(task.downloadPath, localFileHash);
-                if (hashError != ErrorCodeOk) {
+            uint64_t blockEnd = task.blockEnd;
+            if (task.blockEnd == 0) {
+                uint64_t filesize;
+                int getFileSizeError = getFileSize(task.downloadPath, filesize);
+                if (getFileSizeError != ErrorCodeOk) {
                     FileDownloadFailedArg failArg;
                     failArg.FilePath = task.downloadPath;
 
@@ -374,108 +411,89 @@ void DeployManager::checkDownloadStatus()
                     logInfo << "Updated task status to FAILED (jobId: " << task.jobId << ")";
                     break;
                 }
-
-                uint64_t blockEnd = task.blockEnd;
-                if (task.blockEnd == 0) {
-                    uint64_t filesize;
-                    int getFileSizeError = getFileSize(task.downloadPath, filesize);
-                    if (getFileSizeError != ErrorCodeOk) {
-                        FileDownloadFailedArg failArg;
-                        failArg.FilePath = task.downloadPath;
-
-                        mFileMgr->PostEvent(
-                            std::make_shared<ArgEvent<FileDownloadFailedArg>>(
-                                EventType::FileDownloadFailed, std::move(failArg)));
-
-                        updateDeployTaskStatus(task.jobId, DeployStatus::FAILED);
-                        logInfo << "Updated task status to FAILED (jobId: " << task.jobId << ")";
-                        break;
-                    }
-                    blockEnd = task.blockStart + filesize;
-                }
-                std::string fileHash = task.fileHash;
-                if (task.blockStart == 0 && task.blockEnd == 0) {
-                    if (task.fileHash.empty()) {
-                        fileHash = localFileHash;
-                    } else if (!task.fileHash.empty() && task.fileHash != localFileHash) {
-                        logError << "File hash mismatch (jobId: " << task.jobId << ")";
-                        FileDownloadFailedArg failArg;
-                        failArg.FilePath = task.downloadPath;
-
-                        mFileMgr->PostEvent(
-                            std::make_shared<ArgEvent<FileDownloadFailedArg>>(
-                                EventType::FileDownloadFailed, std::move(failArg)));
-                        updateDeployTaskStatus(task.jobId, DeployStatus::FAILED);
-                        reportToServer(task.jobId, false);
-                        break;
-                    }
-                }
-
-                FileDownloadDoneArg doneArg;
-                doneArg.FileHash = fileHash;
-                doneArg.BlockInfo.Hash = localFileHash;
-                doneArg.BlockInfo.Start = task.blockStart;
-                doneArg.BlockInfo.End = blockEnd;
-                doneArg.Url = task.url;
-                doneArg.FilePath = task.downloadPath;
-
-                mFileMgr->PostEvent(
-                    std::make_shared<ArgEvent<FileDownloadDoneArg>>(EventType::FileDownloadDone, std::move(doneArg)));
-
-                updateDeployTaskStatus(task.jobId, DeployStatus::COMPLETED);
-                logInfo << "Updated task status to COMPLETED (jobId: " << task.jobId << ")";
-
-                {
-                    std::lock_guard<std::mutex> lock(mTaskMutex);
-                    mJobToTaskMap.erase(task.jobId);
-                }
-
-                reportToServer(task.jobId, true);
-                logInfo << "Deploy task completed (jobId: " << task.jobId << ")";
-                break;
+                blockEnd = task.blockStart + filesize;
             }
-            case TaskStatus::Failed:
-            case TaskStatus::Cancelled: {
-                logWarn << "Task (jobId: " << task.jobId << ") download failed or was cancelled with status: "
-                        << static_cast<int>(downloadStatus.Status);
+            std::string fileHash = task.fileHash;
+            if (task.blockStart == 0 && task.blockEnd == 0) {
+                if (task.fileHash.empty()) {
+                    fileHash = localFileHash;
+                } else if (!task.fileHash.empty() && task.fileHash != localFileHash) {
+                    logError << "File hash mismatch (jobId: " << task.jobId << ")";
+                    FileDownloadFailedArg failArg;
+                    failArg.FilePath = task.downloadPath;
 
-                FileDownloadFailedArg failArg;
-                failArg.FilePath = task.downloadPath;
-
-                mFileMgr->PostEvent(
-                    std::make_shared<ArgEvent<FileDownloadFailedArg>>(
-                        EventType::FileDownloadFailed, std::move(failArg)));
-
-                updateDeployTaskStatus(task.jobId, DeployStatus::FAILED);
-                logInfo << "Updated task status to FAILED (jobId: " << task.jobId << ")";
-
-                {
-                    std::lock_guard<std::mutex> lock(mTaskMutex);
-                    mJobToTaskMap.erase(task.jobId);
+                    mFileMgr->PostEvent(
+                        std::make_shared<ArgEvent<FileDownloadFailedArg>>(
+                            EventType::FileDownloadFailed, std::move(failArg)));
+                    updateDeployTaskStatus(task.jobId, DeployStatus::FAILED);
+                    reportToServer(task.jobId, false);
+                    break;
                 }
-
-                reportToServer(task.jobId, false);
-                logWarn << "Deploy task failed (jobId: " << task.jobId << ")";
-                break;
             }
-            default: {
-                logInfo << "Task (jobId: " << task.jobId
-                        << ") is still in progress with status: " << static_cast<int>(downloadStatus.Status);
 
-                DeployTask updateTask = task;
-                updateTask.updateTime = getCurrentTimestamp();
-                saveDeployTask(updateTask);
-                break;
+            FileDownloadDoneArg doneArg;
+            doneArg.FileHash = fileHash;
+            doneArg.BlockInfo.Hash = localFileHash;
+            doneArg.BlockInfo.Start = task.blockStart;
+            doneArg.BlockInfo.End = blockEnd;
+            doneArg.Url = task.url;
+            doneArg.FilePath = task.downloadPath;
+
+            mFileMgr->PostEvent(
+                std::make_shared<ArgEvent<FileDownloadDoneArg>>(EventType::FileDownloadDone, std::move(doneArg)));
+
+            updateDeployTaskStatus(task.jobId, DeployStatus::COMPLETED);
+            logInfo << "Updated task status to COMPLETED (jobId: " << task.jobId << ")";
+
+            {
+                std::lock_guard<std::mutex> lock(mTaskMutex);
+                mJobToTaskMap.erase(task.jobId);
+                mTaskToJobMap.erase(taskId);
             }
+
+            reportToServer(task.jobId, true);
+            logInfo << "Deploy task completed (jobId: " << task.jobId << ")";
+            break;
+        }
+        case TaskStatus::Failed:
+        case TaskStatus::Cancelled: {
+            logWarn << "Task (jobId: " << task.jobId
+                    << ") download failed or was cancelled with status: " << static_cast<int>(toStatus);
+
+            FileDownloadFailedArg failArg;
+            failArg.FilePath = task.downloadPath;
+
+            mFileMgr->PostEvent(
+                std::make_shared<ArgEvent<FileDownloadFailedArg>>(EventType::FileDownloadFailed, std::move(failArg)));
+
+            updateDeployTaskStatus(task.jobId, DeployStatus::FAILED);
+            logInfo << "Updated task status to FAILED (jobId: " << task.jobId << ")";
+
+            {
+                std::lock_guard<std::mutex> lock(mTaskMutex);
+                mJobToTaskMap.erase(task.jobId);
+                mTaskToJobMap.erase(taskId);
+            }
+
+            reportToServer(task.jobId, false);
+            logWarn << "Deploy task failed (jobId: " << task.jobId << ")";
+            break;
+        }
+        default: {
+            logInfo << "Task (jobId: " << task.jobId
+                    << ") is still in progress with status: " << static_cast<int>(toStatus);
+
+            DeployTask updateTask = task;
+            updateTask.updateTime = getCurrentTimestamp();
+            saveDeployTask(updateTask);
+            break;
         }
     }
-
-    logInfo << "Completed download status check for all tasks";
 }
 
 bool DeployManager::saveDeployTask(const DeployTask& task)
 {
-    std::lock_guard<std::mutex> lock(mDbMutex); // 保护写操作
+    std::lock_guard<std::mutex> lock(mDbMutex);
 
     auto db = getDB();
     if (!db) {
@@ -494,7 +512,7 @@ bool DeployManager::saveDeployTask(const DeployTask& task)
 
 bool DeployManager::updateDeployTaskStatus(const std::string& jobId, DeployStatus status)
 {
-    std::lock_guard<std::mutex> lock(mDbMutex); // 保护写操作
+    std::lock_guard<std::mutex> lock(mDbMutex);
 
     auto db = getDB();
     if (!db) {
@@ -521,7 +539,7 @@ bool DeployManager::updateDeployTaskStatus(const std::string& jobId, DeployStatu
 
 std::vector<DeployTask> DeployManager::loadDownloadingTasks()
 {
-    std::lock_guard<std::mutex> lock(mDbMutex); // 保护读操作（避免与写操作冲突）
+    std::lock_guard<std::mutex> lock(mDbMutex);
 
     auto db = getDB();
     if (!db) {
@@ -562,6 +580,9 @@ void DeployManager::resubmitDownloadTasks()
 
         FileDownloadOptions opts;
         opts.OutputPath = task.downloadPath;
+        opts.taskStateChangeEventCallback =
+            std::bind(&DeployManager::taskStateChangeEventCallback, this, std::placeholders::_1);
+
         if (task.blockStart > 0 || task.blockEnd > 0) {
             opts.HasRange = true;
             opts.RangeStart = task.blockStart;
@@ -575,6 +596,7 @@ void DeployManager::resubmitDownloadTasks()
         } else {
             std::lock_guard<std::mutex> lock(mTaskMutex);
             mJobToTaskMap[task.jobId] = taskId;
+            mTaskToJobMap[taskId] = task.jobId;
             logInfo << "Resubmitted task " << task.jobId << " with new task_id: " << taskId;
         }
     }
@@ -583,18 +605,54 @@ void DeployManager::resubmitDownloadTasks()
 void DeployManager::reportToServer(const std::string& jobId, bool success)
 {
     try {
-        // 将event定义为数组，并在其中添加事件对象
         json events = json::array();
         events.push_back({{"type", "deploy_result"}, {"kvs", {{"job_id", jobId}, {"code", success ? "1" : "-1"}}}});
 
         json request;
-        request["events"] = events; // 直接使用数组赋值
+        request["events"] = events;
 
         logInfo << "Reporting deploy result to server: " << request.dump();
         json response;
         mMan->AsyncApiPostWithToken(nullptr, "/api/v1/report_event", request, this, nullptr, nullptr);
     } catch (const std::exception& e) {
         logError << "Exception during report for job " << jobId << ": " << e.what();
+    }
+}
+
+std::optional<DeployTask> DeployManager::getTaskByTaskId(uint64_t taskId)
+{
+    std::string jobId;
+    {
+        std::lock_guard<std::mutex> lock(mTaskMutex);
+        auto it = mTaskToJobMap.find(taskId);
+        if (it == mTaskToJobMap.end()) {
+            return std::nullopt;
+        }
+        jobId = it->second;
+    }
+
+    return getTaskByJobId(jobId);
+}
+
+std::optional<DeployTask> DeployManager::getTaskByJobId(const std::string& jobId)
+{
+    std::lock_guard<std::mutex> lock(mDbMutex);
+    auto db = getDB();
+    if (!db) {
+        logError << "Database instance is null when getting task by jobId: " << jobId;
+        return std::nullopt;
+    }
+
+    try {
+        using namespace sqlite_orm;
+        auto tasks = db->get_all<DeployTask>(where(c(&DeployTask::jobId) == jobId));
+        if (tasks.empty()) {
+            return std::nullopt;
+        }
+        return tasks[0];
+    } catch (const std::exception& e) {
+        logError << "Get task by jobId failed (jobId: " << jobId << "): " << e.what();
+        return std::nullopt;
     }
 }
 

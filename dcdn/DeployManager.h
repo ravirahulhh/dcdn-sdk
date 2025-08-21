@@ -8,13 +8,13 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <queue>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "BaseManager.h"
 #include "DownloadManagerRefactor.h"
-// #include "DownloadManager.h"
 #include "EventLoop.h"
 #include "FileManager.h"
 #include "common/Common.h"
@@ -57,7 +57,6 @@ inline auto makeDeployStorage(const std::string& filename)
             make_column("block_start", &DeployTask::blockStart),
             make_column("block_end", &DeployTask::blockEnd),
             make_column("block_hash", &DeployTask::blockHash),
-            // 关键修改：强制 NOT NULL + 默认值，确保 extractor 不会遇到 NULL
             make_column("status", &DeployTask::status, not_null(), default_value(1)),
             make_column("download_path", &DeployTask::downloadPath),
             make_column("create_time", &DeployTask::createTime),
@@ -81,27 +80,31 @@ public:
     explicit DeployManager(MainManager* man);
     ~DeployManager() override;
 
-    // 新增初始化方法，通过option注入依赖
     int Init(const DeployManagerOption& opt);
 
 private:
     friend class EventLoop<DeployManager>;
 
-    // 新增：主动初始化数据库
     bool initDB();
     int createTable();
-    DeployStoragePtr getDB(); // 简化版getDB
+    DeployStoragePtr getDB();
 
     void run() override;
     void handleDeployMsgEvent(std::shared_ptr<Event> evt);
     void checkDownloadStatus();
 
+    void handleTaskStatusChange(uint64_t taskId, TaskStatus fromStatus, TaskStatus toStatus);
     bool saveDeployTask(const DeployTask& task);
     bool updateDeployTaskStatus(const std::string& jobId, DeployStatus status);
     std::vector<DeployTask> loadDownloadingTasks();
     void resubmitDownloadTasks();
 
     void reportToServer(const std::string& jobId, bool success);
+    std::optional<DeployTask> getTaskByTaskId(uint64_t taskId);
+    std::optional<DeployTask> getTaskByJobId(const std::string& jobId);
+
+    // 新增：下载任务状态变化回调
+    void taskStateChangeEventCallback(const DMEvent& ev);
 
     uint64_t getCurrentTimestamp() const
     {
@@ -119,25 +122,19 @@ private:
     int calculateFileHash(const std::string& filePath, std::string& hashResult)
     {
         int result = util::FileHash::CalculateFileHash(filePath, hashResult);
-
-        // 可以在这里添加额外的日志或处理逻辑
         if (result != ErrorCodeOk) {
             logError << "Failed to calculate file hash for: " << filePath << ", error code: " << result;
         }
-
-        return result; // 返回与内部调用相同的错误码
+        return result;
     }
 
     int getFileSize(const std::string& filePath, uint64_t& fileSize)
     {
         int result = util::FileHash::GetFileSize(filePath, fileSize);
-
-        // 添加额外的日志记录
         if (result != ErrorCodeOk) {
             logError << "Failed to get file size for: " << filePath << ", error code: " << result;
         }
-
-        return result; // 返回原始错误码
+        return result;
     }
 
 private:
@@ -146,9 +143,25 @@ private:
     std::shared_ptr<DownloadManager> mDownloadMgr;
     util::HttpClient mClient;
     std::mutex mTaskMutex;
-    std::mutex mDbMutex; // 普通锁即可，无需递归锁
+    std::mutex mDbMutex;
     std::unordered_map<std::string, uint64_t> mJobToTaskMap;
-    bool mInited = false; // 标记是否已初始化
+    std::unordered_map<uint64_t, std::string> mTaskToJobMap; // 补充反向映射的成员变量
+    bool mInited = false;
+
+    struct TaskStatusEvent
+    {
+        uint64_t taskId;
+        TaskStatus fromStatus;
+        TaskStatus toStatus;
+    };
+    std::queue<TaskStatusEvent> mEventQueue;
+    std::mutex mEventMutex;
+    std::condition_variable mEventCond;
+    std::thread mWorkerThread;
+    std::atomic<bool> mShouldExit{false};
+
+    void workerMain();
+    void stop();
 };
 
 NS_END
