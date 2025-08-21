@@ -13,10 +13,7 @@
 NS_BEGIN(dcdn)
 NS_BEGIN(download)
 
-P2PDownloader::P2PDownloader(const Option& option): mOption(option)
-{
-    Start();
-}
+P2PDownloader::P2PDownloader(MainManager* man, const Option& option): BaseManager(man), mOption(option) {}
 
 P2PDownloader::~P2PDownloader() {}
 
@@ -62,41 +59,46 @@ void P2PDownloader::AddTask(std::shared_ptr<util::DownloaderTask> task)
     post([p2pTask, this]() { addTask(p2pTask); });
 }
 
-void P2PDownloader::initPeerConnection(const P2PDownloaderTaskOption& request, std::shared_ptr<P2PSingleTask> task)
+std::optional<std::shared_ptr<rtc::PeerConnection>> P2PDownloader::initPeerConnection(
+    const P2PDownloaderTaskOption& request,
+    std::shared_ptr<P2PSingleTask> task)
 {
-    rtc::Configuration config;
-    config.enableIceUdpMux = true;
-    const auto cp = static_cast<WebRtcManager*>(MainManager::Singlet()->GetWebRtcManager().get())->Cert();
-    config.certificatePemFile = cp.certPem;
-    config.keyPemFile = cp.keyPem;
-    config.iceUfrag = request.IceUfrag;
-    config.icePwd = request.IcePwd;
-    auto ss = MainManager::Singlet()->Cfg().StunServers();
-    for (auto s : ss) {
-        auto idx = s.find(':');
-        if (idx == std::string::npos) {
-            continue;
+    try {
+        rtc::Configuration config;
+        config.enableIceUdpMux = true;
+        const auto cp = static_cast<WebRtcManager*>(mMan->GetWebRtcManager().get())->Cert();
+        config.certificatePemFile = cp.certPem;
+        config.keyPemFile = cp.keyPem;
+        config.iceUfrag = request.IceUfrag;
+        config.icePwd = request.IcePwd;
+        auto ss = mMan->Cfg().StunServers();
+        for (auto s : ss) {
+            auto idx = s.find(':');
+            if (idx == std::string::npos) {
+                continue;
+            }
+            std::string host = s.substr(0, idx);
+            int port = atoi(s.c_str() + idx + 1);
+            if (port > 0 && port < 65536) {
+                rtc::IceServer serv(host, port);
+                serv.type = rtc::IceServer::Type::Stun;
+                config.iceServers.push_back(serv);
+            }
         }
-        std::string host = s.substr(0, idx);
-        int port = atoi(s.c_str() + idx + 1);
-        if (port > 0 && port < 65536) {
-            rtc::IceServer serv(host, port);
-            serv.type = rtc::IceServer::Type::Stun;
-            config.iceServers.push_back(serv);
-        }
+
+        auto pc = std::make_shared<rtc::PeerConnection>(config);
+        pc->setRemoteDescription(request.PeerSdp);
+
+        logDebug << "manager registered task: " << task.get();
+
+        return pc;
+    } catch (const std::exception& ex) {
+        logError << "Exception in initPeerConnection: " << ex.what();
+        return std::nullopt;
+    } catch (...) {
+        logError << "Unknown exception in initPeerConnection";
+        return std::nullopt;
     }
-
-    auto pc = std::make_shared<rtc::PeerConnection>(config);
-    pc->setRemoteDescription(request.PeerSdp);
-
-    {
-        std::lock_guard<std::mutex> lock(mMutex);
-        mPeerConnections[request.PeerID] = pc;
-    }
-
-    addSingleTask(pc, request, task);
-
-    logDebug << "manager registered task: " << task.get();
 }
 
 void P2PDownloader::CancelTask(std::shared_ptr<util::DownloaderTask> task)
@@ -133,7 +135,7 @@ void P2PDownloader::run()
                 break;
             }
 
-            task = std::move(mThreadTaskQueue.front());
+            task = mThreadTaskQueue.front();
             mThreadTaskQueue.pop_front();
         }
 
@@ -150,7 +152,7 @@ void P2PDownloader::onTaskDataReceived(
     task->handleIncomingDataInternal(std::move(data));
 }
 
-void P2PDownloader::addTask(std::shared_ptr<P2PSingleTask> task)
+bool P2PDownloader::addTask(std::shared_ptr<P2PSingleTask> task)
 {
     std::shared_ptr<rtc::PeerConnection> peerConn;
     bool needInit = false;
@@ -166,28 +168,56 @@ void P2PDownloader::addTask(std::shared_ptr<P2PSingleTask> task)
 
     if (needInit) {
         logDebug << "create task init connection init for peer: " << task->mTaskOpt.PeerID;
-        initPeerConnection(std::move(task->mTaskOpt), task);
-    } else {
-        addSingleTask(peerConn, task->mTaskOpt, task);
-        logDebug << "create task without init connection" << task->mTaskOpt.PeerID;
+        auto pcValue = initPeerConnection(std::move(task->mTaskOpt), task);
+        if (!pcValue.has_value()) {
+            task->setStatus(P2PSingleTask::DownloaderTask::Fail);
+            logError << "Failed to initialize PeerConnection for task: " << task->mTaskOpt.PeerID;
+            return false;
+        }
+        peerConn = pcValue.value();
+
+        {
+            std::lock_guard<std::mutex> lock(mMutex);
+            mPeerConnections[task->mTaskOpt.PeerID] = peerConn;
+        }
     }
+    logDebug << "create task without init connection" << task->mTaskOpt.PeerID;
+    if (!addSingleTask(peerConn, task->mTaskOpt, task)) {
+        task->setStatus(P2PSingleTask::DownloaderTask::Fail);
+        logError << "Failed to add P2PSingleTask for peer: " << task->mTaskOpt.PeerID;
+    }
+    logDebug << "P2PSingleTask added successfully for peer: " << task->mTaskOpt.PeerID;
+    return true;
 }
 
-void P2PDownloader::addSingleTask(
+bool P2PDownloader::addSingleTask(
     std::shared_ptr<rtc::PeerConnection> pc,
     const P2PDownloaderTaskOption& request,
     std::shared_ptr<P2PSingleTask> task)
 {
-    std::string label = request.ContentHash + ":" + std::to_string(request.Start) + ":" + std::to_string(request.End);
-    logInfo << "create data channel label: " << label;
-    auto dc = pc->createDataChannel(label);
+    try {
+        std::string label =
+            request.ContentHash + ":" + std::to_string(request.Start) + ":" + std::to_string(request.End);
+        logInfo << "create data channel label: " << label;
+        auto dc = pc->createDataChannel(label);
 
-    auto taskParams = TaskParam{request.ContentHash, request.Start, request.End};
-    task->Init(taskParams, dc);
+        auto taskParams = TaskParam{request.ContentHash, request.Start, request.End};
+        task->Init(taskParams, dc);
 
-    {
-        std::lock_guard<std::mutex> lock(mMutex);
-        mTasks[task.get()] = task;
+        {
+            std::lock_guard<std::mutex> lock(mMutex);
+            mTasks[task.get()] = task;
+        }
+
+        return true;
+    } catch (const std::exception& ex) {
+        logError << "Exception in addSingleTask: " << ex.what();
+        task->setStatus(P2PSingleTask::DownloaderTask::Fail);
+        return false;
+    } catch (...) {
+        logError << "Unknown exception in addSingleTask";
+        task->setStatus(P2PSingleTask::DownloaderTask::Fail);
+        return false;
     }
 }
 

@@ -13,7 +13,7 @@
 #include <string>
 #include <unordered_map>
 
-#include "Cert.h"
+#include "BaseManager.h"
 #include "util/Downloader.h"
 
 NS_BEGIN(dcdn)
@@ -32,7 +32,7 @@ struct P2PDownloaderTaskOption: public util::DownloaderTaskOption
     size_t End = 0;
 };
 
-class P2PDownloader: public util::BaseDownloader
+class P2PDownloader: public BaseManager, public util::BaseDownloader
 {
 public:
     class Option: public util::DownloaderOption
@@ -42,7 +42,7 @@ public:
         std::string MaxPeerConnectionIdleTime;
     };
 
-    explicit P2PDownloader(const Option& option);
+    explicit P2PDownloader(MainManager* man, const Option& option);
     P2PDownloader(P2PDownloader&&) = delete;
     P2PDownloader& operator=(P2PDownloader&&) = delete;
     ~P2PDownloader();
@@ -55,14 +55,17 @@ public:
     void PauseTask(std::shared_ptr<util::DownloaderTask> task) override;
     void ResumeTask(std::shared_ptr<util::DownloaderTask> task) override;
 
+    using util::BaseDownloader::Start;
+    using util::BaseDownloader::Thread;
+
 private:
     friend class P2PSingleTask;
     void onTaskDataReceived(
         std::shared_ptr<P2PSingleTask> task,
         std::variant<std::vector<std::byte>, std::string>&& data);
 
-    void addTask(std::shared_ptr<P2PSingleTask> task);
-    void addSingleTask(
+    bool addTask(std::shared_ptr<P2PSingleTask> task);
+    bool addSingleTask(
         std::shared_ptr<rtc::PeerConnection> pc,
         const P2PDownloaderTaskOption& request,
         std::shared_ptr<P2PSingleTask> task);
@@ -70,7 +73,9 @@ private:
     void pauseTask(std::shared_ptr<util::DownloaderTask> task);
     void resumeTask(std::shared_ptr<util::DownloaderTask> task);
 
-    void initPeerConnection(const P2PDownloaderTaskOption& taskOpt, std::shared_ptr<P2PSingleTask> task);
+    std::optional<std::shared_ptr<rtc::PeerConnection>> initPeerConnection(
+        const P2PDownloaderTaskOption& taskOpt,
+        std::shared_ptr<P2PSingleTask> task);
 
     void post(std::function<void()>&& task);
     void run() override;
@@ -78,6 +83,8 @@ private:
 private:
     Option mOption;
     mutable std::mutex mMutex;
+
+    using util::BaseDownloader::mThread;
 
     std::unordered_map<std::string, std::shared_ptr<rtc::PeerConnection>> mPeerConnections;
     std::unordered_map<const util::DownloaderTask*, std::shared_ptr<P2PSingleTask>> mTasks;

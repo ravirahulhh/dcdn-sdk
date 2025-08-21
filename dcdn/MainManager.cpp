@@ -40,7 +40,7 @@ MainManager::MainManager(): BaseManager(this)
     mHttpDownloader = std::make_shared<util::HttpDownloader>();
     download::P2PDownloader::Option p2pOpt;
     p2pOpt.ConnectionTimeout = "30";
-    mP2pDownloader = std::make_unique<download::P2PDownloader>(p2pOpt);
+    mP2pDownloader = std::make_unique<download::P2PDownloader>(this, p2pOpt);
     mApiClient = std::make_shared<ApiClient>(mHttpDownloader.get());
 
     mWebSkt = std::make_shared<WebSocketManager>(this);

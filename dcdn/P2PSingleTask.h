@@ -56,6 +56,7 @@ public:
     void HandleIncomingData(std::variant<std::vector<std::byte>, std::string>&& data);
 
 private:
+    void postState(DownloaderTask::StatusType newState);
     void handleIncomingDataInternal(std::variant<std::vector<std::byte>, std::string>&& data);
 
 private:

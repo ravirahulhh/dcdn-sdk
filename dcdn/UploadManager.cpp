@@ -243,7 +243,7 @@ void UploadManager::performFileSending(UploadFileTaskPtr task)
     try {
         while (task->Dc->bufferedAmount() < mMaxBufferedAmount.load() &&
                task->GetState() == UploadFileTask::State::Running) {
-            size_t totalBytesInBlock = (task->BlockEnd - task->BlockStart) + 1;
+            size_t totalBytesInBlock = (task->FileEnd - task->FileOffset) + 1;
             size_t remainingBytes = totalBytesInBlock - task->BytesSent;
 
             if (remainingBytes > 0) {
@@ -269,8 +269,12 @@ void UploadManager::performFileSending(UploadFileTaskPtr task)
                 }
             }
 
+            logInfo << "Uploading to peer: " << task->PeerID << " file: " << task->FileHash
+                    << " progress: " << task->BytesSent << "/" << totalBytesInBlock;
+
             if (task->BytesSent >= totalBytesInBlock) {
-                logDebug << "File transfer completed: " << task->Label();
+                logDebug << "File transfer completed, send TRANSFER_COMPLETE to " << task->Label();
+                task->Dc->send("TRANSFER_COMPLETE");
                 task->SetState(UploadFileTask::State::Completed);
                 removeActiveTask(task->TaskID);
             }

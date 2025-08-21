@@ -139,7 +139,7 @@ private:
     unsigned mWebSktConnectTimeout = 60; // seconds
     bool mWebSktDisableTlsVerification = true;
 
-    std::atomic_uint64_t mUploadRate = 1024 * 1024; // bytes per second
+    std::atomic_uint64_t mUploadRate = 10 * 1024 * 1024; // bytes per second
 
     std::unordered_map<std::string, std::string> mKv;
 };

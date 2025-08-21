@@ -21,6 +21,14 @@ P2PSingleTask::~P2PSingleTask()
     Cancel();
 }
 
+void P2PSingleTask::postState(DownloaderTask::StatusType newState)
+{
+    mManager->post([=]() {
+        setStatus(newState);
+        notify(shared_from_this());
+    });
+}
+
 void P2PSingleTask::Init(TaskParam param, std::shared_ptr<rtc::DataChannel> dc)
 {
     if (Status() != DownloaderTask::Idle) {
@@ -46,8 +54,7 @@ void P2PSingleTask::Init(TaskParam param, std::shared_ptr<rtc::DataChannel> dc)
     mDc->onClosed([this]() {
         logWarn << "DataChannel closed for task: " << mContentHash;
         if (this->Status() != DownloaderTask::Completed) {
-            this->setStatus(DownloaderTask::Fail);
-            this->notify(shared_from_this());
+            postState(DownloaderTask::Fail);
         }
     });
 
@@ -61,10 +68,8 @@ void P2PSingleTask::Start()
         return;
     }
 
-    setStatus(DownloaderTask::Running);
-    notify(shared_from_this());
-
     logDebug << "Started P2PSingleTask. TaskId: " << mTaskID;
+    postState(DownloaderTask::Running);
 }
 
 bool P2PSingleTask::Pause()
@@ -135,48 +140,41 @@ void P2PSingleTask::HandleIncomingData(std::variant<std::vector<std::byte>, std:
 
 void P2PSingleTask::handleIncomingDataInternal(std::variant<std::vector<std::byte>, std::string>&& data)
 {
-    if (Status() == DownloaderTask::Fail || Status() == DownloaderTask::Cancelled) {
-        return;
-    }
-
     if (std::holds_alternative<std::vector<std::byte>>(data)) {
-        const auto& bytes = std::get<std::vector<std::byte>>(data);
+        auto& bytes = std::get<std::vector<std::byte>>(data);
 
         if (bytes.empty()) {
             return;
         }
-
-        // 使用绝对偏移量（任务起始位置 + 已下载大小）
         uint64_t currentOffset = mStart + mDownloaded;
         auto buf = std::make_shared<util::DownloaderTaskContainerBuffer<std::vector<std::byte>>>();
-        buf->Set(currentOffset, bytes.begin(), bytes.end()); // 使用绝对偏移
-
-        append(buf); // add to task buffer
-        mDownloaded += bytes.size();
+        buf->Set(currentOffset, std::move(bytes));
+        append(buf);
+        mDownloaded += buf->Length();
 
         notify(shared_from_this());
 
-        if (Size() >= mTotalSize) {
-            setStatus(DownloaderTask::Completed);
-            notify(shared_from_this());
+        if (mEnd > 0 && Size() >= mTotalSize) {
+            postState(DownloaderTask::Completed);
         }
     } else if (std::holds_alternative<std::string>(data)) {
         const std::string& msg = std::get<std::string>(data);
 
-        if (msg == "PAUSE_ACK") {
-            setStatus(DownloaderTask::Paused);
+        if (msg == "TRANSFER_COMPLETE") {
+            postState(DownloaderTask::Completed);
+            logDebug << "Received TRANSFER_COMPLETE. TaskId: " << mTaskID;
+        } else if (msg == "PAUSE_ACK") {
+            postState(DownloaderTask::Paused);
             logDebug << "Received PAUSE_ACK. TaskId: " << mTaskID;
         } else if (msg == "CANCEL_ACK") {
-            setStatus(DownloaderTask::Cancelled);
+            postState(DownloaderTask::Cancelled);
             logDebug << "Received CANCEL_ACK. TaskId: " << mTaskID;
         } else if (msg.find("ERROR") != std::string::npos) {
-            setStatus(DownloaderTask::Fail);
+            postState(DownloaderTask::Fail);
             logDebug << "Received ERROR. TaskId: " << mTaskID << ", errmesg: " << msg;
         } else {
             logWarn << "Unhandled control message: " << msg;
         }
-
-        notify(shared_from_this());
     }
 }
 
