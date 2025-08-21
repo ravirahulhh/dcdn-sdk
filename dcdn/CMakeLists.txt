@@ -8,7 +8,8 @@ find_package(OpenSSL REQUIRED)
 add_library(dcdn  STATIC 
     dcdn.cpp
     Cert.cpp		
-    DownloadManager.cpp	
+    # DownloadManager.cpp	
+    DownloadManagerRefactor.cpp	
     FileManager.cpp		
     MainManager.cpp		
     UploadManager.cpp	

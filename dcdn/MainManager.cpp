@@ -207,13 +207,13 @@ void MainManager::run()
     login();
 
     logDebug << "connect to cmd channel ...";
-    mWebSkt->Start();
+    // mWebSkt->Start();
     logDebug << "connect to cmd channel OK";
 
-    mWebRtc->Start();
-    mFileMgr->Start();
-    mUploadMgr->Start();
-    mDeployMgr->Start();
+    // mWebRtc->Start();
+    // mFileMgr->Start();
+    // mUploadMgr->Start();
+    // mDeployMgr->Start();
     mDownloadMgr->Start();
     while (true) {
         waitAllEvents(std::chrono::milliseconds(1000));

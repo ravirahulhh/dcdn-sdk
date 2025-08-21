@@ -6,7 +6,7 @@
 #include <iostream>
 #include <thread>
 
-#include "DownloadManager.h"
+#include "DownloadManagerRefactor.h"
 #include "MainManager.h"
 #include "WebRtcManager.h"
 
@@ -19,11 +19,11 @@ int main()
     // plog::init<DCDN_LOGGER_ID>(lvl, consoleAppender);
     plog::init<DCDN_LOGGER_ID>(lvl, &consoleAppender);
     dcdn::MainManagerOption opt;
-    opt.WorkDir = "./data2";
+    opt.WorkDir = "./data";
     opt.ApiKey = "123456";
-    opt.DeviceId = "device1234";
+    opt.DeviceId = "device3122";
     opt.DeviceInfo = DcdnDeviceInfo{
-        const_cast<char*>("device1234"), const_cast<char*>("Linux"), const_cast<char*>("Linux"), 8, 16384};
+        const_cast<char*>("device3122"), const_cast<char*>("Linux"), const_cast<char*>("Linux"), 8, 16384};
     opt.DiskInfo = DcdnDiskInfo{1000000000, 800000000, 200000000};
     opt.ServerCfg = DcdnServerCfg{
         "https://api-pcdn.capell.io", // api
@@ -60,16 +60,16 @@ int main()
     dcdn::FileDownloadOptions opts;
     opts.OutputPath = "chunk.bin";
     opts.HasRange = true;
-    opts.RangeStart = 2164379;
+    opts.RangeStart = 0;
     // opts.RangeEnd = 4164379-1;
     // opts.RangeEnd = 2097152 - 1;
-    opts.RangeEnd = 4164379-1;
+    // opts.RangeEnd = 4164379-1;
     opts.WriteRangeToSeparateFile = true; // 默认即为 true
     opts.Strategy = dcdn::DownloadStrategy::P2P_ONLY;
 #ifdef DEBUG_LOCAL_P2P
     auto taskId = mgr->AddDownloadTask("", "cd4a7faf4ed9cd3486cb08ff1dcfd040", opts);
 #else
-    auto taskId = mgr->AddDownloadTask("", "ARe7QLIlCJ7l6UB9kxqN985wE6kT", opts);
+    auto taskId = mgr->AddDownloadTask("", "AXKXNz-vQ9V2YRLZTZLen8aO1CgB", opts);
 #endif
 
     // auto taskId = mgr->AddDownloadTask("", "AXKXNz-vQ9V2YRLZTZLen8aO1CgB", opts);
