@@ -72,8 +72,6 @@ auto createFileStorage(const std::string& filename)
     try {
         auto storage = make_storage(
             filename,
-            make_index("idx_file_start", &FileItem::fileHash, &FileItem::blockStart),
-            make_index("idx_last_report", &FileItem::lastReport),
             make_table(
                 "files",
                 make_column("id", &FileItem::id, primary_key().autoincrement()),
@@ -279,7 +277,7 @@ int FileManager::createTable()
         block_end INTEGER,
         last_access INTEGER,
         last_report INTEGER,
-        create_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_file_hash ON files(file_hash);
         CREATE INDEX IF NOT EXISTS idx_block_start ON files(block_start);
