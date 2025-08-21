@@ -101,6 +101,8 @@ struct FileDownloadOptions
     // 策略与并发
     DownloadStrategy Strategy = DownloadStrategy::HTTP_ONLY;
     size_t MaxConcurrent = 4;
+
+    IEventBus::Handler taskStateChangeEventCallback;
 };
 
 struct DownloadTask
@@ -164,28 +166,29 @@ struct PeerChunk
 // ===================== 领域事件（供上层订阅/总线分发） =====================
 struct DMEvent
 {
+    TaskId id;
+    DMEvent(TaskId id) : id(id) {}
     virtual ~DMEvent() = default;
 };
-struct ETaskStatusChanged: DMEvent
+
+struct ETaskStatusChanged: public DMEvent
 {
-    TaskId id;
     TaskStatus from;
     TaskStatus to;
-    ETaskStatusChanged(TaskId id, TaskStatus from, TaskStatus to): id(id), from(from), to(to) {}
+    ETaskStatusChanged(TaskId id, TaskStatus from, TaskStatus to): DMEvent(id), from(from), to(to) {}
 };
+
 struct ETaskProgress: DMEvent
 {
-    TaskId id;
     size_t downloaded;
     size_t total;
-    ETaskProgress(TaskId id, size_t downloaded, size_t total): id(id), downloaded(downloaded), total(total) {}
+    ETaskProgress(TaskId id, size_t downloaded, size_t total): DMEvent(id), downloaded(downloaded), total(total) {}
 };
 struct EBufferReady: DMEvent
 {
-    TaskId id;
     size_t start;
     size_t end;
-    EBufferReady(TaskId id, size_t start, size_t end): id(id), start(start), end(end) {}
+    EBufferReady(TaskId id, size_t start, size_t end): DMEvent(id), start(start), end(end) {}
 };
 struct EChunkScheduled: DMEvent
 {
@@ -194,21 +197,19 @@ struct EChunkScheduled: DMEvent
         HTTP,
         P2P
     } via;
-    TaskId id;
     size_t start;
     size_t end;
     size_t index;
     EChunkScheduled(Via via, TaskId id, size_t start, size_t end, size_t index)
-        : via(via), id(id), start(start), end(end), index(index)
+        : via(via), DMEvent(id), start(start), end(end), index(index)
     {
     }
 };
 struct ETaskError: DMEvent
 {
-    TaskId id;
     int code;
     std::string message;
-    ETaskError(TaskId id, int code, const std::string& message): id(id), code(code), message(message) {}
+    ETaskError(TaskId id, int code, const std::string& message): DMEvent(id), code(code), message(message) {}
 };
 
 namespace util {

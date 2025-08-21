@@ -63,24 +63,33 @@ int main()
     opt.WriteRangeToSeparateFile = true; // 默认即为 true
 
     // 订阅模式：状态/进度更新通知(注意要在添加任务前订阅，否则可能会丢失部分通知)
-    auto sid = mgr->Subscribe([](const dcdn::DMEvent& ev) {
-        if (auto* e = dynamic_cast<const dcdn::ETaskStatusChanged*>(&ev)) {
-            // e->id, e->from, e->to
-            std::cout << "ETaskStatusChanged from:" << static_cast<int>(e->from) << " to:" << static_cast<int>(e->to)
-                      << "Task Id :" << e->id << std::endl;
-        } else if (auto* p = dynamic_cast<const dcdn::ETaskProgress*>(&ev)) {
-            // p->id, p->downloaded, p->total
-            // std::cout << "ETaskProgress downloaded:" << p->downloaded << " total:" << p->total 
-            //           << "Task Id :" << p->id << std::endl;
-            if (p->downloaded == p->total) {
-                std::cout << "下载完成" << std::endl;
-            }
-        }
-    });
+    // auto sid = mgr->Subscribe([](const dcdn::DMEvent& ev) {
+    //     if (auto* e = dynamic_cast<const dcdn::ETaskStatusChanged*>(&ev)) {
+    //         // e->id, e->from, e->to
+    //         std::cout << "ETaskStatusChanged from:" << static_cast<int>(e->from) << " to:" << static_cast<int>(e->to)
+    //                   << "Task Id :" << e->id << std::endl;
+    //     } else if (auto* p = dynamic_cast<const dcdn::ETaskProgress*>(&ev)) {
+    //         // p->id, p->downloaded, p->total
+    //         // std::cout << "ETaskProgress downloaded:" << p->downloaded << " total:" << p->total 
+    //         //           << "Task Id :" << p->id << std::endl;
+    //         if (p->downloaded == p->total) {
+    //             std::cout << "下载完成" << std::endl;
+    //         }
+    //     }
+    // });
     //  取消订阅
     // std::this_thread::sleep_for(std::chrono::seconds(6));
     // std::cout << "cancel subscribe" << std::endl;
     // mgr->Unsubscribe(sid);
+
+    opt.taskStateChangeEventCallback = [](const dcdn::DMEvent& ev) {
+        if (auto* p = dynamic_cast<const dcdn::ETaskStatusChanged*>(&ev)) {
+            std::cout << "task id :" << p->id << "status changed from:" << static_cast<int>(p->from) << " to:" << static_cast<int>(p->to) << std::endl;
+            if (p->to == dcdn::TaskStatus::Completed) {
+                std::cout << "下载完成" << std::endl;
+            }
+        }
+    };
 
     auto taskId = mgr->AddDownloadTask(url, "", opt);
     std::cout << "任务已创建，taskId = " << taskId << std::endl;

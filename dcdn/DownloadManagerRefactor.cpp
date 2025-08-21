@@ -1701,15 +1701,22 @@ TaskId DownloadManager::AddDownloadTask(
     auto prom = std::make_shared<std::promise<TaskId>>();
     auto fut = prom->get_future();
 
-    this->PostEvent(
-        std::make_shared<ArgEvent<std::function<void()>>>(
-            EventType::FunctionCall, [this, prom, url, contentHash, options]() {
-                // FSM 创建任务并启动流程
-                applyFsm_(0, CmdAdd{url, contentHash, options});
-                // FSM 写入的成员取回 taskId
-                TaskId idRet = mLastCreatedTaskId.load(std::memory_order_acquire);
-                prom->set_value(idRet);
-            }));
+    this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(
+        EventType::FunctionCall, [this, prom, url, contentHash, options = options]() {
+            // FSM 创建任务并启动流程
+            applyFsm_(0, CmdAdd{url, contentHash, options});
+            // FSM 写入的成员取回 taskId
+            TaskId idRet = mLastCreatedTaskId.load(std::memory_order_acquire);
+            prom->set_value(idRet);
+
+            if (options.taskStateChangeEventCallback){
+                Subscribe([idRet, options](const DMEvent& ev) {
+                    if (ev.id == idRet){
+                        options.taskStateChangeEventCallback(ev);
+                    }
+                });
+            }
+        }));
 
     return fut.get();
 }
