@@ -32,27 +32,27 @@ void P2PSingleTask::postState(DownloaderTask::StatusType newState)
 void P2PSingleTask::Init(TaskParam param, std::shared_ptr<rtc::DataChannel> dc)
 {
     if (Status() != DownloaderTask::Idle) {
-        logWarn << "P2PSingleTask is not idle, init abort, task content hash: " << param.ContentHash
+        logWarn << "P2PSingleTask is not idle, init abort, task file hash: " << param.FileHash
                 << ", start: " << param.Start << ", end: " << param.End;
         return;
     }
 
-    mContentHash = param.ContentHash;
+    mFileHash = param.FileHash;
     mStart = param.Start;
     mEnd = param.End;
     mTotalSize = param.End - param.Start;
     mDc = dc;
 
-    logDebug << "P2PSingleTask init, task content hash: " << param.ContentHash << ", start: " << param.Start
+    logDebug << "P2PSingleTask init, task file hash: " << param.FileHash << ", start: " << param.Start
              << ", end: " << param.End << ", total size: " << mTotalSize;
 
     mDc->onOpen([this]() {
-        logDebug << "DataChannel opened for task: " << mContentHash;
+        logDebug << "DataChannel opened for task: " << mFileHash;
         this->Start();
     });
 
     mDc->onClosed([this]() {
-        logWarn << "DataChannel closed for task: " << mContentHash;
+        logWarn << "DataChannel closed for task: " << mFileHash;
         if (this->Status() != DownloaderTask::Completed) {
             postState(DownloaderTask::Fail);
         }

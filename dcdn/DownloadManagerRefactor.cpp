@@ -928,7 +928,7 @@ void DownloadManager::applyFsm_(TaskId id, const TaskFailed& ev)
         std::lock_guard<std::mutex> lk(mTasksMutex);
         auto it = mTasks.find(id);
         if (it != mTasks.end()) {
-            transition_(id,TaskStatus::Failed);
+            transition_(id, TaskStatus::Failed);
             it->second.Status = TaskStatus::Failed;
         }
     }
@@ -1651,18 +1651,18 @@ bool DownloadManager::startOneP2PChunk_(TaskId id, const PeerChunk& pc)
 #ifdef DEBUG_LOCAL_P2P
     opt.IceUfrag = "kul9";
     opt.IcePwd = "HArM7vdA12b4f+NrSE1hMu";
-    opt.ContentHash = "cd4a7faf4ed9cd3486cb08ff1dcfd040";
+    opt.FileHash = "cd4a7faf4ed9cd3486cb08ff1dcfd040";
 #else
     opt.IceUfrag = pc.iceUfrag;
     opt.IcePwd = pc.icePwd;
-    opt.ContentHash = pc.hash;
+    opt.FileHash = pc.hash;
 #endif
     opt.Start = pc.start;
     opt.End = pc.end;
     opt.Notify = &DownloadManager::coreNotifyCallbackP2p;
     opt.Receiver = this;
     logDebug << "[P2P] CreateTask " << pc.start << "-" << pc.end << "iceUfrag = " << opt.IceUfrag
-             << " icePwd = " << opt.IcePwd << " hash = " << opt.ContentHash << "remote sdp = " << pc.remoteSdp;
+             << " icePwd = " << opt.IcePwd << " hash = " << opt.FileHash << "remote sdp = " << pc.remoteSdp;
     auto sub = mDeps.p2p->CreateTask(&opt);
     if (!sub) {
         logWarn << "[P2P] CreateTask failed " << pc.start << "-" << pc.end;
@@ -1701,14 +1701,15 @@ TaskId DownloadManager::AddDownloadTask(
     auto prom = std::make_shared<std::promise<TaskId>>();
     auto fut = prom->get_future();
 
-    this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(
-        EventType::FunctionCall, [this, prom, url, contentHash, options]() {
-            // FSM 创建任务并启动流程
-            applyFsm_(0, CmdAdd{url, contentHash, options});
-            // FSM 写入的成员取回 taskId
-            TaskId idRet = mLastCreatedTaskId.load(std::memory_order_acquire);
-            prom->set_value(idRet);
-        }));
+    this->PostEvent(
+        std::make_shared<ArgEvent<std::function<void()>>>(
+            EventType::FunctionCall, [this, prom, url, contentHash, options]() {
+                // FSM 创建任务并启动流程
+                applyFsm_(0, CmdAdd{url, contentHash, options});
+                // FSM 写入的成员取回 taskId
+                TaskId idRet = mLastCreatedTaskId.load(std::memory_order_acquire);
+                prom->set_value(idRet);
+            }));
 
     return fut.get();
 }

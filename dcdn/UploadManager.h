@@ -94,7 +94,7 @@ struct UploadFileTask
     std::shared_ptr<rtc::DataChannel> Dc;
 
     size_t BytesSent = 0;
-    size_t FileOffset = 0;
+    size_t FileStart = 0;
     size_t FileEnd = 0;
     std::ifstream File;
 

@@ -190,7 +190,7 @@ bool UploadManager::initFileOperations(UploadFileTaskPtr task)
         }
 
         auto resourceInfo = fileInfo.value();
-        task->FileOffset = task->BlockStart - resourceInfo.start;
+        task->FileStart = task->BlockStart - resourceInfo.start;
         task->FileEnd = task->BlockEnd - resourceInfo.start;
         task->FilePath = resourceInfo.path;
 
@@ -213,9 +213,9 @@ bool UploadManager::initFileOperations(UploadFileTaskPtr task)
             return false;
         }
 
-        task->File.seekg(task->FileOffset);
+        task->File.seekg(task->FileStart);
         if (!task->File) {
-            logError << "Failed to seek to position: " << task->FileOffset << " in file: " << task->FilePath;
+            logError << "Failed to seek to position: " << task->FileStart << " in file: " << task->FilePath;
             try {
                 if (task->SetState(UploadFileTask::State::Failed)) {
                     if (task->Dc) {
@@ -243,7 +243,7 @@ void UploadManager::performFileSending(UploadFileTaskPtr task)
     try {
         while (task->Dc->bufferedAmount() < mMaxBufferedAmount.load() &&
                task->GetState() == UploadFileTask::State::Running) {
-            size_t totalBytesInBlock = (task->FileEnd - task->FileOffset) + 1;
+            size_t totalBytesInBlock = (task->FileEnd - task->FileStart) + 1;
             size_t remainingBytes = totalBytesInBlock - task->BytesSent;
 
             if (remainingBytes > 0) {
@@ -269,8 +269,8 @@ void UploadManager::performFileSending(UploadFileTaskPtr task)
                 }
             }
 
-            logInfo << "Uploading to peer: " << task->PeerID << " file: " << task->FileHash
-                    << " progress: " << task->BytesSent << "/" << totalBytesInBlock;
+            logDebug << "Uploading to peer: " << task->PeerID << " file: " << task->FileHash
+                     << " progress: " << task->BytesSent << "/" << totalBytesInBlock;
 
             if (task->BytesSent >= totalBytesInBlock) {
                 logDebug << "File transfer completed, send TRANSFER_COMPLETE to " << task->Label();

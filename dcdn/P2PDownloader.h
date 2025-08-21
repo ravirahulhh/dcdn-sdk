@@ -27,7 +27,7 @@ struct P2PDownloaderTaskOption: public util::DownloaderTaskOption
     std::string IceUfrag;
     std::string IcePwd;
     std::string PeerSdp;
-    std::string ContentHash;
+    std::string FileHash;
     size_t Start = 0;
     size_t End = 0;
 };

@@ -29,7 +29,7 @@ struct DownloadRequest
 
 struct TaskParam
 {
-    std::string ContentHash;
+    std::string FileHash;
     uint64_t Start;
     uint64_t End;
 };
@@ -64,7 +64,7 @@ private:
     size_t mNextReadOffset = 0;
 
     TaskId mTaskID = 0;
-    std::string mContentHash = "";
+    std::string mFileHash = "";
     uint64_t mStart = 0;
     uint64_t mEnd = 0;
     size_t mTotalSize = 0;
