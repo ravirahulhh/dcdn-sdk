@@ -239,6 +239,12 @@ void DeployManager::handleDeployMsgEvent(std::shared_ptr<Event> evt)
             return;
         }
 
+        auto existingTask = getTaskByJobId(jobId);
+        if (existingTask.has_value()) {
+            logInfo << "Deploy task with job_id " << jobId << " already exists, ignoring";
+            return;
+        }
+
         std::string fileHash;
         if (deployFile.contains("file_hash") && deployFile["file_hash"].is_string()) {
             fileHash = deployFile["file_hash"].get<std::string>();
