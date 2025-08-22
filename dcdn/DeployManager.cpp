@@ -417,7 +417,7 @@ void DeployManager::handleTaskStatusChange(uint64_t taskId, TaskStatus fromStatu
                     logInfo << "Updated task status to FAILED (jobId: " << task.jobId << ")";
                     break;
                 }
-                blockEnd = task.blockStart + filesize + 1;
+                blockEnd = task.blockStart + filesize - 1;
             }
             std::string fileHash = task.fileHash;
             if (task.blockStart == 0 && task.blockEnd == 0) {
