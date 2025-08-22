@@ -8,8 +8,7 @@ find_package(OpenSSL REQUIRED)
 add_library(dcdn  STATIC 
     dcdn.cpp
     Cert.cpp		
-    # DownloadManager.cpp	
-    DownloadManagerRefactor.cpp	
+    DownloadManager.cpp	
     FileManager.cpp		
     MainManager.cpp		
     UploadManager.cpp	
@@ -21,7 +20,6 @@ add_library(dcdn  STATIC
     WebRtcManager.cpp
     P2PDownloader.cpp
     P2PSingleTask.cpp
-    DownloadManager.cpp
     DeployManager.cpp
 )
 # Enable local P2P debug code paths via option or Debug config

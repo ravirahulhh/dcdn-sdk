@@ -14,7 +14,7 @@
 #include <vector>
 
 #include "BaseManager.h"
-#include "DownloadManagerRefactor.h"
+#include "DownloadManager.h"
 #include "EventLoop.h"
 #include "FileManager.h"
 #include "common/Common.h"

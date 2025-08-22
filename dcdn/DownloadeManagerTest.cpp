@@ -6,7 +6,7 @@
 #include <iostream>
 #include <thread>
 
-#include "DownloadManagerRefactor.h"
+#include "DownloadManager.h"
 #include "dcdn/MainManager.h"
 #include "dcdn/WebRtcManager.h"
 
@@ -55,28 +55,32 @@ int main()
     opt.HasRange = true;
 
     // opt.RangeStart = 0;
-    // opt.RangeEnd   = 262143999ULL;
 
-    opt.RangeStart = 262144000;
-    opt.RangeEnd   = 524287999ULL;
+    // 238cc5e19b0f043135227ca44fc93aed of https://testfileorg.netwet.net/500MB-CZIPtestfile.org.zip first part
+    opt.RangeStart = 0;
+    opt.RangeEnd   = 262143999ULL;
+
+    // md5 27e8e8c55dcaa8fdbcc654b540fefd65 of https://testfileorg.netwet.net/500MB-CZIPtestfile.org.zip second part
+    // opt.RangeStart = 262144000;
+    // opt.RangeEnd   = 524287999ULL;
     opt.ChunkSize = 10 * 1024 * 1024;
     opt.WriteRangeToSeparateFile = true; // 默认即为 true
 
     // 订阅模式：状态/进度更新通知(注意要在添加任务前订阅，否则可能会丢失部分通知)
-    // auto sid = mgr->Subscribe([](const dcdn::DMEvent& ev) {
-    //     if (auto* e = dynamic_cast<const dcdn::ETaskStatusChanged*>(&ev)) {
-    //         // e->id, e->from, e->to
-    //         std::cout << "ETaskStatusChanged from:" << static_cast<int>(e->from) << " to:" << static_cast<int>(e->to)
-    //                   << "Task Id :" << e->id << std::endl;
-    //     } else if (auto* p = dynamic_cast<const dcdn::ETaskProgress*>(&ev)) {
-    //         // p->id, p->downloaded, p->total
-    //         // std::cout << "ETaskProgress downloaded:" << p->downloaded << " total:" << p->total 
-    //         //           << "Task Id :" << p->id << std::endl;
-    //         if (p->downloaded == p->total) {
-    //             std::cout << "下载完成" << std::endl;
-    //         }
-    //     }
-    // });
+    auto sid = mgr->Subscribe([](const dcdn::DMEvent& ev) {
+        if (auto* e = dynamic_cast<const dcdn::ETaskStatusChanged*>(&ev)) {
+            // e->id, e->from, e->to
+            std::cout << "ETaskStatusChanged from:" << static_cast<int>(e->from) << " to:" << static_cast<int>(e->to)
+                      << "Task Id :" << e->id << std::endl;
+        } else if (auto* p = dynamic_cast<const dcdn::ETaskProgress*>(&ev)) {
+            // p->id, p->downloaded, p->total
+            // std::cout << "ETaskProgress downloaded:" << p->downloaded << " total:" << p->total 
+            //           << "Task Id :" << p->id << std::endl;
+            if (p->downloaded == p->total) {
+                std::cout << "下载完成" << std::endl;
+            }
+        }
+    });
     //  取消订阅
     // std::this_thread::sleep_for(std::chrono::seconds(6));
     // std::cout << "cancel subscribe" << std::endl;

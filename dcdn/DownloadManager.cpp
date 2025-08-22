@@ -1,1979 +1,1973 @@
-// #include "DownloadManager.h"
-
-// #include <nlohmann/json.hpp>
-
-// #include <algorithm>
-// #include <chrono>
-// #include <cstdio> // std::remove
-// #include <deque>
-// #include <fstream>
-// #include <future>
-// #include <iostream>
-// #include <memory>
-// #include <sstream>
-// #include <unordered_map>
-// #include <unordered_set>
-
-// #include "MainManager.h"
-// using namespace dcdn;
-// using nlohmann::json;
-
-// // TODO: read from config ?
-// static constexpr const char* kApiPeersByHashOrUrl = "/api/v1/query_peers_by_file";
-
-// namespace {
-// static uint64_t genTaskId()
-// {
-//     static std::atomic<uint64_t> cnt{0};
-//     static const uint64_t base = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
-//     return base + cnt++;
-// }
-// } // namespace
-
-// struct Range
-// {
-//     size_t start;
-//     size_t end;
-// };
-
-// struct ActiveSubTask
-// {
-//     uint64_t parentTaskId = 0;
-//     size_t offset = 0; // 分片起始绝对偏移
-//     size_t length = 0; // 分片长度
-//     int index = 0; // 分片序号
-//     std::shared_ptr<dcdn::util::DownloaderTask> downloader;
-//     std::shared_ptr<std::fstream> file;
-//     bool isProbe = false;
-//     uint64_t actualGot = 0;
-
-//     // 看门狗：最后一次有进展（读取到数据）的时间
-//     std::chrono::steady_clock::time_point lastTouched = std::chrono::steady_clock::now();
-// };
-
-// // ============ DownloadTask 序列化 ============
-// std::string DownloadTask::Serialize() const
-// {
-//     std::ostringstream ss;
-//     ss << Id << "|" << Url << "|" << ContentHash << "|" << TotalSize << "|" << Downloaded << "|"
-//        << static_cast<int>(Status);
-//     return ss.str();
-// }
-
-// DownloadTask DownloadTask::Deserialize(const std::string& data)
-// {
-//     DownloadTask task;
-//     std::istringstream ss(data);
-//     std::string token;
-//     if (!std::getline(ss, token, '|'))
-//         return task;
-//     try {
-//         task.Id = static_cast<uint64_t>(std::stoull(token));
-//     } catch (...) {
-//         task.Id = 0;
-//     }
-//     std::getline(ss, task.Url, '|');
-//     std::getline(ss, task.ContentHash, '|');
-//     if (!std::getline(ss, token, '|'))
-//         return task;
-//     task.TotalSize = static_cast<size_t>(std::stoull(token));
-//     if (!std::getline(ss, token, '|'))
-//         return task;
-//     task.Downloaded = static_cast<size_t>(std::stoull(token));
-//     if (!std::getline(ss, token, '|'))
-//         return task;
-//     task.Status = static_cast<TaskStatus>(std::stoi(token));
-//     return task;
-// }
-
-// // ====== P2P 查询：query_peers_by_file 的请求/响应解析 ======
-// static inline json BuildQueryPeersRequest(
-//     const std::string& ip,
-//     const std::string& url,
-//     const std::string& hash,
-//     const std::string& start,
-//     const std::string& scenario,
-//     bool showBlocksHash)
-// {
-//     json j;
-//     j["ip"] = ip; // string
-//     j["url"] = url; // string
-//     j["hash"] = hash; // string (文件 hash)
-//     j["start"] = start; // string (起始偏移，字符串表示)
-//     j["scenario"] = scenario; // string
-//     j["showBlocksHash"] = showBlocksHash; // bool
-//     logDebug << "BuildQueryPeersRequest: " << j.dump();
-//     return j;
-// }
-
-// // ============ PersistenceHelper ============
-// DownloadManager::PersistenceHelper::PersistenceHelper(const std::string& dbPath)
-// {
-//     mDb = nullptr;
-//     (void)dbPath;
-// }
-// DownloadManager::PersistenceHelper::~PersistenceHelper() {}
-// bool DownloadManager::PersistenceHelper::saveTask(const DownloadTask& task)
-// {
-//     (void)task;
-//     return true;
-// }
-// bool DownloadManager::PersistenceHelper::loadTasks(std::vector<DownloadTask>& tasks)
-// {
-//     (void)tasks;
-//     return true;
-// }
-// bool DownloadManager::PersistenceHelper::deleteTask(uint64_t taskId)
-// {
-//     (void)taskId;
-//     return true;
-// }
-// bool DownloadManager::PersistenceHelper::saveSubTasks(uint64_t taskId, const std::vector<SubTask>& subtasks)
-// {
-//     (void)taskId;
-//     (void)subtasks;
-//     return true;
-// }
-// bool DownloadManager::PersistenceHelper::loadSubTasks(uint64_t taskId, std::vector<SubTask>& subtasks)
-// {
-//     (void)taskId;
-//     (void)subtasks;
-//     return true;
-// }
-
-// // ============ DownloadManager 构造 / 析构 / 线程 ============
-// DownloadManager::DownloadManager(
-//     std::shared_ptr<util::HttpDownloader> http,
-//     std::shared_ptr<download::P2PDownloader> p2p)
-//     : BaseManager(nullptr), mHttpDownloader(http), mP2pDownloader(p2p)
-// {
-//     this->registerHandler(EventType::FunctionCall, &DownloadManager::handleFunctionCall);
-// }
-
-// void DownloadManager::Init() {}
-
-// DownloadManager::~DownloadManager()
-// {
-//     if (mHttpDownloader) {
-//         mHttpDownloader.reset();
-//     }
-// }
-
-// // function call + downloader data events + watchdog
-// void DownloadManager::run()
-// {
-//     using namespace std::chrono_literals;
-
-//     auto lastReap = std::chrono::steady_clock::now();
-//     const auto reapInterval = 1s; // 看门狗巡检周期
-//     const auto staleTimeout = 8s; // 分片 N 秒无任何进展视为卡死
-
-//     while (true) {
-//         {
-//             std::unique_lock<std::mutex> lk(mMtx);
-//             mCv.wait_for(lk, reapInterval, [&] { return !mDlEventsHttp.empty() || !mEvents.empty(); });
-//         }
-
-//         // process a control cmd
-//         if (!mEvents.empty()) {
-//             this->waitEvent(0ms);
-//         }
-
-//         // pop downloader read events
-//         std::vector<std::shared_ptr<util::DownloaderTask>> httpBatch;
-//         std::vector<std::shared_ptr<util::DownloaderTask>> p2pBatch;
-//         {
-//             std::lock_guard<std::mutex> g(mMtx);
-//             httpBatch.reserve(mDlEventsHttp.size());
-//             for (auto& kv : mDlEventsHttp)
-//                 httpBatch.push_back(kv.second);
-//             mDlEventsHttp.clear();
-
-//             p2pBatch.reserve(mDlEventsP2p.size());
-//             for (auto& kv : mDlEventsP2p)
-//                 p2pBatch.push_back(kv.second);
-//             mDlEventsP2p.clear();
-//         }
-
-//         for (auto& t : httpBatch) {
-//             try {
-//                 processHttpEvent(t);
-//             } catch (...) {
-//             }
-//         }
-//         for (auto& t : p2pBatch) {
-//             try {
-//                 processP2pEvent(t);
-//             } catch (...) {
-//             }
-//         }
-
-//         // —— 看门狗：回收卡死的分片
-//         auto now = std::chrono::steady_clock::now();
-//         if (now - lastReap >= reapInterval) {
-//             lastReap = now;
-
-//             // 拷贝 snapshot，避免持锁太久
-//             std::vector<ActiveSubTask> snapshot;
-//             {
-//                 std::lock_guard<std::mutex> l(mMtx);
-//                 snapshot.reserve(mActiveByPtrHttp.size());
-//                 for (auto& kv : mActiveByPtrHttp)
-//                     snapshot.push_back(kv.second);
-//             }
-
-//             for (auto& st : snapshot) {
-//                 if (st.isProbe || st.length == 0)
-//                     continue;
-//                 // TODO: 实现p2p模式的watchdog
-//                 if (st.transport == ActiveSubTask::Transport::P2P) {
-//                     logInfo << "[P2P]watchdog skip in p2p mode (un-implemented)" << std::endl;
-//                     continue;
-//                 }
-
-//                 // 若任务被暂停/取消，跳过（不误判）
-//                 bool paused = false, cancelled = false;
-//                 {
-//                     std::lock_guard<std::mutex> lk(mTasksMutex);
-//                     auto it = mTasks.find(st.parentTaskId);
-//                     if (it != mTasks.end()) {
-//                         paused = it->second.Paused.load();
-//                         cancelled = it->second.Cancelled.load();
-//                     }
-//                 }
-//                 if (paused || cancelled)
-//                     continue;
-
-//                 if (now - st.lastTouched > staleTimeout) {
-//                     const size_t got = static_cast<size_t>(st.actualGot);
-//                     if (got >= st.length)
-//                         continue;
-
-//                     const size_t missStart = st.offset + got;
-//                     const size_t missEnd = st.offset + st.length - 1;
-//                     logWarn << "看门狗扫描：子任务 " << st.index << " 无任何进展，miss[" << missStart << ", " << missEnd
-//                             << "]";
-//                     // 回填 + 续排（注意：续排前再次读 paused/cancelled）
-//                     {
-//                         std::lock_guard<std::mutex> l(mMtx);
-//                         auto raw = st.downloader.get();
-
-//                         mActiveByPtrHttp.erase(raw);
-//                         auto& vec = mDlByTaskHttp[st.parentTaskId];
-//                         vec.erase(
-//                             std::remove_if(
-//                                 vec.begin(),
-//                                 vec.end(),
-//                                 [raw](const std::shared_ptr<dcdn::util::DownloaderTask>& p) { return p.get() == raw; }),
-//                             vec.end());
-
-//                         mPendingRanges[st.parentTaskId].push_front(Range{missStart, missEnd});
-//                         mCancelledRawHttp.insert(raw);
-//                         mHttpDownloader->CancelTask(st.downloader);
-//                         logWarn << "看门狗扫描：无进展子任务 " << st.index << "被取消";
-//                     }
-
-//                     // 再次检查暂停/取消
-//                     bool paused2 = false, cancelled2 = false;
-//                     {
-//                         std::lock_guard<std::mutex> lk(mTasksMutex);
-//                         auto it = mTasks.find(st.parentTaskId);
-//                         if (it != mTasks.end()) {
-//                             paused2 = it->second.Paused.load();
-//                             cancelled2 = it->second.Cancelled.load();
-//                         }
-//                     }
-//                     if (paused2 || cancelled2) {
-//                         logWarn << "[watchdog] 任务处于暂停/取消，缺口已回填，不续排" << " st.index " << st.index;
-//                         continue;
-//                     }
-
-//                     // 立即续排一个
-//                     Range r;
-//                     bool hasNext = false;
-//                     {
-//                         std::lock_guard<std::mutex> l(mMtx);
-//                         auto& q = mPendingRanges[st.parentTaskId];
-//                         if (!q.empty()) {
-//                             r = q.front();
-//                             q.pop_front();
-//                             hasNext = true;
-//                         }
-//                     }
-//                     if (hasNext) {
-//                         std::string urlLocal;
-//                         FileDownloadOptions opts2;
-//                         {
-//                             std::lock_guard<std::mutex> lk(mTasksMutex);
-//                             auto itT = mTasks.find(st.parentTaskId);
-//                             if (itT != mTasks.end())
-//                                 urlLocal = itT->second.Url;
-//                             auto itOpt = mTaskOptions.find(st.parentTaskId);
-//                             if (itOpt != mTaskOptions.end())
-//                                 opts2 = itOpt->second;
-//                         }
-
-//                         try {
-//                             dcdn::util::HttpDownloaderTaskOption opt;
-//                             opt.Request = std::make_shared<dcdn::util::HttpRequest>(urlLocal);
-//                             opt.Start = r.start;
-//                             opt.End = r.end;
-//                             opt.Notify = &DownloadManager::coreNotifyCallbackHttp;
-//                             opt.Receiver = this;
-
-//                             auto sub = mHttpDownloader->CreateTask(&opt);
-//                             if (sub) {
-//                                 std::shared_ptr<std::fstream> f;
-//                                 {
-//                                     std::lock_guard<std::mutex> l(mMtx);
-//                                     auto itF = mParentFiles.find(st.parentTaskId);
-//                                     if (itF != mParentFiles.end())
-//                                         f = itF->second;
-
-//                                     ActiveSubTask st2;
-//                                     st2.parentTaskId = st.parentTaskId;
-//                                     st2.offset = r.start;
-//                                     st2.length = r.end - r.start + 1;
-//                                     st2.index = static_cast<int>(mNextRangeIdx[st.parentTaskId]++);
-//                                     st2.downloader = sub;
-//                                     st2.file = f;
-//                                     st2.isProbe = false;
-//                                     st2.lastTouched = std::chrono::steady_clock::now();
-
-//                                     mActiveByPtrHttp[sub.get()] = std::move(st2);
-//                                     mDlByTaskHttp[st.parentTaskId].push_back(sub);
-//                                 }
-//                                 mHttpDownloader->AddTask(sub);
-//                                 logWarn << "[watchdog] 子任务无进展，回填续排原来index任务：" << st.index
-//                                         << ", 回填range: " << r.start << "-" << r.end;
-//                             } else {
-//                                 logWarn << "[watchdog] CreateTask 失败，稍后重试 range: " << r.start << "-" << r.end;
-//                                 std::lock_guard<std::mutex> l(mMtx);
-//                                 mPendingRanges[st.parentTaskId].push_front(r);
-//                             }
-//                         } catch (...) {
-//                             std::lock_guard<std::mutex> l(mMtx);
-//                             mPendingRanges[st.parentTaskId].push_front(r);
-//                         }
-//                     }
-//                 }
-//             }
-
-//             // 巡检后看能否 finalize
-//             {
-//                 std::vector<uint64_t> toCheck;
-//                 {
-//                     std::lock_guard<std::mutex> l(mMtx);
-//                     toCheck.reserve(mDlByTaskHttp.size());
-//                     for (auto& kv : mDlByTaskHttp)
-//                         toCheck.push_back(kv.first);
-//                 }
-//                 for (auto id : toCheck) {
-//                     maybeFinalizeTask(id);
-//                 }
-//             }
-//         }
-//     }
-// }
-
-// // FunctionCall 事件：把 std::function<void()> 执行掉
-// void DownloadManager::handleFunctionCall(std::shared_ptr<Event> evt)
-// {
-//     auto* a = dynamic_cast<ArgEvent<std::function<void()>>*>(evt.get());
-//     if (!a)
-//         return;
-//     auto fn = a->Arg();
-//     if (fn)
-//         fn();
-// }
-
-// void DownloadManager::coreNotifyCallbackHttp(std::shared_ptr<dcdn::util::DownloaderTask> task, void* receiver)
-// {
-//     if (!task || !receiver)
-//         return;
-//     auto* self = static_cast<DownloadManager*>(receiver);
-//     {
-//         std::lock_guard<std::mutex> g(self->mMtx);
-//         if (self->mCancelledRawHttp.count(task.get()))
-//             return; // 丢弃取消后的迟到回调
-//         self->mDlEventsHttp[task.get()] = std::move(task); // 去重：同一个 raw 只保留一个
-//     }
-//     self->mCv.notify_all();
-// }
-
-// void DownloadManager::coreNotifyCallbackP2p(std::shared_ptr<dcdn::util::DownloaderTask> task, void* receiver)
-// {
-//     if (!task || !receiver)
-//         return;
-//     auto* self = static_cast<DownloadManager*>(receiver);
-//     {
-//         std::lock_guard<std::mutex> g(self->mMtx);
-//         if (self->mCancelledRawP2p.count(task.get()))
-//             return;
-//         self->mDlEventsP2p[task.get()] = std::move(task);
-//     }
-//     self->mCv.notify_all();
-// }
-
-// // 实际处理一个 downloader 事件（读取 -> 写入 -> 进度/续排/完成判定）
-// void DownloadManager::processHttpEvent(std::shared_ptr<dcdn::util::DownloaderTask> ev)
-// {
-//     auto* raw = ev.get();
-
-//     // 任务取消后的迟到通知直接丢弃
-//     {
-//         std::lock_guard<std::mutex> g(mMtx);
-//         if (mCancelledRawHttp.count(raw))
-//             return;
-//     }
-
-//     // 找到 ActiveSubTask
-//     ActiveSubTask active;
-//     {
-//         std::lock_guard<std::mutex> g(mMtx);
-//         auto it = mActiveByPtrHttp.find(raw);
-//         if (it == mActiveByPtrHttp.end()) {
-//             // 可能是迟到事件，直接早退
-//             return;
-//         }
-//         active = it->second;
-//     }
-
-//     // 如果是 probe：尝试拿到 Content-Length 后 split
-//     if (active.isProbe && active.parentTaskId != 0) {
-//         bool needSplit = false;
-//         size_t clen = 0;
-//         size_t baseOffset = 0;
-//         size_t totalLen = 0;
-//         FileDownloadOptions opts;
-
-//         {
-//             std::lock_guard<std::mutex> lk(mTasksMutex);
-//             auto it = mTasks.find(active.parentTaskId);
-//             if (it != mTasks.end() && it->second.TotalSize == 0) {
-//                 if (auto ht = dynamic_cast<dcdn::util::HttpDownloaderTask*>(raw)) {
-//                     clen = ht->ContentLength();
-//                     auto itOpt = mTaskOptions.find(active.parentTaskId);
-//                     if (itOpt != mTaskOptions.end())
-//                         opts = itOpt->second;
-
-//                     if (clen > 0) {
-//                         if (opts.HasRange) {
-//                             baseOffset = opts.RangeStart;
-//                             if (opts.RangeEnd != SIZE_MAX) {
-//                                 totalLen =
-//                                     (opts.RangeEnd >= opts.RangeStart) ? (opts.RangeEnd - opts.RangeStart + 1) : 0;
-//                             } else {
-//                                 totalLen = (baseOffset >= clen) ? 0 : (clen - baseOffset);
-//                             }
-//                         } else {
-//                             baseOffset = 0;
-//                             totalLen = clen;
-//                         }
-
-//                         if (totalLen > 0) {
-//                             it->second.TotalSize = totalLen;
-//                             needSplit = true;
-//                         } else {
-//                             it->second.Status = TaskStatus::Failed;
-//                         }
-//                     }
-//                 }
-//             }
-//         }
-//         if (needSplit) {
-//             splitTask(active.parentTaskId, totalLen, baseOffset);
-//         }
-//     }
-
-//     // 读取并写入
-//     auto buffer = ev->Read();
-//     size_t readSum = 0;
-
-//     FileDownloadOptions opts;
-//     std::shared_ptr<std::fstream> file;
-//     {
-//         std::lock_guard<std::mutex> lk(mTasksMutex);
-//         auto itOpt = mTaskOptions.find(active.parentTaskId);
-//         if (itOpt != mTaskOptions.end())
-//             opts = itOpt->second;
-//     }
-//     {
-//         std::lock_guard<std::mutex> l(mMtx);
-//         auto itF = mParentFiles.find(active.parentTaskId);
-//         if (itF != mParentFiles.end())
-//             file = itF->second;
-//     }
-
-//     // 我这段允许写入的绝对区间
-//     const size_t segBeg = active.offset;
-//     const size_t segEnd = active.offset + active.length - 1;
-
-//     while (buffer) {
-//         size_t len = buffer->Length();
-//         size_t off = buffer->Offset(); // 假定为“资源内绝对偏移”
-//         size_t bufBeg = off;
-//         size_t bufEnd = off + (len ? (len - 1) : 0);
-
-//         // 与我负责的区间做交集
-//         size_t wrBeg = (bufBeg > segBeg) ? bufBeg : segBeg;
-//         size_t wrEnd = (bufEnd < segEnd) ? bufEnd : segEnd;
-
-//         if (wrBeg <= wrEnd) {
-//             size_t accept = wrEnd - wrBeg + 1;
-//             size_t srcOff = wrBeg - bufBeg; // 从 buffer 内的这个位置开始拷
-//             size_t dstOff;
-
-//             if (opts.HasRange && opts.WriteRangeToSeparateFile) {
-//                 // 写相对文件：把“绝对位置”映射到用户 Range 的相对
-//                 dstOff = (wrBeg >= opts.RangeStart) ? (wrBeg - opts.RangeStart) : 0;
-//             } else {
-//                 // 共享大文件：按绝对偏移写
-//                 dstOff = wrBeg;
-//             }
-
-//             if (file && file->good()) {
-//                 try {
-//                     file->seekp(static_cast<std::streamoff>(dstOff), std::ios::beg);
-//                 } catch (...) {
-//                 }
-//                 file->write(reinterpret_cast<const char*>(buffer->Data()) + srcOff, accept);
-//                 // 不必每块都 flush，性能更好；如需稳妥可保留 flush()
-//                 // file->flush();
-//             } else if (opts.OutputStream) {
-//                 opts.OutputStream->write(reinterpret_cast<const char*>(buffer->Data()) + srcOff, accept);
-//                 // opts.OutputStream->flush();
-//             } else if (!opts.OutputPath.empty()) {
-//                 std::fstream ofs(opts.OutputPath, std::ios::in | std::ios::out | std::ios::binary);
-//                 if (!ofs) {
-//                     std::ofstream create(opts.OutputPath, std::ios::binary);
-//                     create.close();
-//                     ofs.open(opts.OutputPath, std::ios::in | std::ios::out | std::ios::binary);
-//                 }
-//                 if (ofs) {
-//                     ofs.seekp(static_cast<std::streamoff>(dstOff), std::ios::beg);
-//                     ofs.write(reinterpret_cast<const char*>(buffer->Data()) + srcOff, accept);
-//                 }
-//             }
-
-//             // 只累计“真正写入”的字节数
-//             readSum += accept;
-
-//             // 如果你需要回调可用区间，建议也用裁剪后的范围
-//             if (active.parentTaskId != 0) {
-//                 notifyBufferReady(active.parentTaskId, wrBeg, wrEnd);
-//             }
-//         }
-
-//         buffer = buffer->Next();
-//     }
-
-//     // 记录分片实际读到的量 + 心跳
-//     if (readSum > 0) {
-//         std::lock_guard<std::mutex> l(mMtx);
-//         auto it = mActiveByPtrHttp.find(raw);
-//         if (it != mActiveByPtrHttp.end()) {
-//             it->second.actualGot += readSum;
-//             it->second.lastTouched = std::chrono::steady_clock::now();
-//         }
-//     }
-//     if (readSum > 0 && active.parentTaskId != 0) {
-//         updateTaskProgress(active.parentTaskId, readSum);
-//         notifyBufferReady(active.parentTaskId, active.offset, active.offset + readSum);
-//     }
-
-//     // 结束/短读判定
-//     bool isEnd = ev->IsEnd();
-//     uint64_t got = 0;
-//     {
-//         std::lock_guard<std::mutex> l(mMtx);
-//         auto it = mActiveByPtrHttp.find(raw);
-//         if (it != mActiveByPtrHttp.end())
-//             got = it->second.actualGot;
-//     }
-//     bool endByLength = (!active.isProbe && active.length > 0 && got >= active.length);
-//     bool shortRead = (!active.isProbe && active.length > 0 && isEnd && got < active.length);
-
-//     if ((isEnd || endByLength) && active.parentTaskId != 0) {
-//         if (shortRead) {
-//             const size_t missStart = active.offset + got;
-//             const size_t missEnd = active.offset + active.length - 1;
-//             {
-//                 std::lock_guard<std::mutex> l(mMtx);
-//                 mPendingRanges[active.parentTaskId].push_front(Range{missStart, missEnd});
-//                 // 清理映射
-//                 mActiveByPtrHttp.erase(raw);
-//                 auto& vec = mDlByTaskHttp[active.parentTaskId];
-//                 vec.erase(
-//                     std::remove_if(
-//                         vec.begin(),
-//                         vec.end(),
-//                         [raw](const std::shared_ptr<dcdn::util::DownloaderTask>& p) { return p.get() == raw; }),
-//                     vec.end());
-//             }
-//             logWarn << "子任务 " << active.index << " 短读, got=" << got << " < need=" << active.length
-//                     << ", 回填缺口: [" << (active.offset + got) << ", " << (active.offset + active.length - 1) << "]";
-//         } else {
-//             uint64_t actualGot = got;
-//             {
-//                 std::lock_guard<std::mutex> l(mMtx);
-//                 mActiveByPtrHttp.erase(raw);
-//                 auto& vec = mDlByTaskHttp[active.parentTaskId];
-//                 vec.erase(
-//                     std::remove_if(
-//                         vec.begin(),
-//                         vec.end(),
-//                         [raw](const std::shared_ptr<dcdn::util::DownloaderTask>& p) { return p.get() == raw; }),
-//                     vec.end());
-//             }
-//             if (!active.isProbe && active.length > 0) {
-//                 logInfo << "子任务 " << active.index << " 结束, start: " << active.offset
-//                         << ", end: " << (active.offset + active.length - 1) << ", actually got: " << actualGot
-//                         << ", expect length: " << active.length << (endByLength && !isEnd ? " (size-guard)" : "");
-//             } else {
-//                 logInfo << "子任务 " << active.index << " 结束 (probe)";
-//             }
-//         }
-
-//         // —— 续排一个 pending（先看是否暂停/取消）
-//         bool paused = false, cancelled = false;
-//         {
-//             std::lock_guard<std::mutex> lk(mTasksMutex);
-//             auto it = mTasks.find(active.parentTaskId);
-//             if (it != mTasks.end()) {
-//                 paused = it->second.Paused.load();
-//                 cancelled = it->second.Cancelled.load();
-//             }
-//         }
-//         if (!paused && !cancelled) {
-//             Range r;
-//             bool hasNext = false;
-//             size_t idxNext = 0;
-//             {
-//                 std::lock_guard<std::mutex> l(mMtx);
-//                 auto& q = mPendingRanges[active.parentTaskId];
-//                 if (!q.empty()) {
-//                     r = q.front();
-//                     q.pop_front();
-//                     idxNext = mNextRangeIdx[active.parentTaskId]++;
-//                     hasNext = true;
-//                 }
-//             }
-//             if (hasNext) {
-//                 std::string urlLocal;
-//                 FileDownloadOptions opts2;
-//                 {
-//                     std::lock_guard<std::mutex> lk(mTasksMutex);
-//                     auto itT = mTasks.find(active.parentTaskId);
-//                     if (itT != mTasks.end())
-//                         urlLocal = itT->second.Url;
-//                     auto itOpt = mTaskOptions.find(active.parentTaskId);
-//                     if (itOpt != mTaskOptions.end())
-//                         opts2 = itOpt->second;
-//                 }
-
-//                 try {
-//                     dcdn::util::HttpDownloaderTaskOption opt;
-//                     opt.Request = std::make_shared<dcdn::util::HttpRequest>(urlLocal);
-//                     opt.Start = r.start;
-//                     opt.End = r.end;
-//                     opt.Notify = &DownloadManager::coreNotifyCallbackHttp;
-//                     opt.Receiver = this;
-
-//                     auto sub = mHttpDownloader->CreateTask(&opt);
-//                     if (sub) {
-//                         std::shared_ptr<std::fstream> f;
-//                         {
-//                             std::lock_guard<std::mutex> l(mMtx);
-//                             auto itF = mParentFiles.find(active.parentTaskId);
-//                             if (itF != mParentFiles.end())
-//                                 f = itF->second;
-
-//                             ActiveSubTask st;
-//                             st.parentTaskId = active.parentTaskId;
-//                             st.offset = r.start;
-//                             st.length = r.end - r.start + 1;
-//                             st.index = static_cast<int>(idxNext);
-//                             st.downloader = sub;
-//                             st.file = f;
-//                             st.isProbe = false;
-//                             st.lastTouched = std::chrono::steady_clock::now();
-
-//                             mActiveByPtrHttp[sub.get()] = std::move(st);
-//                             mDlByTaskHttp[active.parentTaskId].push_back(sub);
-//                         }
-//                         mHttpDownloader->AddTask(sub);
-//                         logInfo << "子任务 " << idxNext << " 续排, start: " << r.start << ", end: " << r.end;
-//                     } else {
-//                         logWarn << "ERROR 创建子任务失败";
-//                         std::lock_guard<std::mutex> l(mMtx);
-//                         mPendingRanges[active.parentTaskId].push_front(r);
-//                     }
-//                 } catch (...) {
-//                     std::lock_guard<std::mutex> l(mMtx);
-//                     mPendingRanges[active.parentTaskId].push_front(r);
-//                 }
-//             }
-//         }
-
-//         // 完成判定：无运行子任务且无 pending
-//         bool hasRunning = false, hasPending = false;
-//         {
-//             std::lock_guard<std::mutex> l(mMtx);
-//             auto itD = mDlByTaskHttp.find(active.parentTaskId);
-//             hasRunning = (itD != mDlByTaskHttp.end() && !itD->second.empty());
-//             auto itP = mPendingRanges.find(active.parentTaskId);
-//             hasPending = (itP != mPendingRanges.end() && !itP->second.empty());
-//         }
-//         if (!hasRunning && !hasPending) {
-//             maybeFinalizeTask(active.parentTaskId);
-//         }
-//     }
-
-//     // —— 处理完一个 downloader 事件的最后，补一次 finalize 判定（幂等）
-//     if (active.parentTaskId != 0) {
-//         maybeFinalizeTask(active.parentTaskId);
-//     }
-// }
-
-// // TODO: some duplicate with processHttpEvent
-// void DownloadManager::processP2pEvent(std::shared_ptr<util::DownloaderTask> ev)
-// {
-//     auto* raw = ev.get();
-
-//     {
-//         std::lock_guard<std::mutex> g(mMtx);
-//         if (mCancelledRawP2p.count(raw))
-//             return;
-//     }
-
-//     ActiveSubTask active;
-//     {
-//         std::lock_guard<std::mutex> g(mMtx);
-//         auto it = mActiveByPtrP2p.find(raw);
-//         if (it == mActiveByPtrP2p.end()) {
-//             // 可能是迟到事件，直接早退
-//             return;
-//         }
-//         active = it->second;
-//     }
-
-//     auto buffer = ev->Read();
-//     size_t readSum = 0;
-
-//     FileDownloadOptions opts;
-//     std::shared_ptr<std::fstream> file;
-//     {
-//         std::lock_guard<std::mutex> lk(mTasksMutex);
-//         auto itOpt = mTaskOptions.find(active.parentTaskId);
-//         if (itOpt != mTaskOptions.end())
-//             opts = itOpt->second;
-//     }
-//     {
-//         std::lock_guard<std::mutex> l(mMtx);
-//         auto itF = mParentFiles.find(active.parentTaskId);
-//         if (itF != mParentFiles.end())
-//             file = itF->second;
-//     }
-
-//     // 我这段允许写入的绝对区间
-//     const size_t segBeg = active.offset;
-//     const size_t segEnd = active.offset + active.length - 1;
-
-//     while (buffer) {
-//         size_t len = buffer->Length();
-//         size_t off = buffer->Offset(); // 假定为"资源内绝对偏移"
-//         size_t bufBeg = off;
-//         size_t bufEnd = off + (len ? (len - 1) : 0);
-
-//         // 与我负责的区间做交集
-//         size_t wrBeg = (bufBeg > segBeg) ? bufBeg : segBeg;
-//         size_t wrEnd = (bufEnd < segEnd) ? bufEnd : segEnd;
-
-//         if (wrBeg <= wrEnd) {
-//             size_t accept = wrEnd - wrBeg + 1;
-//             size_t srcOff = wrBeg - bufBeg; // 从 buffer 内的这个位置开始拷
-//             size_t dstOff;
-
-//             if (opts.HasRange && opts.WriteRangeToSeparateFile) {
-//                 // 写相对文件：把"绝对位置"映射到用户 Range 的相对
-//                 dstOff = (wrBeg >= opts.RangeStart) ? (wrBeg - opts.RangeStart) : 0;
-//             } else {
-//                 // 共享大文件：按绝对偏移写
-//                 dstOff = wrBeg;
-//             }
-
-//             if (file && file->good()) {
-//                 try {
-//                     file->seekp(static_cast<std::streamoff>(dstOff), std::ios::beg);
-//                 } catch (...) {
-//                 }
-//                 file->write(reinterpret_cast<const char*>(buffer->Data()) + srcOff, accept);
-//                 // 不必每块都 flush，性能更好；如需稳妥可保留 flush()
-//                 // file->flush();
-//             } else if (opts.OutputStream) {
-//                 opts.OutputStream->write(reinterpret_cast<const char*>(buffer->Data()) + srcOff, accept);
-//                 // opts.OutputStream->flush();
-//             } else if (!opts.OutputPath.empty()) {
-//                 std::fstream ofs(opts.OutputPath, std::ios::in | std::ios::out | std::ios::binary);
-//                 if (!ofs) {
-//                     std::ofstream create(opts.OutputPath, std::ios::binary);
-//                     create.close();
-//                     ofs.open(opts.OutputPath, std::ios::in | std::ios::out | std::ios::binary);
-//                 }
-//                 if (ofs) {
-//                     ofs.seekp(static_cast<std::streamoff>(dstOff), std::ios::beg);
-//                     ofs.write(reinterpret_cast<const char*>(buffer->Data()) + srcOff, accept);
-//                 }
-//             }
-
-//             readSum += accept;
-
-//             if (active.parentTaskId != 0) {
-//                 notifyBufferReady(active.parentTaskId, wrBeg, wrEnd);
-//             }
-//         }
-
-//         buffer = buffer->Next();
-//     }
-
-//     // 记录分片实际读到的量 + 心跳
-//     if (readSum > 0) {
-//         std::lock_guard<std::mutex> l(mMtx);
-//         auto it = mActiveByPtrP2p.find(raw);
-//         if (it != mActiveByPtrP2p.end()) {
-//             it->second.actualGot += readSum;
-//             it->second.lastTouched = std::chrono::steady_clock::now();
-//         }
-//     }
-//     if (readSum > 0 && active.parentTaskId != 0) {
-//         updateTaskProgress(active.parentTaskId, readSum);
-//         notifyBufferReady(active.parentTaskId, active.offset, active.offset + readSum);
-//     }
-
-//     // 结束/短读判定
-//     bool isEnd = ev->IsEnd();
-//     uint64_t got = 0;
-//     {
-//         std::lock_guard<std::mutex> l(mMtx);
-//         auto it = mActiveByPtrP2p.find(raw);
-//         if (it != mActiveByPtrP2p.end())
-//             got = it->second.actualGot;
-//     }
-//     bool endByLength = (!active.isProbe && active.length > 0 && got >= active.length);
-//     bool shortRead = (!active.isProbe && active.length > 0 && isEnd && got < active.length);
-
-//     if ((isEnd || endByLength) && active.parentTaskId != 0 && ev->Status() == util::DownloaderTask::Completed) {
-//         // TODO: refactor duplication code in if else
-//         if (shortRead) {
-//             const size_t missStart = active.offset + got;
-//             const size_t missEnd = active.offset + active.length - 1;
-//             {
-//                 // insert missing to pending
-//                 std::lock_guard<std::mutex> l(mMtx);
-//                 mPendingRanges[active.parentTaskId].push_front(Range{missStart, missEnd});
-//                 // cancel this
-//                 mActiveByPtrP2p.erase(raw);
-//                 auto& vec = mDlByTaskP2p[active.parentTaskId];
-//                 vec.erase(
-//                     std::remove_if(
-//                         vec.begin(),
-//                         vec.end(),
-//                         [raw](const std::shared_ptr<dcdn::util::DownloaderTask>& p) { return p.get() == raw; }),
-//                     vec.end());
-//             }
-//             logWarn << "[P2P]子任务 " << active.index << " 短读, got=" << got << " < need=" << active.length
-//                     << ", 回填缺口: [" << (active.offset + got) << ", " << (active.offset + active.length - 1) << "]";
-//         } else {
-//             uint64_t actualGot = got;
-//             {
-//                 std::lock_guard<std::mutex> l(mMtx);
-//                 mActiveByPtrP2p.erase(raw);
-//                 auto& vec = mDlByTaskP2p[active.parentTaskId];
-//                 vec.erase(
-//                     std::remove_if(
-//                         vec.begin(),
-//                         vec.end(),
-//                         [raw](const std::shared_ptr<dcdn::util::DownloaderTask>& p) { return p.get() == raw; }),
-//                     vec.end());
-//             }
-//             if (!active.isProbe && active.length > 0) {
-//                 logInfo << "[P2P]子任务 " << active.index << " 结束, start: " << active.offset
-//                         << ", end: " << (active.offset + active.length - 1) << ", actually got: " << actualGot
-//                         << ", expect length: " << active.length << (endByLength && !isEnd ? " (size-guard)" : "");
-//             } else {
-//                 logInfo << "[P2P]子任务 " << active.index << " 结束 (probe)";
-//             }
-//         }
-
-//         // —— 续排一个 pending（先看是否暂停/取消）
-//         bool paused = false, cancelled = false;
-//         {
-//             std::lock_guard<std::mutex> lk(mTasksMutex);
-//             auto it = mTasks.find(active.parentTaskId);
-//             if (it != mTasks.end()) {
-//                 paused = it->second.Paused.load();
-//                 cancelled = it->second.Cancelled.load();
-//             }
-//         }
-//         if (!paused && !cancelled) {
-//             Range r;
-//             bool hasNext = false;
-//             size_t idxNext = 0;
-//             {
-//                 std::lock_guard<std::mutex> l(mMtx);
-//                 auto& q = mPendingRanges[active.parentTaskId];
-//                 if (!q.empty()) {
-//                     r = q.front();
-//                     q.pop_front();
-//                     idxNext = mNextRangeIdx[active.parentTaskId]++;
-//                     hasNext = true;
-//                 }
-//             }
-//             if (hasNext) {
-//                 logDebug << "[P2P][Re-queue] pending: " << r.start << "-" << r.end << ", idxNext: " << idxNext;
-//                 auto succ = p2pQueryPeersAsync_(active.parentTaskId, r.start, r.end);
-//                 if (!succ) {
-//                     logWarn << "[P2P][Re-queue] p2pQueryPeersAsync failed" << ", taskId: " << active.parentTaskId
-//                             << ", offset: " << r.start;
-//                 }
-//             }
-//         }
-
-//         bool hasRunning = false, hasPending = false, hasQueryOnFlight = false;
-//         {
-//             std::lock_guard<std::mutex> l(mMtx);
-//             auto itD = mDlByTaskP2p.find(active.parentTaskId);
-//             hasRunning = (itD != mDlByTaskP2p.end() && !itD->second.empty());
-//             auto itP = mPendingRanges.find(active.parentTaskId);
-//             hasPending = (itP != mPendingRanges.end() && !itP->second.empty());
-
-//             auto it = p2pStates_.find(active.parentTaskId);
-//             if (it != p2pStates_.end()) {
-//                 const auto& inner = it->second;
-//                 hasQueryOnFlight =
-//                     std::any_of(inner.begin(), inner.end(), [](const auto& kv) { return kv.second.queryInFlight; });
-//             }
-//         }
-
-//         if (!hasRunning && !hasPending && !hasQueryOnFlight) {
-//             maybeFinalizeTask(active.parentTaskId);
-//         }
-//     }
-
-//     if (active.parentTaskId != 0) {
-//         maybeFinalizeTask(active.parentTaskId);
-//     }
-// }
-
-// // ============ 配置接口 ============
-
-// void DownloadManager::SetStrategy(DownloadStrategy strategy)
-// {
-//     // mStrategy = strategy;
-// }
-// void DownloadManager::SetMaxConcurrentDownloads(size_t max)
-// {
-//     mMaxConcurrent = max;
-// }
-// void DownloadManager::SetPersistPath(const std::string& path)
-// {
-//     mPersistPath = path;
-//     mDbHelper = std::make_unique<PersistenceHelper>(path);
-// }
-
-// uint64_t DownloadManager::AddDownloadTask(
-//     const std::string& url,
-//     const std::string& contentHash,
-//     const FileDownloadOptions& options)
-// {
-//     auto prom = std::make_shared<std::promise<uint64_t>>();
-//     auto fut = prom->get_future();
-//     auto strategy = options.Strategy;
-//     this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(
-//         EventType::FunctionCall, [this, prom, url, contentHash, options, strategy]() {
-//             DownloadTask task;
-//             task.Id = genTaskId();
-//             task.Url = url;
-//             task.ContentHash = contentHash;
-//             task.TotalSize = 0;
-//             task.Downloaded = 0;
-//             task.StartTime = std::chrono::system_clock::now();
-//             task.LastUpdate = task.StartTime;
-//             task.Status = TaskStatus::Pending;
-
-//             {
-//                 std::lock_guard<std::mutex> lk(mTasksMutex);
-//                 mTasks[task.Id] = task;
-//                 mTaskOptions[task.Id] = options;
-//             }
-
-//             // 打开父任务共享文件（随机写）
-//             if (!options.OutputPath.empty()) {
-//                 auto fs =
-//                     std::make_shared<std::fstream>(options.OutputPath, std::ios::in | std::ios::out | std::ios::binary);
-//                 if (!fs->is_open()) {
-//                     std::ofstream create(options.OutputPath, std::ios::binary);
-//                     create.close();
-//                     fs->open(options.OutputPath, std::ios::in | std::ios::out | std::ios::binary);
-//                 }
-//                 if (fs->is_open()) {
-//                     std::lock_guard<std::mutex> l(mMtx);
-//                     mParentFiles[task.Id] = fs;
-//                 }
-//             }
-
-//             if (strategy == DownloadStrategy::HTTP_ONLY) {
-//                 const bool wantRange = options.HasRange;
-//                 const size_t userStart = options.RangeStart;
-//                 const bool endKnown = options.HasRange && options.RangeEnd != SIZE_MAX;
-
-//                 if (wantRange && endKnown) {
-//                     const size_t length = (options.RangeEnd >= userStart) ? (options.RangeEnd - userStart + 1) : 0;
-//                     if (length == 0) {
-//                         std::lock_guard<std::mutex> lk(mTasksMutex);
-//                         auto itT = mTasks.find(task.Id);
-//                         if (itT != mTasks.end())
-//                             itT->second.Status = TaskStatus::Failed;
-//                         prom->set_value(task.Id);
-//                         return;
-//                     }
-//                     {
-//                         std::lock_guard<std::mutex> lk(mTasksMutex);
-//                         mTasks[task.Id].TotalSize = length;
-//                         mTasks[task.Id].Status = TaskStatus::Running;
-//                     }
-//                     splitTask(task.Id, length, userStart);
-//                     prom->set_value(task.Id);
-//                     return;
-//                 }
-
-//                 // (B) 未知 end 或整文件：需要 Content-Length（probe）
-//                 dcdn::util::HttpDownloaderTaskOption opt;
-//                 opt.Request = std::make_shared<dcdn::util::HttpRequest>(url);
-//                 opt.Start = 0; // 探测
-//                 opt.Notify = &DownloadManager::coreNotifyCallbackHttp;
-//                 opt.Receiver = this;
-
-//                 auto probe = mHttpDownloader->CreateTask(&opt);
-//                 if (!probe) {
-//                     std::lock_guard<std::mutex> lk(mTasksMutex);
-//                     auto itT = mTasks.find(task.Id);
-//                     if (itT != mTasks.end())
-//                         itT->second.Status = TaskStatus::Failed;
-//                     prom->set_value(task.Id);
-//                     return;
-//                 }
-
-//                 {
-//                     std::lock_guard<std::mutex> l(mMtx);
-//                     ActiveSubTask a;
-//                     a.parentTaskId = task.Id;
-//                     a.downloader = probe;
-//                     a.offset = 0;
-//                     a.length = 0;
-//                     a.index = 0;
-//                     a.isProbe = true;
-//                     a.lastTouched = std::chrono::steady_clock::now();
-
-//                     auto itF = mParentFiles.find(task.Id);
-//                     if (itF != mParentFiles.end())
-//                         a.file = itF->second;
-
-//                     mActiveByPtrHttp[probe.get()] = std::move(a);
-//                     mDlByTaskHttp[task.Id].push_back(probe);
-//                 }
-//                 mHttpDownloader->AddTask(probe);
-//                 logInfo << "[Launch] probe Task " << 0;
-
-//                 {
-//                     std::lock_guard<std::mutex> lk(mTasksMutex);
-//                     auto itT = mTasks.find(task.Id);
-//                     if (itT != mTasks.end())
-//                         itT->second.Status = TaskStatus::Running;
-//                 }
-//                 prom->set_value(task.Id);
-//                 return;
-//             } else if (strategy == DownloadStrategy::P2P_ONLY) {
-//                 const bool wantRange = options.HasRange;
-//                 const size_t userStart = options.RangeStart;
-//                 const bool endKnown = options.HasRange && options.RangeEnd != SIZE_MAX;
-
-//                 if (wantRange && endKnown) {
-//                     const size_t length = (options.RangeEnd >= userStart) ? (options.RangeEnd - userStart + 1) : 0;
-//                     if (length == 0) {
-//                         std::lock_guard<std::mutex> lk(mTasksMutex);
-//                         auto itT = mTasks.find(task.Id);
-//                         if (itT != mTasks.end())
-//                             itT->second.Status = TaskStatus::Failed;
-//                         prom->set_value(task.Id);
-//                         return;
-//                     }
-//                     {
-//                         std::lock_guard<std::mutex> lk(mTasksMutex);
-//                         mTasks[task.Id].TotalSize = length;
-//                         auto itT = mTasks.find(task.Id);
-//                         if (itT != mTasks.end())
-//                             itT->second.Status = TaskStatus::Running;
-//                     }
-//                 }
-//                 startP2pDownload(task.Id);
-//                 prom->set_value(task.Id);
-//                 return;
-//             } else { // HYBRID（place holder）
-//                 {
-//                     std::lock_guard<std::mutex> lk(mTasksMutex);
-//                     auto itT = mTasks.find(task.Id);
-//                     if (itT != mTasks.end())
-//                         itT->second.Status = TaskStatus::Pending;
-//                 }
-//                 startHybridDownload(task.Id); // TODO
-//                 prom->set_value(task.Id);
-//                 return;
-//             }
-//         }));
-//     // TODO: return task id without wait
-//     return fut.get();
-// }
-
-// bool DownloadManager::CancelDownloadTask(uint64_t taskId)
-// {
-//     auto prom = std::make_shared<std::promise<bool>>();
-//     auto fut = prom->get_future();
-
-//     this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(EventType::FunctionCall, [this, prom, taskId]() {
-//         {
-//             std::lock_guard<std::mutex> lk(mTasksMutex);
-//             auto it = mTasks.find(taskId);
-//             if (it == mTasks.end()) {
-//                 prom->set_value(false);
-//                 return;
-//             }
-//             it->second.Cancelled = true;
-//             it->second.Status = TaskStatus::Cancelled;
-//         }
-
-//         // 取消所有子任务 & 标记 raw 已取消
-//         {
-//             std::lock_guard<std::mutex> l(mMtx);
-//             auto itVec = mDlByTaskHttp.find(taskId);
-//             if (itVec != mDlByTaskHttp.end()) {
-//                 for (auto& sp : itVec->second) {
-//                     if (!sp)
-//                         continue;
-//                     mHttpDownloader->CancelTask(sp);
-//                     mCancelledRawHttp.insert(sp.get());
-//                     mActiveByPtrHttp.erase(sp.get());
-//                 }
-//                 itVec->second.clear();
-//             }
-//             // 清空 pending
-//             mPendingRanges[taskId].clear();
-//             // 丢弃事件队列里属于该任务的事件
-//             for (auto it2 = mDlEventsHttp.begin(); it2 != mDlEventsHttp.end();) {
-//                 if (mCancelledRawHttp.count(it2->first))
-//                     it2 = mDlEventsHttp.erase(it2);
-//                 else
-//                     ++it2;
-//             }
-//             // 删除输出文件（如果指定了文件路径）
-//             FileDownloadOptions opts;
-//             {
-//                 std::lock_guard<std::mutex> lk2(mTasksMutex);
-//                 auto itOpt = mTaskOptions.find(taskId);
-//                 if (itOpt != mTaskOptions.end())
-//                     opts = itOpt->second;
-//             }
-//             if (!opts.OutputPath.empty()) {
-//                 mParentFiles.erase(taskId);
-//                 std::remove(opts.OutputPath.c_str());
-//             }
-//         }
-//         prom->set_value(true);
-//     }));
-//     return fut.get();
-// }
-
-// bool DownloadManager::PauseDownloadTask(uint64_t taskId)
-// {
-//     auto prom = std::make_shared<std::promise<bool>>();
-//     auto fut = prom->get_future();
-
-//     this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(EventType::FunctionCall, [this, prom, taskId]() {
-//         {
-//             std::lock_guard<std::mutex> lk(mTasksMutex);
-//             auto it = mTasks.find(taskId);
-//             if (it == mTasks.end()) {
-//                 prom->set_value(false);
-//                 return;
-//             }
-//             it->second.Paused = true;
-//             it->second.Status = TaskStatus::Paused;
-//         }
-//         {
-//             std::lock_guard<std::mutex> l(mMtx);
-//             auto itVec = mDlByTaskHttp.find(taskId);
-//             if (itVec != mDlByTaskHttp.end()) {
-//                 for (auto& sp : itVec->second) {
-//                     if (sp)
-//                         mHttpDownloader->PauseTask(sp);
-//                 }
-//             }
-//         }
-//         prom->set_value(true);
-//     }));
-//     return fut.get();
-// }
-
-// bool DownloadManager::ResumeDownloadTask(uint64_t taskId)
-// {
-//     auto prom = std::make_shared<std::promise<bool>>();
-//     auto fut = prom->get_future();
-
-//     this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(EventType::FunctionCall, [this, prom, taskId]() {
-//         {
-//             std::lock_guard<std::mutex> lk(mTasksMutex);
-//             auto it = mTasks.find(taskId);
-//             if (it == mTasks.end()) {
-//                 prom->set_value(false);
-//                 return;
-//             }
-//             it->second.Paused = false;
-//             it->second.Status = TaskStatus::Running;
-//         }
-//         {
-//             std::lock_guard<std::mutex> l(mMtx);
-//             auto itVec = mDlByTaskHttp.find(taskId);
-//             if (itVec != mDlByTaskHttp.end()) {
-//                 for (auto& sp : itVec->second) {
-//                     if (!sp)
-//                         continue;
-//                     if (sp->IsEnd())
-//                         continue;
-//                     logInfo << "resume task: " << sp.get();
-//                     if (sp)
-//                         mHttpDownloader->ResumeTask(sp);
-//                 }
-//             }
-//         }
-//         prom->set_value(true);
-//     }));
-//     return fut.get();
-// }
-
-// // ============ 状态查询与回调注册 ============
-// DownloadTask DownloadManager::GetTaskStatus(uint64_t taskId) const
-// {
-//     std::lock_guard<std::mutex> l(mTasksMutex);
-//     auto it = mTasks.find(taskId);
-//     if (it != mTasks.end())
-//         return it->second;
-//     return {};
-// }
-
-// std::vector<DownloadTask> DownloadManager::GetAllTasks() const
-// {
-//     std::lock_guard<std::mutex> l(mTasksMutex);
-//     std::vector<DownloadTask> out;
-//     out.reserve(mTasks.size());
-//     for (auto& kv : mTasks)
-//         out.push_back(kv.second);
-//     return out;
-// }
-
-// double DownloadManager::GetOverallSpeed() const
-// {
-//     std::lock_guard<std::mutex> l(mTasksMutex);
-//     double sum = 0.0;
-//     for (auto& kv : mTasks)
-//         sum += kv.second.Speed;
-//     return sum;
-// }
-
-// void DownloadManager::SetBufferReadyCallback(uint64_t taskId, BufferReadyCallback callback)
-// {
-//     std::lock_guard<std::mutex> l(mTasksMutex);
-//     mBufferCallbacks[taskId] = std::move(callback);
-// }
-// void DownloadManager::RemoveBufferReadyCallback(uint64_t taskId)
-// {
-//     std::lock_guard<std::mutex> l(mTasksMutex);
-//     mBufferCallbacks.erase(taskId);
-// }
-// std::vector<std::pair<size_t, size_t>> DownloadManager::GetAvailableRanges(uint64_t taskId) const
-// {
-//     std::lock_guard<std::mutex> l(mTasksMutex);
-//     auto it = mTasks.find(taskId);
-//     if (it != mTasks.end())
-//         return it->second.CompletedRanges;
-//     return {};
-// }
-
-// void DownloadManager::SetHttpBandwidthRatio(float ratio)
-// {
-//     mHttpBandwidthRatio = ratio;
-// }
-// void DownloadManager::SetP2pBandwidthRatio(float ratio)
-// {
-//     mP2pBandwidthRatio = ratio;
-// }
-
-// // ============ 进度计算与通知 ============
-// void DownloadManager::updateTaskProgress(uint64_t taskId, size_t downloaded)
-// {
-//     auto now = std::chrono::system_clock::now();
-//     bool reachedEnd = false;
-
-//     {
-//         std::lock_guard<std::mutex> l(mTasksMutex);
-//         auto it = mTasks.find(taskId);
-//         if (it == mTasks.end())
-//             return;
-
-//         it->second.Downloaded += downloaded;
-//         if (it->second.TotalSize > 0 && it->second.Downloaded >= it->second.TotalSize) {
-//             it->second.Downloaded = it->second.TotalSize; // 防御
-//             reachedEnd = true;
-//             if (it->second.Downloaded > it->second.TotalSize) {
-//                 logWarn << "Task " << taskId << " downloaded more than expected: " << it->second.Downloaded << " > "
-//                         << it->second.TotalSize;
-//             }
-//         }
-//         it->second.LastUpdate = now;
-//         calculateSpeedLocked(it->second, now);
-//     }
-
-//     if (reachedEnd) {
-//         maybeFinalizeTask(taskId);
-//     }
-// }
-
-// void DownloadManager::calculateSpeedLocked(DownloadTask& t, std::chrono::system_clock::time_point now)
-// {
-//     auto seconds = std::chrono::duration_cast<std::chrono::seconds>(now - t.StartTime).count();
-//     t.Speed = (seconds > 0) ? (static_cast<double>(t.Downloaded) / static_cast<double>(seconds)) : 0.0;
-// }
-
-// void DownloadManager::notifyBufferReady(const uint64_t& taskId, size_t start, size_t end)
-// {
-//     std::lock_guard<std::mutex> l(mTasksMutex);
-//     auto it = mBufferCallbacks.find(taskId);
-//     if (it != mBufferCallbacks.end()) {
-//         auto cb = it->second;
-//         if (cb)
-//             cb(taskId, start, end);
-//     }
-// }
-
-// // ============ 预留策略入口（未实现） ============
-// void DownloadManager::startHttpDownload(const uint64_t& taskId)
-// {
-//     (void)taskId;
-// }
-
-// void DownloadManager::startP2pDownload(const uint64_t& taskId)
-// {
-//     FileDownloadOptions opt;
-//     DownloadTask t;
-//     {
-//         std::lock_guard<std::mutex> lk(mTasksMutex);
-//         auto it = mTasks.find(taskId);
-//         if (it == mTasks.end())
-//             return;
-//         t = it->second;
-//         auto itOpt = mTaskOptions.find(taskId);
-//         if (itOpt != mTaskOptions.end())
-//             opt = itOpt->second;
-//     }
-
-//     logDebug << "P2P peers 查询开始 taskId=" << taskId << "offset =" << (opt.HasRange ? opt.RangeStart : 0)
-//              << std::endl;
-//     auto start = (opt.HasRange ? opt.RangeStart : 0);
-//     auto end = (opt.HasRange ? opt.RangeEnd : 0);
-//     if (!p2pQueryPeersAsync_(taskId, start, end)) {
-//         std::lock_guard<std::mutex> lk(mTasksMutex);
-//         auto it = mTasks.find(taskId);
-//         if (it != mTasks.end()) {
-//             logError << "P2P peers 查询失败 taskId=" << taskId << std::endl;
-//             // TODO: NEED retry
-//             it->second.Status = TaskStatus::Pending;
-//         }
-//     }
-// }
-
-// void DownloadManager::startHybridDownload(const uint64_t& taskId)
-// {
-//     (void)taskId;
-// }
-
-// // ============ 切分 & 调度（HTTP_ONLY） ============
-// void DownloadManager::splitTask(uint64_t taskId, size_t totalSize, size_t baseOffset)
-// {
-//     FileDownloadOptions opts;
-//     std::string url;
-//     {
-//         std::lock_guard<std::mutex> lk(mTasksMutex);
-//         auto it = mTasks.find(taskId);
-//         if (it == mTasks.end())
-//             return;
-//         url = it->second.Url;
-//         auto itOpt = mTaskOptions.find(taskId);
-//         if (itOpt != mTaskOptions.end())
-//             opts = itOpt->second;
-//     }
-
-//     // 预分配/截断文件到正确大小（相对写：长度就是 totalSize）
-//     if (!opts.OutputPath.empty() && totalSize > 0) {
-//         {
-//             std::ofstream reset(opts.OutputPath, std::ios::binary | std::ios::trunc);
-//         }
-//         auto fs = std::make_shared<std::fstream>(opts.OutputPath, std::ios::in | std::ios::out | std::ios::binary);
-//         if (!fs->is_open()) {
-//             std::ofstream create(opts.OutputPath, std::ios::binary | std::ios::trunc);
-//             create.close();
-//             fs->open(opts.OutputPath, std::ios::in | std::ios::out | std::ios::binary);
-//         }
-//         if (fs->is_open()) {
-//             try {
-//                 fs->seekp(static_cast<std::streamoff>(totalSize - 1), std::ios::beg);
-//                 char z = 0;
-//                 fs->write(&z, 1);
-//                 fs->flush();
-//             } catch (...) {
-//             }
-//             std::lock_guard<std::mutex> l(mMtx);
-//             mParentFiles[taskId] = fs;
-//         }
-//     }
-
-//     // 若有探测中的 probe，需要取消并统计已拉到的字节
-//     std::shared_ptr<dcdn::util::DownloaderTask> probeToCancel;
-//     size_t already = 0;
-//     {
-//         std::lock_guard<std::mutex> l(mMtx);
-//         auto itD = mDlByTaskHttp.find(taskId);
-//         if (itD != mDlByTaskHttp.end()) {
-//             for (auto& sp : itD->second) {
-//                 if (!sp)
-//                     continue;
-//                 auto raw = sp.get();
-//                 auto itActive = mActiveByPtrHttp.find(raw);
-//                 if (itActive != mActiveByPtrHttp.end() && itActive->second.isProbe) {
-//                     probeToCancel = sp;
-//                     break;
-//                 }
-//             }
-//         }
-//     }
-//     if (probeToCancel) {
-//         already = probeToCancel->Size();
-//         mHttpDownloader->CancelTask(probeToCancel);
-
-//         std::lock_guard<std::mutex> l(mMtx);
-//         mActiveByPtrHttp.erase(probeToCancel.get());
-//         auto& vec = mDlByTaskHttp[taskId];
-//         vec.erase(std::remove(vec.begin(), vec.end(), probeToCancel), vec.end());
-//         mCancelledRawHttp.insert(probeToCancel.get());
-//         mDlEventsHttp.erase(probeToCancel.get());
-//         logInfo << "http probe 已取消";
-//     }
-
-//     // 需要下载的绝对区间为 [baseOffset, baseOffset + totalSize - 1]
-//     const size_t absBegin = baseOffset;
-//     const size_t absEnd = baseOffset + totalSize - 1;
-
-//     // 用 probe 已有字节前移起点，避免重复下载 / 计数错位
-//     // 排除 probe 已下载部分
-//     size_t rangeStart = absBegin + already;
-//     if (rangeStart > absEnd) {
-//         // probe 已经覆盖完任务（极端情况），直接 finalize
-//         maybeFinalizeTask(taskId);
-//         return;
-//     }
-
-//     if (already > 0) {
-//         std::lock_guard<std::mutex> lk(mTasksMutex);
-//         auto itT = mTasks.find(taskId);
-//         if (itT != mTasks.end()) {
-//             itT->second.LastUpdate = std::chrono::system_clock::now();
-//             calculateSpeedLocked(itT->second, itT->second.LastUpdate);
-//         }
-//     }
-
-//     // 生成 ranges
-//     const size_t chunk = (opts.ChunkSize ? opts.ChunkSize : (1u << 20)); // 默认 1MB
-//     std::vector<Range> ranges;
-//     for (size_t pos = rangeStart; pos <= absEnd;) {
-//         size_t rEnd = std::min(pos + chunk - 1, absEnd);
-//         ranges.push_back({pos, rEnd});
-//         std::cout << "range: [" << pos << ", " << rEnd << "]" << std::endl;
-//         if (rEnd == absEnd)
-//             break;
-//         pos = rEnd + 1;
-//     }
-
-//     if (ranges.empty()) {
-//         maybeFinalizeTask(taskId);
-//         return;
-//     }
-
-//     logInfo << "[Split] Task " << taskId << " split into " << ranges.size()
-//             << " ranges, total bytes = " << (absEnd - rangeStart + 1) << " chunkSize = " << chunk;
-
-//     // 并发启动
-//     const size_t canLaunch = std::min(ranges.size(), mMaxConcurrent);
-
-//     std::shared_ptr<std::fstream> parentFile;
-//     {
-//         std::lock_guard<std::mutex> l(mMtx);
-//         auto itF = mParentFiles.find(taskId);
-//         if (itF != mParentFiles.end())
-//             parentFile = itF->second;
-//         mNextRangeIdx[taskId] = 0;
-//     }
-
-//     // 若任务已暂停/取消，则不启动分片，直接塞入 pending 等待
-//     bool paused = false, cancelled = false;
-//     {
-//         std::lock_guard<std::mutex> lk(mTasksMutex);
-//         auto itT = mTasks.find(taskId);
-//         if (itT != mTasks.end()) {
-//             paused = itT->second.Paused.load();
-//             cancelled = itT->second.Cancelled.load();
-//         }
-//     }
-
-//     if (paused || cancelled || canLaunch == 0) {
-//         std::lock_guard<std::mutex> l(mMtx);
-//         auto& q = mPendingRanges[taskId];
-//         for (auto& r : ranges)
-//             q.push_back(r);
-//         maybeFinalizeTask(taskId);
-//         return;
-//     }
-
-//     for (size_t i = 0; i < canLaunch; ++i) {
-//         auto r = ranges[i];
-//         dcdn::util::HttpDownloaderTaskOption opt;
-//         opt.Request = std::make_shared<dcdn::util::HttpRequest>(url);
-//         opt.Start = r.start;
-//         opt.End = r.end;
-//         opt.Notify = &DownloadManager::coreNotifyCallbackHttp;
-//         opt.Receiver = this;
-
-//         auto sub = mHttpDownloader->CreateTask(&opt);
-//         if (!sub)
-//             continue;
-
-//         {
-//             std::lock_guard<std::mutex> l(mMtx);
-//             ActiveSubTask st;
-//             st.parentTaskId = taskId;
-//             st.offset = r.start;
-//             st.length = r.end - r.start + 1;
-//             st.index = static_cast<int>(i);
-//             st.downloader = sub;
-//             st.file = parentFile;
-//             st.isProbe = false;
-//             st.lastTouched = std::chrono::steady_clock::now();
-
-//             mActiveByPtrHttp[sub.get()] = std::move(st);
-//             mDlByTaskHttp[taskId].push_back(sub);
-//             mNextRangeIdx[taskId] = i + 1;
-//         }
-
-//         mHttpDownloader->AddTask(sub);
-//         logInfo << "[Launch] Task " << i << " range " << r.start << "-" << r.end;
-//     }
-
-//     // 加入 pending
-//     if (ranges.size() > canLaunch) {
-//         std::lock_guard<std::mutex> l(mMtx);
-//         auto& q = mPendingRanges[taskId];
-//         for (size_t i = canLaunch; i < ranges.size(); ++i)
-//             q.push_back(ranges[i]);
-//     }
-
-//     // 兜底 finalize（maybeFinalizeTask 自幂等）
-//     maybeFinalizeTask(taskId);
-// }
-
-// // ============ 幂等的完成判定 ============
-// bool DownloadManager::maybeFinalizeTask(uint64_t taskId)
-// {
-//     // TODO: refactor, duplicate code in if-else clause
-//     auto opts = mTaskOptions.find(taskId);
-//     if (opts == mTaskOptions.end())
-//         return false;
-
-//     if (opts->second.Strategy == DownloadStrategy::HTTP_ONLY) {
-//         bool hasRunning = false;
-//         bool hasPending = false;
-//         {
-//             std::lock_guard<std::mutex> l(mMtx);
-//             auto itD = mDlByTaskHttp.find(taskId);
-//             hasRunning = (itD != mDlByTaskHttp.end() && !itD->second.empty());
-//             auto itP = mPendingRanges.find(taskId);
-//             hasPending = (itP != mPendingRanges.end() && !itP->second.empty());
-//         }
-//         if (hasRunning || hasPending)
-//             return false;
-
-//         {
-//             std::lock_guard<std::mutex> lk(mTasksMutex);
-//             auto itT = mTasks.find(taskId);
-//             if (itT == mTasks.end())
-//                 return false;
-
-//             auto& t = itT->second;
-//             if (t.Cancelled) {
-//                 t.Status = TaskStatus::Cancelled;
-//                 return true;
-//             }
-//             // —— 兜底对齐：既然没有在跑/待排队的分片，说明下载流程上的“工作”已完成
-//             // 若计数略小于总长（常见于 probe + 预分配/短读边界），直接对齐。
-//             if (t.TotalSize > 0 && t.Downloaded < t.TotalSize) {
-//                 logWarn << "任务" << taskId << "下载完成(无running 和pending),但计数不对齐，修正为" << t.TotalSize;
-//                 t.Downloaded = t.TotalSize;
-//             }
-//             t.Status = TaskStatus::Completed;
-//         }
-//         // 幂等清理
-//         {
-//             std::lock_guard<std::mutex> l(mMtx);
-//             mDlByTaskHttp.erase(taskId);
-//             mPendingRanges.erase(taskId);
-//             mParentFiles.erase(taskId);
-//         }
-//     } else if (opts->second.Strategy == DownloadStrategy::P2P_ONLY) {
-//         bool hasRunning = false;
-//         bool hasPending = false;
-//         {
-//             std::lock_guard<std::mutex> l(mMtx);
-//             auto itD = mDlByTaskP2p.find(taskId);
-//             hasRunning = (itD != mDlByTaskP2p.end() && !itD->second.empty());
-//             auto itP = mPendingRanges.find(taskId);
-//             hasPending = (itP != mPendingRanges.end() && !itP->second.empty());
-//         }
-//         if (hasRunning || hasPending)
-//             return false;
-
-//         {
-//             std::lock_guard<std::mutex> lk(mTasksMutex);
-//             auto itT = mTasks.find(taskId);
-//             if (itT == mTasks.end())
-//                 return false;
-
-//             auto& t = itT->second;
-//             if (t.Cancelled) {
-//                 t.Status = TaskStatus::Cancelled;
-//                 return true;
-//             }
-//             // —— 兜底对齐：既然没有在跑/待排队的分片，说明下载流程上的“工作”已完成
-//             // 若计数略小于总长（常见于 probe + 预分配/短读边界），直接对齐。
-//             if (t.TotalSize > 0 && t.Downloaded < t.TotalSize) {
-//                 logWarn << "任务" << taskId << "下载完成(无running 和pending),但计数不对齐，修正为" << t.TotalSize;
-//                 t.Downloaded = t.TotalSize;
-//             }
-//             t.Status = TaskStatus::Completed;
-//         }
-//         // 幂等清理
-//         {
-//             std::lock_guard<std::mutex> l(mMtx);
-//             mDlByTaskP2p.erase(taskId);
-//             mPendingRanges.erase(taskId);
-//             mParentFiles.erase(taskId);
-//         }
-//     }
-
-//     return true;
-// }
-
-// bool DownloadManager::p2pQueryPeersAsync_(uint64_t taskId, size_t start, size_t end)
-// {
-//     logDebug << "enter p2pQueryPeersAsync_ taskId=" << taskId << " offset=" << start << std::endl;
-//     // TODO: need some refactor, the outer caller has the same code snippet
-//     DownloadTask t;
-//     FileDownloadOptions opt;
-//     {
-//         std::lock_guard<std::mutex> lk(mTasksMutex);
-//         auto it = mTasks.find(taskId);
-//         if (it == mTasks.end())
-//             return false;
-//         t = it->second;
-//         auto itOpt = mTaskOptions.find(taskId);
-//         if (itOpt != mTaskOptions.end())
-//             opt = itOpt->second;
-//     }
-
-//     // nlohmann::json arg;
-//     auto arg = BuildQueryPeersRequest("192.168.1.1", t.Url, t.ContentHash, std::to_string(start), "", true);
-
-//     void* reqId = nullptr;
-//     auto succ = [this, taskId, start, end](nlohmann::json& res) { this->onP2PPeerQuerySuccess_(taskId, res, start, end); };
-//     auto fail = [this, taskId, start](int code) { this->onP2PPeerQueryFail_(taskId, code, start); };
-
-//     auto mm = MainManager::Singlet();
-//     if (mm == nullptr) {
-//         logError << "[P2P] MainManager::Singlet() is null";
-//         return false;
-//     }
-//     int rc = mm->AsyncApiPostWithToken(&reqId, kApiPeersByHashOrUrl, arg, this, succ, fail);
-
-//     // rc 1 is success?
-//     if (rc != 1) {
-//         logWarn << "[P2P] async query failed rc=" << rc << " taskId=" << taskId;
-//         return false;
-//     }
-
-//     {
-//         std::lock_guard<std::mutex> lk(mTasksMutex);
-//         p2pStates_[taskId][start].queryReqId = reqId;
-//         p2pStates_[taskId][start].queryInFlight = true;
-//         p2pStates_[taskId][start].offset = start;
-//         p2pStates_[taskId][start].lastQueryErr = 0;
-//     }
-//     return true;
-// }
-
-// void DownloadManager::onP2PPeerQueryFail_(uint64_t taskId, int errCode, size_t start)
-// {
-//     logError << "[P2P] peers 查询失败 err=" << errCode << " taskId=" << taskId << std::endl;
-
-//     {
-//         std::lock_guard<std::mutex> lk(mTasksMutex);
-//         p2pStates_[taskId][start].queryInFlight = false;
-//         p2pStates_[taskId][start].queryDone = true;
-//         p2pStates_[taskId][start].lastQueryErr = errCode;
-
-//         auto it = mTasks.find(taskId);
-//         if (it != mTasks.end()) {
-//             // P2P_ONLY模式简单处理：标记失败；如果在 HYBRID 里回退 HTTP，在此触发 HTTP 流程
-//             it->second.Status = TaskStatus::Failed;
-//         }
-//     }
-// }
-
-// void DownloadManager::onP2PPeerQuerySuccess_(uint64_t taskId, nlohmann::json& res, size_t start, size_t end)
-// {
-//     std::cout << "raw query result:"<< res.dump();
-//     logDebug << "query peers success taskId=" << taskId << " offset=" << start << std::endl;
-//     std::vector<PeerChunk> plan;
-//     // total size of the file (if we request a block, it means the size of the file that the block belong to)
-//     size_t totalSizeFromApi = 0;
-
-//     try {
-//         if (res.contains("size")) {
-//             totalSizeFromApi = std::stoull(res.value("size", "0"));
-//         }
-//         if (res.contains("peers") && res["peers"].is_array()) {
-//             for (auto& p : res["peers"]) {
-//                 PeerChunk pc;
-//                 pc.peerId = p.value("peerId", "");
-//                 pc.url = p.value("url", "");
-//                 pc.hash = p.value("hash", "");
-//                 pc.iceUfrag = p.value("iceUfrag", "");
-//                 pc.icePwd = p.value("icePwd", "");
-//                 pc.remoteSdp = p.value("connMeta", "");
-//                 pc.start = std::stoull(p.value("start", "0"));
-//                 pc.end = std::stoull(p.value("end", "0"));
-//                 plan.emplace_back(std::move(pc)); 
-//             }
-//         }
-//     } catch (const std::exception& ex) {
-//         logWarn << "[P2P] parse response error: " << ex.what() << " taskId=" << taskId;
-//         onP2PPeerQueryFail_(taskId, -2, start);
-//         return;
-//     }
-
-//     logDebug << "onP2PPeerQuerySuccess_ taskId=" << taskId << " offset =" << start << " plan size=" << plan.size();
-
-//     {
-//         std::lock_guard<std::mutex> lk(mTasksMutex);
-//         auto it = mTasks.find(taskId);
-//         if (it == mTasks.end())
-//             return;
-
-//         if (it->second.TotalSize == 0 && totalSizeFromApi > 0) {
-//             it->second.TotalSize = totalSizeFromApi;
-//         }
-
-//         p2pStates_[taskId][start].queryInFlight = false;
-//         p2pStates_[taskId][start].queryDone = true;
-//         p2pStates_[taskId][start].lastQueryErr = 0;
-//         p2pStates_[taskId][start].plan = plan;
-
-//         if (it->second.Status == TaskStatus::Pending) {
-//             it->second.Status = TaskStatus::Running;
-//         }
-//     }
-
-//     scheduleP2PChunks_(taskId, plan, start, end);
-// }
-
-// void DownloadManager::scheduleP2PChunks_(uint64_t taskId, const std::vector<PeerChunk>& plan, size_t start, size_t end)
-// {
-//     std::vector<PeerChunk> planO = plan;
-// #ifdef DEBUG_LOCAL_P2P
-//     planO.clear();
-//     planO.push_back({.peerId = "peer1", .start = 0, .end = 2097152 - 1});
-
-//     logInfo << "scheduleP2PChunks_ taskId=" << taskId << " plan size=" << planO.size();
-//     std::cout << "INPUT connMeta " << std::endl;
-//     std::string remote_sdp;
-//     std::string line;
-//     while (std::getline(std::cin, line) && !line.empty()) {
-//         remote_sdp += line + "\r\n";
-//     }
-//     planO.back().remoteSdp = remote_sdp;
-//     planO.back().remoteSdp.pop_back(); // \n
-//     planO.back().remoteSdp.pop_back(); // \r
-// #endif
-
-//     if (planO.empty()) {
-//         logError << "scheduleP2PChunks_ taskId=" << taskId << " plan is empty";
-//         return;
-//     }
-
-//     auto longestPlan_ = planO[0];
-//     for (auto& pc : planO) {
-//         if (pc.end > longestPlan_.end) {
-//             longestPlan_ = pc;
-//         }
-//     }
-
-//     FileDownloadOptions opts;
-//     DownloadTask t;
-//     {
-//         std::lock_guard<std::mutex> lk(mTasksMutex);
-//         auto itT = mTasks.find(taskId);
-//         if (itT == mTasks.end())
-//             return;
-//         t = itT->second;
-//         auto itOpt = mTaskOptions.find(taskId);
-//         if (itOpt != mTaskOptions.end())
-//             opts = itOpt->second;
-//     }
-
-//     if (t.Paused || t.Cancelled)
-//         return;
-
-//     size_t runningP2p = 0;
-//     {
-//         std::lock_guard<std::mutex> l(mMtx);
-//         auto it = mDlByTaskP2p.find(taskId);
-//         if (it != mDlByTaskP2p.end())
-//             runningP2p = it->second.size();
-//         if (mNextRangeIdx.find(taskId) == mNextRangeIdx.end())
-//             mNextRangeIdx[taskId] = 0;
-//     }
-
-//     PeerChunk clipped = longestPlan_;
-//     size_t s = start, e = std::min(longestPlan_.end, end);
-//     clipped.start = s;
-//     clipped.end = e;
-
-//     if (clipped.start > start){
-//         logError << "un-expected scheduleP2PChunks_ clipped.start > start";
-//     }else if (clipped.end < end){
-//         size_t missStart = clipped.end + 1;    
-//         size_t missEnd = end;
-//         std::lock_guard<std::mutex> l(mMtx);
-//         mPendingRanges[taskId].push_front(Range{missStart, missEnd});
-//         logInfo << "clipped.end < end, pending range: [" << missStart << ", " << missEnd << "]" << " previous range: [" << start << ", " << end << "]";
-//     }
-
-//     const size_t room = (mMaxConcurrent > runningP2p) ? (mMaxConcurrent - runningP2p) : 0;
-//     if (room == 0) {
-//         logError << "未实现的P2p并发限制分支, 请先将并发调大绕过";
-//         // 把 plan 全部扔进 pending，等回调/看门狗来续排
-//         std::lock_guard<std::mutex> l(mMtx);
-//         auto& q = mPendingRanges[taskId];
-
-//         logDebug << "scheduleP2PChunks_ pending ranges, taskId=" << taskId << " offset=" << start << " s=" << s
-//                  << " e=" << e;
-
-//         // TODO: implement
-//         // q.push_back(pc);
-//         return;
-//     }
-
-//     if (startOneP2PChunk_(taskId, clipped)) {
-//         return;
-//     } else {
-//         logError << "startOneP2PChunk_ failed taskId=" << taskId << " offset=" << start << "chunk=" << clipped.start
-//                  << "-" << clipped.end << "peer " << clipped.peerId << std::endl;
-//     }
-
-//     // 兜底 finalize
-//     maybeFinalizeTask(taskId);
-// }
-
-// bool DownloadManager::startOneP2PChunk_(uint64_t taskId, const PeerChunk& pc)
-// {
-//     // no launch
-//     {
-//         std::lock_guard<std::mutex> lk(mTasksMutex);
-//         auto it = mTasks.find(taskId);
-//         if (it == mTasks.end())
-//             return false;
-//         if (it->second.Paused || it->second.Cancelled)
-//             return false;
-//     }
-
-//     // output file fd
-//     std::shared_ptr<std::fstream> parentFile;
-//     {
-//         std::lock_guard<std::mutex> l(mMtx);
-//         auto itF = mParentFiles.find(taskId);
-//         if (itF != mParentFiles.end())
-//             parentFile = itF->second;
-//     }
-
-//     download::P2PDownloaderTaskOption opt;
-//     opt.PeerID = pc.peerId;
-//     opt.PeerSdp = pc.remoteSdp;
-// #ifdef DEBUG_LOCAL_P2P
-//     opt.IceUfrag = "kul9";
-//     opt.IcePwd = "HArM7vdA12b4f+NrSE1hMu";
-//     opt.ContentHash = "cd4a7faf4ed9cd3486cb08ff1dcfd040";
-// #else
-//     opt.IceUfrag = pc.iceUfrag;
-//     opt.IcePwd = pc.icePwd;
-//     opt.ContentHash = pc.hash;
-// #endif
-//     opt.Start = pc.start;
-//     opt.End = pc.end;
-//     opt.Notify = &DownloadManager::coreNotifyCallbackP2p;
-//     opt.Receiver = this;
-//     logDebug << "[P2P] CreateTask peer=" << pc.peerId << " range=" << pc.start << "-" << pc.end << " sdp = " << opt.PeerSdp << " iceUfrag = " << opt.IceUfrag << " icePwd = " << opt.IcePwd << " hash = " << opt.ContentHash;
-//     auto sub = mP2pDownloader->CreateTask(&opt);
-//     if (!sub) {
-//         logWarn << "[P2P] CreateTask failed peer=" << pc.peerId << " range=" << pc.start << "-" << pc.end;
-//         return false;
-//     }
-
-//     size_t idx = 0;
-//     {
-//         std::lock_guard<std::mutex> l(mMtx);
-//         idx = mNextRangeIdx[taskId]++;
-
-//         ActiveSubTask st;
-//         st.parentTaskId = taskId;
-//         st.offset = pc.start;
-//         st.length = pc.end - pc.start + 1;
-//         st.index = static_cast<int>(idx);
-//         st.downloader = sub;
-//         st.file = parentFile;
-//         st.isProbe = false;
-//         st.lastTouched = std::chrono::steady_clock::now();
-
-//         mActiveByPtrP2p[sub.get()] = std::move(st);
-//         mDlByTaskP2p[taskId].push_back(sub);
-//     }
-
-//     mP2pDownloader->AddTask(sub);
-//     logDebug << "[P2P][Launch] idx=" << idx << " range " << pc.start << "-" << pc.end << " peer=" << pc.peerId
-//              << " peerSdp" << pc.remoteSdp << "ufrag=" << pc.iceUfrag << "pwd=" << pc.icePwd << std::endl;
-//     return true;
-// }
+#include "DownloadManager.h"
+
+#include <nlohmann/json.hpp>
+
+#include <algorithm>
+#include <chrono>
+#include <cstdio> // std::remove
+#include <deque>
+#include <fstream>
+#include <future>
+#include <iostream>
+#include <memory>
+#include <sstream>
+#include <unordered_map>
+#include <unordered_set>
+
+#include "MainManager.h"
+#include "P2PDownloader.h"
+using namespace dcdn;
+using nlohmann::json;
+
+namespace {
+static constexpr const char* kApiPeersByHashOrUrl = "/api/v1/query_peers_by_file";
+
+static TaskId genTaskId()
+{
+    static std::atomic<uint64_t> cnt{0};
+    static const uint64_t base = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+    return base + cnt++;
+}
+
+struct DrainResult
+{
+    size_t bytesWritten = 0;
+    size_t firstWriteAbsBegin = SIZE_MAX; // 仅用于回调范围合并
+    size_t lastWriteAbsEnd = 0;
+};
+
+// 统一写入工具：将 [bufBeg,bufEnd] 与 [segBeg,segEnd] 求交集，裁剪后写入。
+// - 写入优先级：OutputStream -> OutputPath(随机写 fstream) -> IFileStore(若注入)；
+//   如果注入了 IFileStore，优先使用 IFileStore（便于测试与替换）。
+static void write_bytes_clipped(
+    const uint8_t* data,
+    size_t bufLen,
+    size_t bufOffsetAbs, // buffer 描述
+    size_t clipBeg,
+    size_t clipEnd, // 分片负责区间（闭区间）
+    const FileDownloadOptions& opts,
+    std::shared_ptr<std::fstream> file,
+    TaskId taskId,
+    DownloadManager::Dependencies deps,
+    DrainResult& agg // 汇总
+)
+{
+    if (!data || bufLen == 0)
+        return;
+
+    const size_t bufBeg = bufOffsetAbs;
+    const size_t bufEnd = bufOffsetAbs + (bufLen - 1);
+
+    if (clipBeg > clipEnd || bufBeg > bufEnd)
+        return;
+
+    const size_t wrBeg = (bufBeg > clipBeg) ? bufBeg : clipBeg;
+    const size_t wrEnd = (bufEnd < clipEnd) ? bufEnd : clipEnd;
+    if (wrBeg > wrEnd)
+        return;
+
+    const size_t accept = wrEnd - wrBeg + 1;
+    const size_t srcOff = wrBeg - bufBeg;
+    if (bufBeg < clipBeg) {
+        logWarn << "[write_bytes_clipped] bufBeg(" << bufBeg << ") < clipBeg(" << clipBeg << ")";
+    } else if (bufEnd > clipEnd) {
+        logWarn << "[write_bytes_clipped] bufEnd(" << bufEnd << ") > clipEnd(";
+    }
+    // 1) 如果是“按 Range 写到独立文件”，则把 wrBeg 折算成相对 RangeStart 的偏移
+    // 2) 否则按资源绝对偏移 wrBeg 写入
+    size_t dstOff = wrBeg;
+    if (opts.HasRange && opts.WriteRangeToSeparateFile) {
+        // 防御：避免 RangeStart > wrBeg 导致 size_t underflow
+        if (wrBeg >= opts.RangeStart) {
+            dstOff = wrBeg - opts.RangeStart;
+        } else {
+            // 异常：日志并回退为 0
+            logWarn << "[write_bytes_clipped] wrBeg(" << wrBeg << ") < RangeStart(" << opts.RangeStart
+                    << "), fallback dstOff=0";
+            dstOff = 0;
+        }
+    }
+
+    bool wrote = false;
+
+    // IFileStore first
+    if (deps.files) {
+        wrote = deps.files->Write(taskId, dstOff, data + srcOff, accept);
+        if (!wrote) {
+            logWarn << "[write_bytes_clipped] IFileStore::Write failed, taskId=" << taskId << " dstOff=" << dstOff
+                    << " accept=" << accept;
+        }
+    }
+
+    // —— 没有 IFileStore 才走 OutputStream / 本地文件
+    if (!wrote) {
+        if (opts.OutputStream) {
+            try {
+                // 这里假定 OutputStream 只用于串流（顺序写）。如果存在乱序写，建议不要使用 OutputStream。
+                // 若要严格保证位置，可考虑 dynamic_cast 到 std::ostream* 是否可 seekp，
+                // 但通常 OutputStream 代表“顺序消耗”，这里不 seek。
+                opts.OutputStream->write(reinterpret_cast<const char*>(data + srcOff), accept);
+                wrote = true;
+            } catch (...) {
+                wrote = false;
+                logWarn << "[write_bytes_clipped] OutputStream write threw exception";
+            }
+        } else if (!opts.OutputPath.empty()) {
+            // 优先使用已缓存的父文件句柄
+            if (file && file->good()) {
+                try {
+                    file->seekp(static_cast<std::streamoff>(dstOff), std::ios::beg);
+                    // logDebug << "#seekp write[" << dstOff << "," << dstOff + accept - 1 << "]" << "srcOff " <<
+                    // srcOff;
+                    file->write(reinterpret_cast<const char*>(data + srcOff), accept);
+                    wrote = true;
+                } catch (...) {
+                    wrote = false;
+                    logWarn << "[write_bytes_clipped] fstream seek/write exception, dstOff=" << dstOff
+                            << " accept=" << accept;
+                }
+            } else {
+                // 兜底：临时打开
+                std::fstream ofs(opts.OutputPath, std::ios::in | std::ios::out | std::ios::binary);
+                if (!ofs) {
+                    // 文件不存在则创建
+                    std::ofstream create(opts.OutputPath, std::ios::binary);
+                    create.close();
+                    ofs.open(opts.OutputPath, std::ios::in | std::ios::out | std::ios::binary);
+                }
+                if (ofs) {
+                    ofs.seekp(static_cast<std::streamoff>(dstOff), std::ios::beg);
+                    ofs.write(reinterpret_cast<const char*>(data + srcOff), accept);
+                    wrote = true;
+                } else {
+                    logWarn << "[write_bytes_clipped] open fallback file failed: " << opts.OutputPath;
+                }
+            }
+        }
+    }
+
+    if (wrote) {
+        agg.bytesWritten += accept;
+        if (agg.firstWriteAbsBegin == SIZE_MAX)
+            agg.firstWriteAbsBegin = wrBeg;
+        agg.lastWriteAbsEnd = wrEnd;
+    }
+    // logDebug << "agg bytesWritten=" << accept << " accumulation =" << agg.bytesWritten;
+}
+
+} // namespace
+
+std::string DownloadTask::Serialize() const
+{
+    std::ostringstream ss;
+    ss << Id << "|" << Url << "|" << ContentHash << "|" << TotalSize << "|" << Downloaded << "|"
+       << static_cast<int>(Status);
+    return ss.str();
+}
+
+DownloadTask DownloadTask::Deserialize(const std::string& data)
+{
+    DownloadTask task;
+    std::istringstream ss(data);
+    std::string token;
+    if (!std::getline(ss, token, '|'))
+        return task;
+    try {
+        task.Id = static_cast<uint64_t>(std::stoull(token));
+    } catch (...) {
+        task.Id = 0;
+    }
+    std::getline(ss, task.Url, '|');
+    std::getline(ss, task.ContentHash, '|');
+    if (!std::getline(ss, token, '|'))
+        return task;
+    task.TotalSize = static_cast<size_t>(std::stoull(token));
+    if (!std::getline(ss, token, '|'))
+        return task;
+    task.Downloaded = static_cast<size_t>(std::stoull(token));
+    if (!std::getline(ss, token, '|'))
+        return task;
+    task.Status = static_cast<TaskStatus>(std::stoi(token));
+    return task;
+}
+
+// ========== PersistenceHelper（sqlite 桩实现，便于后续替换） ==========
+DownloadManager::PersistenceHelper::PersistenceHelper(const std::string& dbPath)
+{
+    (void)dbPath;
+    mDb = nullptr;
+}
+DownloadManager::PersistenceHelper::~PersistenceHelper() {}
+
+bool DownloadManager::PersistenceHelper::saveTask(const DownloadTask& task)
+{
+    (void)task;
+    return true;
+}
+bool DownloadManager::PersistenceHelper::loadTasks(std::vector<DownloadTask>& tasks)
+{
+    (void)tasks;
+    return true;
+}
+bool DownloadManager::PersistenceHelper::deleteTask(TaskId taskId)
+{
+    (void)taskId;
+    return true;
+}
+
+bool DownloadManager::PersistenceHelper::saveSubTasks(TaskId taskId, const std::vector<SubTaskRec>& subtasks)
+{
+    (void)taskId;
+    (void)subtasks;
+    return true;
+}
+
+bool DownloadManager::PersistenceHelper::loadSubTasks(TaskId taskId, std::vector<SubTaskRec>& subtasks)
+{
+    (void)taskId;
+    (void)subtasks;
+    return true;
+}
+
+DownloadManager::DownloadManager(
+    std::shared_ptr<util::HttpDownloader> http,
+    std::shared_ptr<download::P2PDownloader> p2p)
+    : BaseManager(nullptr)
+{
+    mDeps.http = std::move(http);
+    mDeps.p2p = std::move(p2p);
+
+    this->registerHandler(EventType::FunctionCall, &DownloadManager::handleFunctionCall);
+}
+
+DownloadManager::DownloadManager(const Dependencies& injected): BaseManager(nullptr), mDeps(injected)
+{
+    this->registerHandler(EventType::FunctionCall, &DownloadManager::handleFunctionCall);
+}
+
+DownloadManager::~DownloadManager()
+{
+    // resource cleanup is handled by smart pointers automatically;
+}
+
+void DownloadManager::Init() {}
+
+void DownloadManager::watchdogHandleMayStalledSubtask(
+    const ActiveSubTask& st,
+    std::chrono::steady_clock::time_point now,
+    const std::chrono::seconds& staleTimeout)
+{
+    bool paused = false, cancelled = false;
+    {
+        AnnotatedMutex::Guard lk(mTasksMutex);
+        auto it = mTasks.find(st.parentTaskId);
+        if (it != mTasks.end()) {
+            paused = it->second.Paused.load();
+            cancelled = it->second.Cancelled.load();
+        }
+    }
+
+    if (paused || cancelled)
+        return;
+
+    if (now - st.lastTouched > staleTimeout) {
+        const size_t got = static_cast<size_t>(st.actualGot);
+        if (got >= st.length)
+            return;
+
+        const size_t missStart = st.offset + got;
+        const size_t missEnd = st.offset + st.length - 1;
+
+        // cancel stalled subtask and pending miss
+        {
+            AnnotatedMutex::Guard lk(mEventMutex);
+            auto raw = st.downloader.get();
+            mActiveByPtrHttp.erase(raw);
+            auto& vec = mDlByTaskHttp[st.parentTaskId];
+            vec.erase(
+                std::remove_if(
+                    vec.begin(),
+                    vec.end(),
+                    [raw](const std::shared_ptr<util::DownloaderTask>& p) { return p.get() == raw; }),
+                vec.end());
+            mPendingRanges[st.parentTaskId].push_front(Range{missStart, missEnd});
+            mCancelledRawHttp.insert(raw);
+            if (mDeps.http)
+                mDeps.http->CancelTask(st.downloader);
+            logWarn << "[watchdog] cancel stalled subtask idx=" << st.index << " miss=[" << missStart << "," << missEnd
+                    << "]";
+        }
+
+        // 立即续排一个(TODO: 应该考虑并发数受限？)
+        Range r;
+        bool hasNext = false;
+        {
+            AnnotatedMutex::Guard lk(mEventMutex);
+
+            auto& q = mPendingRanges[st.parentTaskId];
+            if (!q.empty()) {
+                r = q.front();
+                q.pop_front();
+                hasNext = true;
+            }
+        }
+        if (hasNext) {
+            std::string urlLocal;
+            {
+                AnnotatedMutex::Guard lk(mTasksMutex);
+                auto itT = mTasks.find(st.parentTaskId);
+                if (itT != mTasks.end())
+                    urlLocal = itT->second.Url;
+            }
+            if (st.transport == ActiveSubTask::Transport::P2P) {
+                handleP2pSubtaskStall(st, now);
+            } else if (st.transport == ActiveSubTask::Transport::HTTP) {
+                scheduleHttpChunk_(st.parentTaskId, urlLocal, r.start, r.end);
+            }
+        }
+    }
+}
+void DownloadManager::handleHttpSubtaskStall(const ActiveSubTask& st, std::chrono::steady_clock::time_point now)
+{
+    void(st.parentTaskId);
+}
+
+void DownloadManager::handleP2pSubtaskStall(const ActiveSubTask& st, std::chrono::steady_clock::time_point now)
+{
+    // TODO:
+    logWarn << "[watchdog] p2p subtask stall NOT IMPLEMENTED!!!!!!!!!!!" << std::endl;
+    return;
+}
+
+// ========== BaseManager 线程主函数：事件主循环（poll、分发、驱动 FSM） ==========
+void DownloadManager::run()
+{
+    DmLoopThreadCap::Guard loop_guard(loop_cap_);
+    using namespace std::chrono_literals;
+
+    auto lastReap = std::chrono::steady_clock::now();
+    const auto reapInterval = 1s; // 看门狗巡检周期
+    const auto staleTimeout = 8s; // N 秒无进展视为卡死
+
+    while (true) {
+        {
+            std::unique_lock<std::mutex> lk(mEventMutex.native_handle());
+            mCv.wait_for(lk, reapInterval, [&]() REQUIRES(mEventMutex) {
+                return !mDlEventsHttp.empty() || !mDlEventsP2p.empty() || !mEvents.empty();
+            });
+        }
+
+        // execute control cmd
+        if (!mEvents.empty()) {
+            this->waitEvent(0ms);
+        }
+
+        // downloader read ready events
+        std::vector<std::shared_ptr<util::DownloaderTask>> httpBatch;
+        std::vector<std::shared_ptr<util::DownloaderTask>> p2pBatch;
+        {
+            AnnotatedMutex::Guard g(mEventMutex);
+            httpBatch.reserve(mDlEventsHttp.size());
+            for (auto& kv : mDlEventsHttp)
+                httpBatch.push_back(kv.second);
+            mDlEventsHttp.clear();
+
+            p2pBatch.reserve(mDlEventsP2p.size());
+            for (auto& kv : mDlEventsP2p)
+                p2pBatch.push_back(kv.second);
+            mDlEventsP2p.clear();
+        }
+
+        for (auto& t : httpBatch) {
+            try {
+                processHttpEvent(t);
+            } catch (...) {
+            }
+        }
+        for (auto& t : p2pBatch) {
+            try {
+                processP2pEvent(t);
+            } catch (...) {
+            }
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        if (now - lastReap >= reapInterval) {
+            lastReap = now;
+
+            std::vector<ActiveSubTask> snapshot;
+            {
+                AnnotatedMutex::Guard lk(mEventMutex);
+                snapshot.reserve(mActiveByPtrHttp.size());
+                for (auto& kv : mActiveByPtrHttp)
+                    snapshot.push_back(kv.second);
+            }
+
+            for (auto& st : snapshot) {
+                if (st.isProbe || st.length == 0)
+                    continue;
+                watchdogHandleMayStalledSubtask(st, now, staleTimeout);
+            }
+
+            // 巡检后尝试 finalize
+            {
+                std::vector<TaskId> toCheck;
+                {
+                    AnnotatedMutex::Guard lk(mEventMutex);
+                    toCheck.reserve(mDlByTaskHttp.size() + mDlByTaskP2p.size());
+                    for (auto& kv : mDlByTaskHttp)
+                        toCheck.push_back(kv.first);
+                    for (auto& kv : mDlByTaskP2p)
+                        toCheck.push_back(kv.first);
+                }
+                for (auto id : toCheck) {
+                    applyFsm_(id, FinalizeCheck{id});
+                }
+            }
+        }
+    }
+}
+
+void DownloadManager::handleFunctionCall(std::shared_ptr<Event> evt)
+{
+    auto* a = dynamic_cast<ArgEvent<std::function<void()>>*>(evt.get());
+    if (!a)
+        return;
+    auto fn = a->Arg();
+    if (fn)
+        fn();
+}
+
+void DownloadManager::coreNotifyCallbackHttp(std::shared_ptr<util::DownloaderTask> task, void* receiver)
+{
+    if (!task || !receiver)
+        return;
+    auto* self = static_cast<DownloadManager*>(receiver);
+    {
+        AnnotatedMutex::Guard g(self->mEventMutex);
+        if (self->mCancelledRawHttp.count(task.get()))
+            return;
+        self->mDlEventsHttp[task.get()] = std::move(task);
+    }
+    self->mCv.notify_all();
+}
+
+void DownloadManager::coreNotifyCallbackP2p(std::shared_ptr<util::DownloaderTask> task, void* receiver)
+{
+    if (!task || !receiver)
+        return;
+    auto* self = static_cast<DownloadManager*>(receiver);
+    {
+        AnnotatedMutex::Guard g(self->mEventMutex);
+        if (self->mCancelledRawP2p.count(task.get()))
+            return;
+        self->mDlEventsP2p[task.get()] = std::move(task);
+    }
+    self->mCv.notify_all();
+}
+
+// ========== 将 downloader 事件转为抽象事件并进入 FSM（HTTP）==========
+void DownloadManager::processHttpEvent(std::shared_ptr<util::DownloaderTask> ev)
+{
+    auto* raw = ev.get();
+
+    // cancelled task event, discard
+    {
+        AnnotatedMutex::Guard g(mEventMutex);
+        if (mCancelledRawHttp.count(raw))
+            return;
+    }
+
+    ActiveSubTask active;
+    auto it = mActiveByPtrHttp.find(raw);
+    if (it == mActiveByPtrHttp.end()) {
+        return; // late event
+    }
+    active = it->second;
+
+    const bool isEnd = ev->IsEnd();
+    auto buffer = ev->Read();
+    if (!buffer)
+        return;
+
+    // 计算本次事件对应的分片范围：
+    // - 常规：使用 active.offset/length
+    // - probe：这次读取了多少就以多少作为"临时范围"，让 FSM 去写与计算
+    size_t segStart = active.offset;
+    size_t segEnd = active.offset + (active.length ? (active.length - 1) : 0);
+
+    size_t probeDataLen = 0;
+    size_t probedContentLen = 0;
+    if (active.isProbe) {
+        auto tmp = buffer;
+        while (tmp) {
+            probeDataLen += tmp->Length();
+            tmp = tmp->Next();
+        }
+        // probe 任务没有固定 length，用"这次读到的数据长度"作为临时范围
+        segStart = active.offset;
+        ;
+        segEnd = active.offset + ((probeDataLen > 0) ? (probeDataLen - 1) : 0);
+
+        if (auto ht = dynamic_cast<util::HttpDownloaderTask*>(ev.get())) {
+            probedContentLen = ht->ContentLength();
+        }
+        logDebug << "probeDataLen: " << probeDataLen << ", probedContentLen: " << probedContentLen;
+    }
+    // enter FSM: data
+    IOData dataEv{};
+    dataEv.id = active.parentTaskId;
+    dataEv.absOffset = segStart; // 这里作为"本次写入起点"的提示值；真正写入用 buffer->Offset 裁剪
+    dataEv.data = buffer;
+    dataEv.segStart = segStart;
+    dataEv.segEnd = segEnd;
+    dataEv.isProbe = active.isProbe;
+    dataEv.probeLenSnapshot = probeDataLen;
+    dataEv.contentLenHint = probedContentLen;
+    applyFsm_(dataEv);
+    uint64_t got = 0;
+    {
+        AnnotatedMutex::Guard lk(mEventMutex);
+        auto it = mActiveByPtrHttp.find(raw);
+        if (it != mActiveByPtrHttp.end()) {
+            it->second.lastTouched = std::chrono::steady_clock::now();
+            got = it->second.actualGot; // 使用前面 bump 后的真实写入量
+        }
+    }
+    // logInfo << "##########" << "data buf [ "<< dataEv.data->Offset() << ","  << dataEv.data->Offset() + got - 1<<
+    // " ] << seg start end is[" << segStart << ", " << segEnd << "]";
+
+    // 结束事件（下载器声明结束，或普通分片按长度读满）
+    const bool endByLength = (!active.isProbe && active.length > 0 && got >= active.length);
+    if (isEnd || endByLength) {
+        size_t contentLenIfProbe = 0;
+        if (active.isProbe) {
+            if (auto ht = dynamic_cast<util::HttpDownloaderTask*>(raw)) {
+                contentLenIfProbe = ht->ContentLength();
+            }
+        }
+        IOEnd endEv{};
+        endEv.id = active.parentTaskId;
+        endEv.ok = true;
+        endEv.actuallyGot = static_cast<size_t>(got);
+        endEv.segStart = segStart;
+        endEv.segEnd = segEnd;
+        endEv.isProbe = active.isProbe;
+        endEv.contentLen = contentLenIfProbe;
+        applyFsm_(endEv);
+    }
+}
+
+// ========== 将 downloader 事件转为抽象事件并进入 FSM（P2P）==========
+void DownloadManager::processP2pEvent(std::shared_ptr<util::DownloaderTask> ev)
+{
+    auto* raw = ev.get();
+    {
+        AnnotatedMutex::Guard lk(mEventMutex);
+        if (mCancelledRawP2p.count(raw)) {
+            logInfo << "p2p event cancelled";
+            return;
+        }
+    }
+
+    ActiveSubTask active;
+    auto it = mActiveByPtrP2p.find(raw);
+    if (it == mActiveByPtrP2p.end()) {
+        return;
+    }
+    active = it->second;
+
+    const bool isEnd = ev->IsEnd();
+    auto buffer = ev->Read();
+    if (!buffer)
+        return;
+
+    // 统计链上总长度（给 end 用），P2P 的 seg 区间来自 ActiveSubTask
+    size_t totalLen = 0;
+    {
+        auto tmp = buffer;
+        while (tmp) {
+            totalLen += tmp->Length();
+            tmp = tmp->Next();
+        }
+    }
+
+    const size_t segBeg = active.offset;
+    const size_t segEnd = active.offset + (active.length ? (active.length - 1) : 0);
+
+    IOData dataEv{};
+    dataEv.id = active.parentTaskId;
+    dataEv.absOffset = segBeg;
+    dataEv.data = buffer;
+    dataEv.segStart = segBeg;
+    dataEv.segEnd = segEnd;
+    dataEv.isProbe = false;
+    dataEv.peerId = ""; // 如需，可在 ActiveSubTask 增加 peerId 再填
+    applyFsm_(dataEv);
+
+    if (isEnd) {
+        IOEnd endEv{};
+        endEv.id = active.parentTaskId;
+        endEv.ok = true;
+        endEv.actuallyGot = totalLen;
+        endEv.segStart = segBeg;
+        endEv.segEnd = segEnd;
+        endEv.isProbe = false;
+        applyFsm_(endEv);
+    }
+}
+
+void DownloadManager::transitionLocked_(TaskId id, TaskStatus to)
+{
+    auto it = mTasks.find(id);
+    if (it == mTasks.end())
+        return;
+    const auto from = it->second.Status;
+    if (from == to)
+        return;
+    it->second.Status = to;
+    publish_(ETaskStatusChanged{id, from, to});
+}
+
+bool DownloadManager::canFinalize_(TaskId id)
+{
+    bool hasRunningHttp = false, hasRunningP2p = false, hasPending = false, hasP2pQueryInflight = false;
+
+    auto itH = mDlByTaskHttp.find(id);
+    hasRunningHttp = (itH != mDlByTaskHttp.end() && !itH->second.empty());
+    auto itP = mDlByTaskP2p.find(id);
+    hasRunningP2p = (itP != mDlByTaskP2p.end() && !itP->second.empty());
+    auto itQ = mPendingRanges.find(id);
+    hasPending = (itQ != mPendingRanges.end() && !itQ->second.empty());
+
+    auto it = p2pStates_.find(id);
+    if (it != p2pStates_.end()) {
+        hasP2pQueryInflight =
+            std::any_of(it->second.begin(), it->second.end(), [](const auto& kv) { return kv.second.queryInFlight; });
+    }
+    return !(hasRunningHttp || hasRunningP2p || hasPending || hasP2pQueryInflight);
+}
+
+void DownloadManager::applyFsm_(TaskId id, const FinalizeCheck&)
+{
+    if (!canFinalize_(id))
+        return;
+    logDebug << "###############Finalize task applyFsm " << id;
+    // transit task status
+    {
+        AnnotatedMutex::Guard lk(mTasksMutex);
+        auto itT = mTasks.find(id);
+        if (itT == mTasks.end())
+            return;
+        auto& t = itT->second;
+        if (t.Cancelled) {
+            transitionLocked_(id, TaskStatus::Cancelled);
+        } else {
+            if (t.TotalSize > 0 && t.Downloaded < t.TotalSize) {
+                logWarn << "[🐛]Task Downloaded Force Aligned," << id
+                        << "unexpected downloaded less than expected: " << t.Downloaded << " < " << t.TotalSize;
+                t.Downloaded = t.TotalSize;
+            }
+            transitionLocked_(id, TaskStatus::Completed);
+        }
+    }
+
+    // clean up run-time resources
+    mDlByTaskHttp.erase(id);
+    mDlByTaskP2p.erase(id);
+    mPendingRanges.erase(id);
+    mParentFiles.erase(id);
+}
+
+void DownloadManager::applyFsm_(const IOData& ev)
+{
+    // ========== A) 若是 probe 且已经拿到 Content-Length，则立刻切分并取消 probe ==========
+    if (ev.isProbe && ev.contentLenHint > 0) {
+        FileDownloadOptions opts;
+        bool needSplit = false;
+        size_t totalLen = 0;
+        size_t baseOffset = 0;
+
+        {
+            AnnotatedMutex::Guard lk(mTasksMutex);
+            auto it = mTasks.find(ev.id);
+            if (it != mTasks.end() && it->second.TotalSize == 0) {
+                auto itOpt = mTaskOptions.find(ev.id);
+                if (itOpt != mTaskOptions.end())
+                    opts = itOpt->second;
+
+                const size_t clen = ev.contentLenHint;
+                if (opts.HasRange) {
+                    baseOffset = opts.RangeStart;
+                    if (opts.RangeEnd != SIZE_MAX) {
+                        totalLen = (opts.RangeEnd >= opts.RangeStart) ? (opts.RangeEnd - opts.RangeStart + 1) : 0;
+                    } else {
+                        totalLen = (baseOffset >= clen) ? 0 : (clen - baseOffset);
+                    }
+                } else {
+                    baseOffset = 0;
+                    totalLen = clen;
+                }
+
+                if (totalLen > 0) {
+                    it->second.TotalSize = totalLen;
+                    it->second.Status = TaskStatus::Running;
+                    needSplit = true;
+                } else {
+                    it->second.Status = TaskStatus::Failed;
+                }
+            }
+        }
+
+        if (needSplit) {
+            // NOTE: the internal splitTask will locate and cancel running probe subtasks
+            splitTask(ev.id, ev.probeLenSnapshot, totalLen, baseOffset);
+            // no return here to keep probe data
+        }
+    }
+
+    // ========== B) 通用：将 buffer 链按 [segStart, segEnd] clip 并写入 ==========
+    FileDownloadOptions opts;
+    std::shared_ptr<std::fstream> file;
+    {
+        AnnotatedMutex::Guard l(mTasksMutex);
+        auto itOpt = mTaskOptions.find(ev.id);
+        if (itOpt != mTaskOptions.end())
+            opts = itOpt->second;
+    }
+
+    auto itF = mParentFiles.find(ev.id);
+    if (itF != mParentFiles.end())
+        file = itF->second;
+
+    DrainResult agg{};
+    auto b = ev.data;
+    while (b) {
+        const size_t len = b->Length();
+        const size_t off = b->Offset(); // 资源绝对偏移
+        // logDebug << "[P2P][Write] task id=" << ev.id << " range " << off << "-" << (off + len - 1) << std::endl;
+        write_bytes_clipped(
+            reinterpret_cast<const uint8_t*>(b->Data()),
+            len,
+            off,
+            ev.segStart,
+            ev.segEnd,
+            opts,
+            file,
+            ev.id,
+            mDeps,
+            agg);
+        b = b->Next();
+    }
+
+    // 进度 + buffer-ready
+    if (agg.bytesWritten > 0) {
+        updateTaskProgress(ev.id, agg.bytesWritten);
+        const size_t readyBeg = (agg.firstWriteAbsBegin == SIZE_MAX) ? ev.segStart : agg.firstWriteAbsBegin;
+        const size_t readyEnd = agg.lastWriteAbsEnd;
+        if (readyBeg <= readyEnd)
+            notifyBufferReady(ev.id, readyBeg, readyEnd);
+    }
+
+    // 心跳/actualGot（尽量定位对应 subtask）
+    // TODO: 优化
+    auto bump = [&](auto& activeByPtrMap, auto& dlByTaskMap) {
+        // taskID -> util::DownloadTask -> ActiveSubTask
+        auto itTask = dlByTaskMap.find(ev.id);
+        if (itTask == dlByTaskMap.end())
+            return false;
+        for (auto& dlTask : itTask->second) {
+            auto raw = dlTask.get();
+            auto itActiveSub = activeByPtrMap.find(raw);
+            if (itActiveSub == activeByPtrMap.end())
+                continue;
+            auto& subT = itActiveSub->second;
+            const size_t stEnd = subT.length ? (subT.offset + subT.length - 1) : subT.offset;
+            const bool matched = subT.isProbe ? ev.isProbe : (subT.offset == ev.segStart && stEnd == ev.segEnd);
+            if (matched) {
+                subT.actualGot += agg.bytesWritten;
+                subT.lastTouched = std::chrono::steady_clock::now();
+                return true;
+            }
+        }
+        return false;
+    };
+    if (agg.bytesWritten > 0) {
+        if (!bump(mActiveByPtrHttp, mDlByTaskHttp))
+            bump(mActiveByPtrP2p, mDlByTaskP2p);
+    }
+
+    {
+        AnnotatedMutex::Guard lk(mTasksMutex);
+        auto it = mTasks.find(ev.id);
+        if (it != mTasks.end()) {
+            publish_(ETaskProgress{ev.id, it->second.Downloaded, it->second.TotalSize});
+        }
+    }
+    applyFsm_(ev.id, FinalizeCheck{ev.id});
+}
+
+void DownloadManager::applyFsm_(const IOEnd& ev)
+{
+    logInfo << "任务 " << ev.id << " IOEnd" << ev.segStart << "-" << ev.segEnd << " actual got " << ev.actuallyGot;
+    if (ev.segEnd - ev.segStart + 1 > ev.actuallyGot) {
+        logWarn << "IOEnd 任务得到比预期少的数据: less" << ev.segEnd - ev.segStart + 1 - ev.actuallyGot << "Bytes "
+                << ev.id << " IOEnd" << ev.segStart << "-" << ev.segEnd << " actual got " << ev.actuallyGot;
+    } else if (ev.segEnd - ev.segStart + 1 < ev.actuallyGot) {
+        logWarn << "IOEnd 任务得到比预多的数据: more" << ev.actuallyGot - (ev.segEnd - ev.segStart + 1) << "Bytes "
+                << ev.id << " IOEnd" << ev.segStart << "-" << ev.segEnd << " actual got " << ev.actuallyGot;
+    }
+    // 1) 将对应 subtask 从活跃集合中移除
+    auto findAndRemoveByRange = [&](auto& activeByPtrMap, auto& dlByTaskMap) -> bool {
+        // taskid --> util::DownloadTask -- > ActiveSubTask
+        auto itV = dlByTaskMap.find(ev.id);
+        if (itV == dlByTaskMap.end())
+            return false;
+        for (auto it = itV->second.begin(); it != itV->second.end();) {
+            auto raw = it->get();
+            auto itA = activeByPtrMap.find(raw);
+            if (itA == activeByPtrMap.end()) {
+                ++it;
+                continue;
+            }
+            const auto& st = itA->second;
+            const size_t stEnd = st.length ? (st.offset + st.length - 1) : st.offset;
+            const bool matched = st.isProbe ? ev.isProbe : (st.offset == ev.segStart && stEnd == ev.segEnd);
+            if (matched) {
+                activeByPtrMap.erase(raw);
+                it = itV->second.erase(it);
+                return true;
+            } else {
+                ++it;
+            }
+        }
+        return false;
+    };
+
+    if (!findAndRemoveByRange(mActiveByPtrHttp, mDlByTaskHttp)) {
+        findAndRemoveByRange(mActiveByPtrP2p, mDlByTaskP2p);
+    }
+
+    if (ev.isProbe) {
+        return;
+    }
+
+    // 3) 非 probe：处理短读（回填到 pending）
+    const size_t expected = (ev.segEnd >= ev.segStart) ? (ev.segEnd - ev.segStart + 1) : 0;
+    if (ev.ok && ev.actuallyGot < expected) {
+        const size_t missStart = ev.segStart + ev.actuallyGot;
+        const size_t missEnd = ev.segEnd;
+        AnnotatedMutex::Guard lk(mEventMutex);
+        mPendingRanges[ev.id].push_front(Range{missStart, missEnd});
+        logWarn << "missed range: [" << missStart << ", " << missEnd << ")" << " taskId=" << ev.id
+                << "actual got=" << ev.actuallyGot;
+    }
+
+    // 4) 按策略续排一个 pending
+    bool paused = false, cancelled = false;
+    DownloadStrategy strategy = DownloadStrategy::HTTP_ONLY;
+    std::string urlLocal;
+    {
+        AnnotatedMutex::Guard lk(mTasksMutex);
+        auto it = mTasks.find(ev.id);
+        if (it != mTasks.end()) {
+            paused = it->second.Paused.load();
+            cancelled = it->second.Cancelled.load();
+            urlLocal = it->second.Url;
+        }
+        auto itOpt = mTaskOptions.find(ev.id);
+        if (itOpt != mTaskOptions.end())
+            strategy = itOpt->second.Strategy;
+    }
+
+    if (!paused && !cancelled) {
+        Range r;
+        bool hasNext = false;
+        {
+            AnnotatedMutex::Guard lk(mEventMutex);
+            auto& q = mPendingRanges[ev.id];
+            if (!q.empty()) {
+                r = q.front();
+                q.pop_front();
+                hasNext = true;
+            }
+        }
+        if (hasNext) {
+            if (strategy == DownloadStrategy::HTTP_ONLY) {
+                logInfo << "续排一个 HTTP 分片 taskId=" << ev.id << " range=" << r.start << "-" << r.end;
+                scheduleHttpChunk_(ev.id, urlLocal, r.start, r.end);
+            } else {
+                // P2P_ONLY / HYBRID：优先 P2P；HYBRID 失败则回退 HTTP
+                const bool ok = p2pQueryPeersAsync_(ev.id, r.start, r.end);
+                if (!ok && strategy == DownloadStrategy::HYBRID) {
+                    scheduleHttpChunk_(ev.id, urlLocal, r.start, r.end);
+                }
+            }
+        }
+    }
+
+    applyFsm_(ev.id, FinalizeCheck{ev.id});
+}
+
+void DownloadManager::applyFsm_(TaskId id, const TaskFailed& ev)
+{
+    {
+        AnnotatedMutex::Guard lk(mTasksMutex);
+        auto it = mTasks.find(id);
+        if (it != mTasks.end()) {
+            transitionLocked_(id, TaskStatus::Failed);
+            it->second.Status = TaskStatus::Failed;
+        }
+    }
+
+    mDlByTaskHttp.erase(id);
+    p2pStates_.erase(id);
+    mPendingRanges.erase(id);
+
+    logError << "[fsm] Task " << id << " failed, code=" << ev.errorCode << " msg=" << ev.message;
+    applyFsm_(id, FinalizeCheck{id});
+}
+
+// ========== FSM：计划就绪（P2P peers 查询结果）==========
+void DownloadManager::applyFsm_(TaskId id, const PlanReady& ev)
+{
+    {
+        AnnotatedMutex::Guard lk(mTasksMutex);
+        auto it = mTasks.find(id);
+        if (it == mTasks.end()) {
+            // task may be cancelled/deleted, nothing to do
+        } else {
+            // only use hint when TotalSize is not set
+            if (it->second.TotalSize == 0 && ev.totalSizeHint > 0) {
+                it->second.TotalSize = ev.totalSizeHint;
+            }
+            // Pending -> Running
+            if (it->second.Status == TaskStatus::Pending) {
+                transitionLocked_(id, TaskStatus::Running);
+            }
+            auto& st = p2pStates_[id][ev.startHint];
+            st.queryInFlight = false;
+            st.queryDone = true;
+            st.lastQueryErr = 0;
+            st.offset = ev.startHint;
+            st.plan = ev.chunks;
+        }
+    }
+
+    scheduleP2PChunks_(id, ev.chunks, ev.startHint, ev.endHint);
+    applyFsm_(id, FinalizeCheck{id});
+    // TODO: may publish planReadyEvent here
+}
+
+// ========== FSM：StallFound（看门狗通知）==========
+void DownloadManager::applyFsm_(TaskId id, const StallFound& ev)
+{
+    mPendingRanges[id].push_front(Range{ev.segStart, ev.segEnd});
+    // 交由 run() 循环里的 maybeFinalize / 正常续排逻辑去处理
+}
+
+void DownloadManager::applyFsm_(TaskId /*id*/, const CmdAdd& cmd)
+{
+    // 创建 Task + 预分配 + 启动
+    TaskId id = genTaskId();
+    DownloadTask task;
+    task.Id = id;
+    task.Url = cmd.url;
+    task.ContentHash = cmd.hash;
+    task.TotalSize = 0;
+    task.Downloaded = 0;
+    task.StartTime = std::chrono::system_clock::now();
+    task.LastUpdate = task.StartTime;
+    task.Status = TaskStatus::Pending; // the initial state initialization, not changed by transitionLocked_() is ok
+    {
+        AnnotatedMutex::Guard lk(mTasksMutex);
+        mTasks[id] = task;
+        mTaskOptions[id] = cmd.opt;
+    }
+    mLastCreatedTaskId.store(id, std::memory_order_release);
+
+    // 打开父任务共享文件（随机写）或通过 IFileStore 预分配
+    if (!cmd.opt.OutputPath.empty() && cmd.opt.ChunkSize > 0) {
+        ensurePreallocate_(
+            id, cmd.opt.HasRange && cmd.opt.RangeEnd != SIZE_MAX ? (cmd.opt.RangeEnd - cmd.opt.RangeStart + 1) : 0);
+    }
+
+    if (cmd.opt.Strategy == DownloadStrategy::HTTP_ONLY) {
+        if (cmd.opt.HasRange && cmd.opt.RangeEnd != SIZE_MAX) {
+            const size_t start = cmd.opt.RangeStart;
+            const size_t len = (cmd.opt.RangeEnd >= start) ? (cmd.opt.RangeEnd - start + 1) : 0;
+            {
+                AnnotatedMutex::Guard lk(mTasksMutex);
+                auto& t = mTasks[id];
+                t.TotalSize = len;
+                transitionLocked_(id, TaskStatus::Running);
+            }
+            splitTask(id, 0, len, start);
+        } else {
+            scheduleHttpProbe_(id, cmd.url);
+            {
+                AnnotatedMutex::Guard lk(mTasksMutex);
+                auto& t = mTasks[id];
+                t.Status = TaskStatus::Running;
+                transitionLocked_(id, TaskStatus::Running);
+            }
+        }
+    } else if (cmd.opt.Strategy == DownloadStrategy::P2P_ONLY) {
+        // 若指定了范围，TotalSize 可先按范围算；否则等 peers 响应里带 size
+        if (cmd.opt.HasRange && cmd.opt.RangeEnd != SIZE_MAX) {
+            const size_t len =
+                (cmd.opt.RangeEnd >= cmd.opt.RangeStart) ? (cmd.opt.RangeEnd - cmd.opt.RangeStart + 1) : 0;
+            AnnotatedMutex::Guard lk(mTasksMutex);
+            auto& t = mTasks[id];
+            t.TotalSize = len;
+            t.Status = TaskStatus::Running;
+            transitionLocked_(id, TaskStatus::Running);
+        }
+        bool ok = p2pQueryPeersAsync_(
+            id, cmd.opt.HasRange ? cmd.opt.RangeStart : 0, cmd.opt.HasRange ? cmd.opt.RangeEnd : SIZE_MAX);
+        if (!ok) {
+            AnnotatedMutex::Guard lk(mTasksMutex);
+            mTasks[id].Status = TaskStatus::Failed;
+            transitionLocked_(id, TaskStatus::Failed);
+        }
+    } else { // HYBRID：先走 P2P，失败/不足时回落 HTTP（此处简单启动 P2P）
+        AnnotatedMutex::Guard lk(mTasksMutex);
+        mTasks[id].Status = TaskStatus::Running;
+        transitionLocked_(id, TaskStatus::Running);
+        bool ok = p2pQueryPeersAsync_(
+            id, cmd.opt.HasRange ? cmd.opt.RangeStart : 0, cmd.opt.HasRange ? cmd.opt.RangeEnd : SIZE_MAX);
+        if (!ok) {
+            // 立即回退 HTTP-探测
+            scheduleHttpProbe_(id, cmd.url);
+        }
+    }
+}
+
+void DownloadManager::applyFsm_(TaskId id, const CmdPause&)
+{
+    {
+        AnnotatedMutex::Guard lk(mTasksMutex);
+        auto it = mTasks.find(id);
+        if (it == mTasks.end())
+            return;
+        it->second.Paused = true;
+        it->second.Status = TaskStatus::Paused;
+    }
+
+    auto itH = mDlByTaskHttp.find(id);
+    if (itH != mDlByTaskHttp.end() && mDeps.http) {
+        for (auto& sp : itH->second)
+            if (sp)
+                mDeps.http->PauseTask(sp);
+    }
+    auto itP = mDlByTaskP2p.find(id);
+    if (itP != mDlByTaskP2p.end() && mDeps.p2p) {
+        for (auto& sp : itP->second)
+            if (sp)
+                mDeps.p2p->PauseTask(sp);
+    }
+}
+
+void DownloadManager::applyFsm_(TaskId id, const CmdResume&)
+{
+    {
+        AnnotatedMutex::Guard lk(mTasksMutex);
+        auto it = mTasks.find(id);
+        if (it == mTasks.end())
+            return;
+        it->second.Paused = false;
+        it->second.Status = TaskStatus::Running;
+    }
+
+    auto itH = mDlByTaskHttp.find(id);
+    if (itH != mDlByTaskHttp.end() && mDeps.http) {
+        for (auto& sp : itH->second) {
+            if (sp && !sp->IsEnd())
+                mDeps.http->ResumeTask(sp);
+        }
+    }
+    auto itP = mDlByTaskP2p.find(id);
+    if (itP != mDlByTaskP2p.end() && mDeps.p2p) {
+        for (auto& sp : itP->second) {
+            if (sp && !sp->IsEnd())
+                mDeps.p2p->ResumeTask(sp);
+        }
+    }
+}
+
+void DownloadManager::applyFsm_(TaskId id, const CmdCancel&)
+{
+    {
+        AnnotatedMutex::Guard lk(mTasksMutex);
+        auto it = mTasks.find(id);
+        if (it == mTasks.end())
+            return;
+        it->second.Cancelled = true;
+        it->second.Status = TaskStatus::Cancelled;
+    }
+    cancelAllSubs_(id, true, true);
+
+    mPendingRanges[id].clear();
+}
+
+// ========== HTTP 调度 ==========
+void DownloadManager::ensurePreallocate_(TaskId id, size_t totalSize)
+{
+    FileDownloadOptions opts;
+    {
+        AnnotatedMutex::Guard lk(mTasksMutex);
+        auto itOpt = mTaskOptions.find(id);
+        if (itOpt != mTaskOptions.end())
+            opts = itOpt->second;
+    }
+
+    if (mDeps.files) {
+        // 交给外部 IFileStore，自行保证幂等与非截断
+        mDeps.files->Preallocate(id, opts.OutputPath, totalSize);
+        return;
+    }
+
+    if (opts.OutputPath.empty() || totalSize == 0) {
+        return;
+    }
+
+    // 存在则打开，不存在则创建，然后扩到需要的尺寸
+    std::shared_ptr<std::fstream> fs =
+        std::make_shared<std::fstream>(opts.OutputPath, std::ios::in | std::ios::out | std::ios::binary);
+
+    if (!fs->is_open()) {
+        // 不存在则创建，再以 in|out 重新打开
+        {
+            std::ofstream create(opts.OutputPath, std::ios::binary);
+        }
+        fs->open(opts.OutputPath, std::ios::in | std::ios::out | std::ios::binary);
+    }
+    if (!fs->is_open()) {
+        logError << "ensurePreallocate_: open file failed: " << opts.OutputPath;
+        return;
+    }
+
+    try {
+        // 读取当前大小（不改变写指针）
+        fs->seekp(0, std::ios::end);
+        std::streamoff cur = fs->tellp();
+        if (cur < 0)
+            cur = 0;
+
+        // 只在当前小于目标时扩容到 totalSize
+        if (static_cast<size_t>(cur) < totalSize) {
+            fs->seekp(static_cast<std::streamoff>(totalSize - 1), std::ios::beg);
+            char z = 0;
+            fs->write(&z, 1);
+            fs->flush();
+        }
+
+        // 缓存句柄，后续写入统一走同一个 fd，避免再走"临时开关文件"的兜底逻辑
+        {
+            AnnotatedMutex::Guard lk(mEventMutex);
+            mParentFiles[id] = fs;
+        }
+    } catch (...) {
+        logError << "ensurePreallocate_: exception while preallocating";
+    }
+}
+
+void DownloadManager::scheduleHttpProbe_(TaskId id, const std::string& url)
+{
+    if (!mDeps.http) {
+        logError << "HTTP engine not injected";
+        return;
+    }
+    FileDownloadOptions opts;
+    {
+        AnnotatedMutex::Guard lk(mTasksMutex);
+        auto itOpt = mTaskOptions.find(id);
+        if (itOpt != mTaskOptions.end())
+            opts = itOpt->second;
+    }
+    const size_t probeStart = (opts.HasRange ? opts.RangeStart : 0);
+
+    dcdn::util::HttpDownloaderTaskOption opt;
+    opt.Request = std::make_shared<dcdn::util::HttpRequest>(url);
+    opt.Start = probeStart; // 探测
+    opt.Notify = &DownloadManager::coreNotifyCallbackHttp;
+    opt.Receiver = this;
+
+    auto probe = mDeps.http->CreateTask(&opt);
+    if (!probe) {
+        AnnotatedMutex::Guard lk(mTasksMutex);
+        auto itT = mTasks.find(id);
+        if (itT != mTasks.end())
+            itT->second.Status = TaskStatus::Failed;
+        return;
+    }
+
+    {
+        AnnotatedMutex::Guard lk(mEventMutex);
+        ActiveSubTask a;
+        a.parentTaskId = id;
+        a.downloader = probe;
+        a.offset = probeStart;
+        a.length = 0;
+        a.index = 0;
+        a.isProbe = true;
+        a.lastTouched = std::chrono::steady_clock::now();
+        auto itF = mParentFiles.find(id);
+        if (itF != mParentFiles.end())
+            a.file = itF->second;
+        mActiveByPtrHttp[probe.get()] = std::move(a);
+        mDlByTaskHttp[id].push_back(probe);
+    }
+    mDeps.http->AddTask(probe);
+}
+
+void DownloadManager::scheduleHttpChunk_(TaskId id, const std::string& url, size_t start, size_t end)
+{
+    if (!mDeps.http) {
+        logError << "HTTP engine not injected";
+        return;
+    }
+
+    dcdn::util::HttpDownloaderTaskOption opt;
+    opt.Request = std::make_shared<dcdn::util::HttpRequest>(url);
+    opt.Start = start;
+    opt.End = end;
+    opt.Notify = &DownloadManager::coreNotifyCallbackHttp;
+    opt.Receiver = this;
+    logInfo << "创建任务 start " << start << " end " << end << std::endl;
+    auto sub = mDeps.http->CreateTask(&opt);
+    if (!sub) {
+        logWarn << "CreateTask failed range " << start << "-" << end;
+        return;
+    }
+
+    std::shared_ptr<std::fstream> parentFile;
+    size_t idx = 0;
+
+    auto itF = mParentFiles.find(id);
+    if (itF != mParentFiles.end())
+        parentFile = itF->second;
+    idx = mNextRangeIdx[id]++;
+
+    ActiveSubTask st;
+    st.parentTaskId = id;
+    st.offset = start;
+    st.length = end - start + 1;
+    st.index = static_cast<int>(idx);
+    st.downloader = sub;
+    st.file = parentFile;
+    st.isProbe = false;
+    st.lastTouched = std::chrono::steady_clock::now();
+
+    mActiveByPtrHttp[sub.get()] = std::move(st);
+    mDlByTaskHttp[id].push_back(sub);
+
+    mDeps.http->AddTask(sub);
+}
+
+// ========== HTTP-only：切分 ==========
+void DownloadManager::splitTask(TaskId id, size_t probedDataLen, size_t totalSize, size_t baseOffset)
+{
+    FileDownloadOptions opts;
+    std::string url;
+    {
+        AnnotatedMutex::Guard lk(mTasksMutex);
+        auto it = mTasks.find(id);
+        if (it == mTasks.end())
+            return;
+        url = it->second.Url;
+        auto itOpt = mTaskOptions.find(id);
+        if (itOpt != mTaskOptions.end())
+            opts = itOpt->second;
+    }
+
+    ensurePreallocate_(id, totalSize);
+
+    // 清理 probe（若有）
+    std::shared_ptr<util::DownloaderTask> probeToCancel;
+    size_t already = 0;
+    {
+        auto itD = mDlByTaskHttp.find(id);
+        if (itD != mDlByTaskHttp.end()) {
+            for (auto& sp : itD->second) {
+                if (!sp)
+                    continue;
+                auto raw = sp.get();
+                auto itActive = mActiveByPtrHttp.find(raw);
+                if (itActive != mActiveByPtrHttp.end() && itActive->second.isProbe) {
+                    probeToCancel = sp;
+                    break;
+                }
+            }
+        }
+    }
+    if (probeToCancel && mDeps.http) {
+        already = probedDataLen;
+        mDeps.http->CancelTask(probeToCancel);
+        AnnotatedMutex::Guard lk(mEventMutex);
+        mActiveByPtrHttp.erase(probeToCancel.get());
+        auto& vec = mDlByTaskHttp[id];
+        vec.erase(std::remove(vec.begin(), vec.end(), probeToCancel), vec.end());
+        mCancelledRawHttp.insert(probeToCancel.get());
+        mDlEventsHttp.erase(probeToCancel.get());
+    }
+
+    const size_t absBegin = baseOffset;
+    const size_t absEnd = baseOffset + totalSize - 1;
+
+    size_t rangeStart = absBegin + already;
+    if (rangeStart > absEnd) {
+        applyFsm_(id, FinalizeCheck{id});
+        return;
+    }
+
+    if (already > 0) {
+        AnnotatedMutex::Guard lk(mTasksMutex);
+        auto itT = mTasks.find(id);
+        if (itT != mTasks.end()) {
+            itT->second.LastUpdate = std::chrono::system_clock::now();
+            calculateSpeedLocked(itT->second, itT->second.LastUpdate);
+        }
+    }
+
+    auto chunkHitByConcurrent = opts.MaxConcurrent > 0 ? totalSize / opts.MaxConcurrent : 0;
+    size_t chunk = (opts.ChunkSize ? opts.ChunkSize : (1u << 20));
+    chunk = std::max(chunk, chunkHitByConcurrent);
+    std::vector<Range> ranges;
+    for (size_t pos = rangeStart; pos <= absEnd;) {
+        size_t rEnd = std::min(pos + chunk - 1, absEnd);
+        ranges.push_back({pos, rEnd});
+        logInfo << "range: [" << pos << ", " << rEnd << "]" << std::endl;
+        if (rEnd == absEnd)
+            break;
+        pos = rEnd + 1;
+    }
+
+    if (ranges.empty()) {
+        applyFsm_(id, FinalizeCheck{id});
+        return;
+    }
+
+    const size_t canLaunch = std::min(ranges.size(), mMaxConcurrent);
+    std::shared_ptr<std::fstream> parentFile;
+    {
+        AnnotatedMutex::Guard lk(mEventMutex);
+        auto itF = mParentFiles.find(id);
+        if (itF != mParentFiles.end())
+            parentFile = itF->second;
+        mNextRangeIdx[id] = 0;
+    }
+
+    bool paused = false, cancelled = false;
+    {
+        AnnotatedMutex::Guard lk(mTasksMutex);
+        auto itT = mTasks.find(id);
+        if (itT != mTasks.end()) {
+            paused = itT->second.Paused.load();
+            cancelled = itT->second.Cancelled.load();
+        }
+    }
+    if (paused || cancelled || canLaunch == 0) {
+        AnnotatedMutex::Guard lk(mEventMutex);
+        auto& q = mPendingRanges[id];
+        for (auto& r : ranges)
+            q.push_back(r);
+        applyFsm_(id, FinalizeCheck{id});
+        return;
+    }
+
+    for (size_t i = 0; i < canLaunch; ++i) {
+        auto r = ranges[i];
+        scheduleHttpChunk_(id, url, r.start, r.end);
+    }
+
+    if (ranges.size() > canLaunch) {
+        AnnotatedMutex::Guard lk(mEventMutex);
+        auto& q = mPendingRanges[id];
+        for (size_t i = canLaunch; i < ranges.size(); ++i)
+            q.push_back(ranges[i]);
+    }
+    applyFsm_(id, FinalizeCheck{id});
+}
+
+// ========== P2P peers 异步查询 ==========
+static inline json buildQueryPeersRequest(
+    const std::string& ip,
+    const std::string& url,
+    const std::string& hash,
+    const std::string& start,
+    const std::string& scenario,
+    bool showBlocksHash)
+{
+    json j;
+    j["ip"] = ip;
+    j["url"] = url;
+    j["hash"] = hash;
+    j["start"] = start;
+    j["scenario"] = scenario;
+    j["showBlocksHash"] = showBlocksHash;
+    return j;
+}
+
+bool DownloadManager::p2pQueryPeersAsync_(TaskId id, size_t start, size_t end)
+{
+    DownloadTask t;
+    FileDownloadOptions opt;
+    {
+        AnnotatedMutex::Guard lk(mTasksMutex);
+        auto it = mTasks.find(id);
+        if (it == mTasks.end())
+            return false;
+        t = it->second;
+        auto itOpt = mTaskOptions.find(id);
+        if (itOpt != mTaskOptions.end())
+            opt = itOpt->second;
+    }
+
+    auto arg =
+        buildQueryPeersRequest("127.0.0.1" /*可改为实际IP*/, t.Url, t.ContentHash, std::to_string(start), "", true);
+    void* reqId = nullptr;
+
+    auto succ = [this, id, start, end](nlohmann::json& res) { 
+        this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(EventType::FunctionCall, [this, id, start, end, res = std::move(res)]() REQUIRES(dm_thread()) {
+            this->onP2PPeerQuerySuccess_(id, std::move(res), start, end);
+        }));
+    };
+    // auto fail = [this, id, start](int code) REQUIRES(dm_thread()) { this->onP2PPeerQueryFail_(id, code, start); };
+    auto fail = [this, id, start](int code) {
+        this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(EventType::FunctionCall, [this, id, start, code]() REQUIRES(dm_thread()) {
+            this->onP2PPeerQueryFail_(id, code, start); 
+        }));
+    };
+
+    auto mm = MainManager::Singlet();
+    if (mm == nullptr) {
+        logError << "[P2P] MainManager::Singlet() is null";
+        return false;
+    }
+    int rc = mm->AsyncApiPostWithToken(&reqId, kApiPeersByHashOrUrl, arg, this, succ, fail);
+    if (rc != 1) {
+        logWarn << "[P2P] Async query failed rc=" << rc << " taskId=" << id;
+        return false;
+    }
+
+    {
+        AnnotatedMutex::Guard lk(mTasksMutex);
+        p2pStates_[id][start].queryReqId = reqId;
+        p2pStates_[id][start].queryInFlight = true;
+        p2pStates_[id][start].offset = start;
+        p2pStates_[id][start].lastQueryErr = 0;
+    }
+    return true;
+}
+
+void DownloadManager::onP2PPeerQueryFail_(TaskId id, int errCode, size_t start)
+{
+    {
+        AnnotatedMutex::Guard lk(mTasksMutex);
+        auto& seg = p2pStates_[id][start];
+        seg.queryInFlight = false;
+        seg.queryDone = true;
+        seg.lastQueryErr = errCode;
+    }
+
+    bool strategyP2pOnly = false;
+    {
+        AnnotatedMutex::Guard lk(mTasksMutex);
+        auto it = mTaskOptions.find(id);
+        strategyP2pOnly = (it != mTaskOptions.end() && it->second.Strategy == DownloadStrategy::P2P_ONLY);
+    }
+    if (strategyP2pOnly) {
+        applyFsm_(id, TaskFailed{errCode, "P2P peer query failed"});
+    } else {
+        // TODO: implement: HYBRID or http：回退到 HTTP 探测
+        logError << "[P2P] onP2PPeerQueryFail_ taskId=" << id << " start=" << start << " errCode=" << errCode;
+        applyFsm_(id, TaskFailed{errCode, "P2P peer query failed"});
+    }
+    applyFsm_(id, FinalizeCheck{id});
+}
+
+void DownloadManager::onP2PPeerQuerySuccess_(TaskId id, nlohmann::json res, size_t start, size_t end)
+{
+    logInfo << "[P2P] onP2PPeerQuerySuccess_ taskId=" << id << " start=" << start << " end=" << end
+            << " response=" << res.dump();
+    std::vector<PeerChunk> plan;
+    size_t totalSizeFromApi = 0;
+
+    try {
+        if (res.contains("size")) {
+            totalSizeFromApi = std::stoull(res.value("size", "0"));
+        }
+        if (res.contains("peers") && res["peers"].is_array()) {
+            for (auto& p : res["peers"]) {
+                PeerChunk pc;
+                pc.peerId = p.value("peerId", "");
+                pc.url = p.value("url", "");
+                pc.hash = p.value("hash", "");
+                pc.iceUfrag = p.value("iceUfrag", "");
+                pc.icePwd = p.value("icePwd", "");
+                pc.remoteSdp = p.value("connMeta", "");
+                pc.start = std::stoull(p.value("start", "0"));
+                pc.end = std::stoull(p.value("end", "0"));
+                plan.emplace_back(std::move(pc));
+            }
+        }
+    } catch (const std::exception& ex) {
+        logWarn << "[P2P] parse response error: " << ex.what() << " taskId=" << id;
+        onP2PPeerQueryFail_(id, -2, start);
+        return;
+    }
+
+    PlanReady ev;
+    ev.chunks = std::move(plan);
+    ev.startHint = start;
+    ev.endHint = end;
+    ev.totalSizeHint = totalSizeFromApi;
+
+    applyFsm_(id, std::move(ev));
+    applyFsm_(id, FinalizeCheck{id});
+}
+
+void DownloadManager::scheduleP2PChunks_(TaskId id, const std::vector<PeerChunk>& plan, size_t start, size_t end)
+{
+    if (plan.empty()) {
+        logError << "scheduleP2PChunks_: plan empty";
+        return;
+    }
+
+#ifdef DEBUG_LOCAL_P2P
+    std::vector<PeerChunk> planO;
+    planO.push_back({.peerId = "peer1", .start = 0, .end = (1 << 21) - 1});
+    std::cout << "INPUT connMeta " << std::endl;
+    std::string remote_sdp, line;
+    while (std::getline(std::cin, line) && !line.empty()) {
+        remote_sdp += line + "\r\n";
+    }
+    if (remote_sdp.size() >= 2) {
+        remote_sdp.pop_back();
+        remote_sdp.pop_back();
+    }
+    planO.back().remoteSdp = remote_sdp;
+#else
+    std::vector<PeerChunk> planO = plan;
+#endif
+
+    DownloadTask t;
+    FileDownloadOptions opts;
+    {
+        AnnotatedMutex::Guard lk(mTasksMutex);
+        auto itT = mTasks.find(id);
+        if (itT == mTasks.end())
+            return;
+        t = itT->second;
+        auto itOpt = mTaskOptions.find(id);
+        if (itOpt != mTaskOptions.end())
+            opts = itOpt->second;
+    }
+    if (t.Paused || t.Cancelled)
+        return;
+
+    size_t runningP2p = 0;
+    {
+        AnnotatedMutex::Guard lk(mEventMutex);
+        auto it = mDlByTaskP2p.find(id);
+        if (it != mDlByTaskP2p.end())
+            runningP2p = it->second.size();
+        if (mNextRangeIdx.find(id) == mNextRangeIdx.end())
+            mNextRangeIdx[id] = 0;
+    }
+
+    // 简化策略：取能覆盖 [start,end] 的最长 peer chunk，clip 到 [start,end]
+    PeerChunk chosen = planO.front();
+    for (auto& pc : planO)
+        if (pc.end > chosen.end)
+            chosen = pc;
+
+    PeerChunk clipped = chosen;
+    clipped.start = start;
+    if (end != SIZE_MAX)
+        clipped.end = std::min(chosen.end, end);
+
+    if (clipped.start > start) {
+        logWarn << "[P2P] clipped.start > start, unexpected";
+    } else if (end != SIZE_MAX && clipped.end < end) {
+        size_t missStart = clipped.end + 1;
+        size_t missEnd = end;
+        AnnotatedMutex::Guard lk(mEventMutex);
+        mPendingRanges[id].push_front(Range{missStart, missEnd});
+    }
+
+    const size_t room = (mMaxConcurrent > runningP2p) ? (mMaxConcurrent - runningP2p) : 0;
+    if (room == 0) {
+        AnnotatedMutex::Guard lk(mEventMutex);
+        // 简化：直接入 pending，等待后续续排
+        mPendingRanges[id].push_back(Range{clipped.start, clipped.end});
+        return;
+    }
+
+    if (!startOneP2PChunk_(id, clipped)) {
+        logError << "[P2P] startOneP2PChunk_ failed " << clipped.start << "-" << clipped.end;
+    }
+
+    applyFsm_(id, FinalizeCheck{id});
+}
+
+bool DownloadManager::startOneP2PChunk_(TaskId id, const PeerChunk& pc)
+{
+    if (!mDeps.p2p) {
+        logError << "P2P engine not injected";
+        return false;
+    }
+
+    // no launch if paused/cancelled
+    {
+        AnnotatedMutex::Guard lk(mTasksMutex);
+        auto it = mTasks.find(id);
+        if (it == mTasks.end())
+            return false;
+        if (it->second.Paused || it->second.Cancelled)
+            return false;
+    }
+
+    std::shared_ptr<std::fstream> parentFile;
+    {
+        AnnotatedMutex::Guard lk(mEventMutex);
+        auto itF = mParentFiles.find(id);
+        if (itF != mParentFiles.end())
+            parentFile = itF->second;
+    }
+
+    download::P2PDownloaderTaskOption opt;
+    opt.PeerID = pc.peerId;
+    opt.PeerSdp = pc.remoteSdp;
+#ifdef DEBUG_LOCAL_P2P
+    opt.IceUfrag = "kul9";
+    opt.IcePwd = "HArM7vdA12b4f+NrSE1hMu";
+    opt.FileHash = "cd4a7faf4ed9cd3486cb08ff1dcfd040";
+#else
+    opt.IceUfrag = pc.iceUfrag;
+    opt.IcePwd = pc.icePwd;
+    opt.FileHash = pc.hash;
+#endif
+    opt.Start = pc.start;
+    opt.End = pc.end;
+    opt.Notify = &DownloadManager::coreNotifyCallbackP2p;
+    opt.Receiver = this;
+    logDebug << "[P2P] CreateTask " << pc.start << "-" << pc.end << "iceUfrag = " << opt.IceUfrag
+             << " icePwd = " << opt.IcePwd << " hash = " << opt.FileHash << "remote sdp = " << pc.remoteSdp;
+    auto sub = mDeps.p2p->CreateTask(&opt);
+    if (!sub) {
+        logWarn << "[P2P] CreateTask failed " << pc.start << "-" << pc.end;
+        return false;
+    }
+
+    size_t idx = 0;
+    {
+        AnnotatedMutex::Guard lk(mEventMutex);
+        idx = mNextRangeIdx[id]++;
+        ActiveSubTask st;
+        st.parentTaskId = id;
+        st.offset = pc.start;
+        st.length = pc.end - pc.start + 1;
+        st.index = static_cast<int>(idx);
+        st.downloader = sub;
+        st.file = parentFile;
+        st.isProbe = false;
+        st.transport = ActiveSubTask::Transport::P2P;
+        st.lastTouched = std::chrono::steady_clock::now();
+
+        mActiveByPtrP2p[sub.get()] = std::move(st);
+        mDlByTaskP2p[id].push_back(sub);
+    }
+
+    mDeps.p2p->AddTask(sub);
+    return true;
+}
+
+// ========== 任务管理（线程安全：投递到事件循环）==========
+TaskId DownloadManager::AddDownloadTask(
+    const std::string& url,
+    const std::string& contentHash,
+    const FileDownloadOptions& options)
+{
+    auto prom = std::make_shared<std::promise<TaskId>>();
+    auto fut = prom->get_future();
+
+    this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(
+        EventType::FunctionCall, [this, prom, url, contentHash, options = options]() REQUIRES(dm_thread()) {
+            // FSM 创建任务并启动流程
+            applyFsm_(0, CmdAdd{url, contentHash, options});
+            // FSM 写入的成员取回 taskId
+            TaskId idRet = mLastCreatedTaskId.load(std::memory_order_acquire);
+            prom->set_value(idRet);
+
+            if (options.taskStateChangeEventCallback) {
+                Subscribe([idRet, options](const DMEvent& ev) {
+                    if (ev.id == idRet) {
+                        options.taskStateChangeEventCallback(ev);
+                    }
+                });
+            }
+        }));
+
+    return fut.get();
+}
+
+bool DownloadManager::CancelDownloadTask(TaskId taskId)
+{
+    auto prom = std::make_shared<std::promise<bool>>();
+    auto fut = prom->get_future();
+    this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(EventType::FunctionCall, [this, prom, taskId]() REQUIRES(dm_thread()) {
+        applyFsm_(taskId, CmdCancel{taskId});
+        prom->set_value(true);
+    }));
+    return fut.get();
+}
+
+bool DownloadManager::PauseDownloadTask(TaskId taskId)
+{
+    auto prom = std::make_shared<std::promise<bool>>();
+    auto fut = prom->get_future();
+    this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(EventType::FunctionCall, [this, prom, taskId]() REQUIRES(dm_thread()) {
+        applyFsm_(taskId, CmdPause{taskId});
+        prom->set_value(true);
+    }));
+    return fut.get();
+}
+
+bool DownloadManager::ResumeDownloadTask(TaskId taskId)
+{
+    auto prom = std::make_shared<std::promise<bool>>();
+    auto fut = prom->get_future();
+    this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(EventType::FunctionCall, [this, prom, taskId]() REQUIRES(dm_thread()) {
+        applyFsm_(taskId, CmdResume{taskId});
+        prom->set_value(true);
+    }));
+    return fut.get();
+}
+
+// ========== 状态查询 ==========
+DownloadTask DownloadManager::GetTaskStatus(TaskId taskId) const
+{
+    AnnotatedMutex::Guard lk(mTasksMutex);
+    auto it = mTasks.find(taskId);
+    if (it != mTasks.end())
+        return it->second;
+    return {};
+}
+
+std::vector<DownloadTask> DownloadManager::GetAllTasks() const
+{
+    AnnotatedMutex::Guard lk(mTasksMutex);
+    std::vector<DownloadTask> out;
+    out.reserve(mTasks.size());
+    for (auto& kv : mTasks)
+        out.push_back(kv.second);
+    return out;
+}
+
+double DownloadManager::GetOverallSpeed() const
+{
+    AnnotatedMutex::Guard lk(mTasksMutex);
+    double sum = 0.0;
+    for (auto& kv : mTasks)
+        sum += kv.second.Speed;
+    return sum;
+}
+
+// ========== 回调注册 ==========
+void DownloadManager::SetBufferReadyCallback(TaskId taskId, BufferReadyCallback callback)
+{
+    AnnotatedMutex::Guard lk(mTasksMutex);
+    mBufferCallbacks[taskId] = std::move(callback);
+}
+
+void DownloadManager::RemoveBufferReadyCallback(TaskId taskId)
+{
+    AnnotatedMutex::Guard lk(mTasksMutex);
+    mBufferCallbacks.erase(taskId);
+}
+
+std::vector<std::pair<size_t, size_t>> DownloadManager::GetAvailableRanges(TaskId taskId) const
+{
+    AnnotatedMutex::Guard lk(mTasksMutex);
+    auto it = mTasks.find(taskId);
+    if (it != mTasks.end())
+        return it->second.CompletedRanges;
+    return {};
+}
+
+// ========== 带宽比配置（预留）==========
+void DownloadManager::SetHttpBandwidthRatio(float ratio)
+{
+    mHttpBandwidthRatio = ratio;
+}
+void DownloadManager::SetP2pBandwidthRatio(float ratio)
+{
+    mP2pBandwidthRatio = ratio;
+}
+
+DownloadManager::SubId DownloadManager::Subscribe(Handler h)
+{
+    AnnotatedMutex::Guard lk(mSubMutex);
+    auto id = mNextSubId++;
+    mSubscribers.emplace(id, std::move(h));
+    return id;
+}
+void DownloadManager::Unsubscribe(SubId id)
+{
+    AnnotatedMutex::Guard lk(mSubMutex);
+    mSubscribers.erase(id);
+}
+
+// ========== 进度 / 速度 / BufferReady ==========
+void DownloadManager::updateTaskProgress(TaskId id, size_t downloaded)
+{
+    auto now = std::chrono::system_clock::now();
+    bool reachedEnd = false;
+
+    {
+        AnnotatedMutex::Guard lk(mTasksMutex);
+        auto it = mTasks.find(id);
+        if (it == mTasks.end())
+            return;
+
+        it->second.Downloaded += downloaded;
+        if (it->second.TotalSize > 0 && it->second.Downloaded >= it->second.TotalSize) {
+            it->second.Downloaded = it->second.TotalSize;
+            reachedEnd = true;
+            if (it->second.Downloaded > it->second.TotalSize) {
+                logWarn << "Task " << id << " downloaded more than expected: " << it->second.Downloaded << " > "
+                        << it->second.TotalSize;
+            }
+        }
+        it->second.LastUpdate = now;
+        calculateSpeedLocked(it->second, now);
+    }
+
+    if (reachedEnd)
+        applyFsm_(id, FinalizeCheck{id});
+}
+
+void DownloadManager::calculateSpeedLocked(DownloadTask& t, std::chrono::system_clock::time_point now)
+{
+    auto seconds = std::chrono::duration_cast<std::chrono::seconds>(now - t.StartTime).count();
+    t.Speed = (seconds > 0) ? (static_cast<double>(t.Downloaded) / static_cast<double>(seconds)) : 0.0;
+}
+
+void DownloadManager::notifyBufferReady(const TaskId& id, size_t start, size_t end)
+{
+    BufferReadyCallback cb;
+    {
+        AnnotatedMutex::Guard lk(mTasksMutex);
+        auto it = mBufferCallbacks.find(id);
+        if (it != mBufferCallbacks.end())
+            cb = it->second;
+    }
+    if (cb)
+        cb(id, start, end);
+
+    EBufferReady ev{id, start, end};
+    publish_(ev);
+}
+
+void DownloadManager::cancelAllSubs_(TaskId id, bool http, bool p2p)
+{
+    AnnotatedMutex::Guard lk(mEventMutex);
+    if (http && mDeps.http) {
+        auto itVec = mDlByTaskHttp.find(id);
+        if (itVec != mDlByTaskHttp.end()) {
+            for (auto& sp : itVec->second) {
+                if (!sp)
+                    continue;
+                mDeps.http->CancelTask(sp);
+                mCancelledRawHttp.insert(sp.get());
+                mActiveByPtrHttp.erase(sp.get());
+            }
+            itVec->second.clear();
+        }
+        for (auto it2 = mDlEventsHttp.begin(); it2 != mDlEventsHttp.end();) {
+            if (mCancelledRawHttp.count(it2->first))
+                it2 = mDlEventsHttp.erase(it2);
+            else
+                ++it2;
+        }
+    }
+    if (p2p && mDeps.p2p) {
+        auto itVec = mDlByTaskP2p.find(id);
+        if (itVec != mDlByTaskP2p.end()) {
+            for (auto& sp : itVec->second) {
+                if (!sp)
+                    continue;
+                mDeps.p2p->CancelTask(sp);
+                mCancelledRawP2p.insert(sp.get());
+                mActiveByPtrP2p.erase(sp.get());
+            }
+            itVec->second.clear();
+        }
+        for (auto it2 = mDlEventsP2p.begin(); it2 != mDlEventsP2p.end();) {
+            if (mCancelledRawP2p.count(it2->first))
+                it2 = mDlEventsP2p.erase(it2);
+            else
+                ++it2;
+        }
+    }
+
+    // delete output file ( if file path specified and no IFileStore injected )
+    FileDownloadOptions opts;
+    {
+        AnnotatedMutex::Guard lk(mTasksMutex);
+        auto itOpt = mTaskOptions.find(id);
+        if (itOpt != mTaskOptions.end())
+            opts = itOpt->second;
+    }
+    if (!opts.OutputPath.empty() && !mDeps.files) {
+        mParentFiles.erase(id);
+        std::remove(opts.OutputPath.c_str());
+    } else if (mDeps.files) {
+        mDeps.files->Close(id);
+    }
+}
+
+void DownloadManager::publish_(const DMEvent& ev)
+{
+    // inner subscriber
+    {
+        AnnotatedMutex::Guard g(mSubMutex);
+        for (auto& kv : mSubscribers) {
+            try {
+                kv.second(ev);
+            } catch (...) {
+            }
+        }
+    }
+
+    // the external event bus
+    if (mDeps.bus) {
+        // IEventBus 可以封装一个 virtual publishImpl，这里假设 bus->Publish<E>(ev) 实际可用
+        // 由于接口是抽象 publishImpl(const EventBase&)，在设计里让 DMEvent : EventBase
+        // 这里简化为：由外部 IEventBus 的实现接收 DMEvent&（保持兼容）
+        // 注意：如需严格类型，在 IEventBus 定义模板 Publish，或在此 dynamic_cast。
+        // struct BusShim: public IEventBus
+        // {
+        //     void publishImpl(const DMEvent&) override {}
+        // };
+        // 无操作；留给具体项目的 IEventBus 实现去接
+    }
+}
+
+void DownloadManager::SetStrategy(DownloadStrategy strategy)
+{
+    mStrategy = strategy;
+}
+
+void DownloadManager::SetMaxConcurrentDownloads(size_t max)
+{
+    mMaxConcurrent = max;
+}
+
+void DownloadManager::SetPersistPath(const std::string& path)
+{
+    mPersistPath = path;
+    mDbHelper = std::make_unique<PersistenceHelper>(path);
+}

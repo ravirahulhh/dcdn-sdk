@@ -6,7 +6,7 @@
 #include <iostream>
 #include <thread>
 
-#include "DownloadManagerRefactor.h"
+#include "DownloadManager.h"
 #include "MainManager.h"
 #include "WebRtcManager.h"
 
@@ -66,42 +66,57 @@ int main()
     // opts.RangeEnd = 4164379-1;
     opts.WriteRangeToSeparateFile = true; // 默认即为 true
     opts.Strategy = dcdn::DownloadStrategy::P2P_ONLY;
+    auto sid = mgr->Subscribe([](const dcdn::DMEvent& ev) {
+        if (auto* e = dynamic_cast<const dcdn::ETaskStatusChanged*>(&ev)) {
+            // e->id, e->from, e->to
+            std::cout << "ETaskStatusChanged from:" << static_cast<int>(e->from) << " to:" << static_cast<int>(e->to)
+                      << "Task Id :" << e->id << std::endl;
+        } else if (auto* p = dynamic_cast<const dcdn::ETaskProgress*>(&ev)) {
+            // p->id, p->downloaded, p->total
+            std::cout << "ETaskProgress downloaded:" << p->downloaded << " total:" << p->total 
+                      << "Task Id :" << p->id << std::endl;
+            if (p->downloaded == p->total) {
+                std::cout << "下载完成" << std::endl;
+            }
+        }
+    });
 #ifdef DEBUG_LOCAL_P2P
     auto taskId = mgr->AddDownloadTask("", "cd4a7faf4ed9cd3486cb08ff1dcfd040", opts);
 #else
-    auto taskId = mgr->AddDownloadTask("", "AXKXNz-vQ9V2YRLZTZLen8aO1CgB", opts);
+    auto taskId = mgr->AddDownloadTask("", "AbjECUo74vz26ZAQdZkRYrXwYIT9", opts);
 #endif
 
     // auto taskId = mgr->AddDownloadTask("", "AXKXNz-vQ9V2YRLZTZLen8aO1CgB", opts);
     // 添加下载任务
     std::cout << "任务已创建，taskId = " << taskId << std::endl;
 
-    bool firstPause = true;
-    while (true) {
-        auto task = mgr->GetTaskStatus(taskId);
+    // bool firstPause = true;
+    // while (true) {
+    //     auto task = mgr->GetTaskStatus(taskId);
 
-        double percent = 0.0;
-        if (task.TotalSize > 0) {
-            percent = (100.0 * task.Downloaded) / task.TotalSize;
-        }
+    //     double percent = 0.0;
+    //     if (task.TotalSize > 0) {
+    //         percent = (100.0 * task.Downloaded) / task.TotalSize;
+    //     }
 
-        std::cout << "进度: " << percent << "% "
-                  << "已下载: " << task.Downloaded << "/" << task.TotalSize << " bytes "
-                  << "速度: " << task.Speed / 1024.0 << " KB/s "
-                  << "状态: " << static_cast<int>(task.Status) << std::endl;
+    //     std::cout << "进度: " << percent << "% "
+    //               << "已下载: " << task.Downloaded << "/" << task.TotalSize << " bytes "
+    //               << "速度: " << task.Speed / 1024.0 << " KB/s "
+    //               << "状态: " << static_cast<int>(task.Status) << std::endl;
 
-        if (task.Status == dcdn::TaskStatus::Completed || task.Status == dcdn::TaskStatus::Failed ||
-            task.Status == dcdn::TaskStatus::Cancelled) {
+    //     if (task.Status == dcdn::TaskStatus::Completed || task.Status == dcdn::TaskStatus::Failed ||
+    //         task.Status == dcdn::TaskStatus::Cancelled) {
 
-            if (task.Status == dcdn::TaskStatus::Failed) {
-                std::cout << "任务失败" << std::endl;
-            }else if (task.Status == dcdn::TaskStatus::Cancelled) {
-                std::cout << "任务取消" << std::endl;
-            }else if (task.Status == dcdn::TaskStatus::Completed) {
-                std::cout << "任务完成" << std::endl;
-            }
-            break;
-        }
+    //         if (task.Status == dcdn::TaskStatus::Failed) {
+    //             std::cout << "任务失败" << std::endl;
+    //         }else if (task.Status == dcdn::TaskStatus::Cancelled) {
+    //             std::cout << "任务取消" << std::endl;
+    //         }else if (task.Status == dcdn::TaskStatus::Completed) {
+    //             std::cout << "任务完成" << std::endl;
+    //         }
+    //         break;
+    //     }
+        
 
         // 取消示例
         // if (percent > 1){
@@ -123,8 +138,8 @@ int main()
         //    firstPause = false;
         // }
 
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-    }
+        // std::this_thread::sleep_for(std::chrono::seconds(1));
+    // }
     std::cout << "Main exit" << std::endl;
     std::mutex lock;
     std::condition_variable cv;
