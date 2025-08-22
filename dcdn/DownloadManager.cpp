@@ -1508,7 +1508,8 @@ void DownloadManager::onP2PPeerQuerySuccess_(TaskId id, nlohmann::json res, size
                 pc.icePwd = p.value("icePwd", "");
                 pc.remoteSdp = p.value("connMeta", "");
                 pc.start = std::stoull(p.value("start", "0"));
-                pc.end = std::stoull(p.value("end", "0"));
+                assert(std::stoull(p.value("end", "0")) > 0);
+                pc.end = std::stoull(p.value("end", "0")) - 1; // server returns [start, end)
                 plan.emplace_back(std::move(pc));
             }
         }
@@ -1650,7 +1651,7 @@ bool DownloadManager::startOneP2PChunk_(TaskId id, const PeerChunk& pc)
     opt.FileHash = pc.hash;
 #endif
     opt.Start = pc.start;
-    opt.End = pc.end;
+    opt.End = pc.end + 1; // P2PDownloaderTaskOption expects [start, end) , so we need to add 1
     opt.Notify = &DownloadManager::coreNotifyCallbackP2p;
     opt.Receiver = this;
     logDebug << "[P2P] CreateTask " << pc.start << "-" << pc.end << "iceUfrag = " << opt.IceUfrag
