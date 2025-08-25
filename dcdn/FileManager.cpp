@@ -103,8 +103,6 @@ FileManager::FileManager(MainManager* man): BaseManager(man) {}
 int FileManager::Init(const FileManagerOption& opt)
 {
     mOpt = opt;
-    mLastFlushTime = std::chrono::steady_clock::now();
-    mLastLRUCheckTime = std::chrono::steady_clock::now();
 
     if (mMan->Option().WorkDir.empty()) {
         logError << "Work directory is not set in MainManager";
@@ -153,6 +151,10 @@ int FileManager::Init(const FileManagerOption& opt)
     logDebug << "Loading file access records from database";
     loadAccessRecordsFromDB();
 
+    // Initialize scheduled tasks
+    logDebug << "Initializing scheduled tasks";
+    initializeTasks();
+
     logDebug << "Registering event handlers";
     registerHandler(EventType::FileDownloadDone, &FileManager::handleDownloadFileDone);
     registerHandler(EventType::FileDownloadFailed, &FileManager::handleDownloadFileFailed);
@@ -165,25 +167,10 @@ FileManager::~FileManager()
     try {
         // Stop all threads
         mShouldStop = true;
-        mLRUCondition.notify_all();
-        mFlushCondition.notify_all();
-        mReportCondition.notify_all();
-        mScanCondition.notify_all();
+        mTaskCondition.notify_all();
 
-        if (mLRUThread.joinable()) {
-            mLRUThread.join();
-        }
-
-        if (mFlushThread.joinable()) {
-            mFlushThread.join();
-        }
-
-        if (mReportThread.joinable()) {
-            mReportThread.join();
-        }
-
-        if (mScanThread.joinable()) {
-            mScanThread.join();
+        if (mTaskWorkerThread.joinable()) {
+            mTaskWorkerThread.join();
         }
     } catch (const std::exception& e) {
         logError << "Exception during FileManager destruction: " << e.what();
@@ -211,24 +198,12 @@ void FileManager::run()
         logDebug << "Created file directory: " << fileDir();
     }
 
-    // Start LRU thread
-    logDebug << "Starting LRU eviction thread";
-    mLRUThread = std::thread(&FileManager::runLRUThread, this);
-
-    // Start flush thread
-    logDebug << "Starting access record flush thread";
-    mFlushThread = std::thread(&FileManager::runFlushThread, this);
-
-    // Start report thread
-    logDebug << "Starting file reporting thread";
-    mReportThread = std::thread(&FileManager::runReportThread, this);
-
-    // Start scan cleanup thread
-    logDebug << "Starting scan cleanup thread";
-    mScanThread = std::thread(&FileManager::runScanThread, this);
+    // Start task worker thread
+    logDebug << "Starting task worker thread";
+    mTaskWorkerThread = std::thread(&FileManager::runTaskWorkerThread, this);
 
     while (true) {
-        // Main loop only handles events, flush tasks are handled by separate threads
+        // Main loop only handles events, scheduled tasks are handled by task worker thread
         waitAllEvents(std::chrono::milliseconds(1000));
     }
     logDebug << "FileManager exit";
@@ -1066,198 +1041,184 @@ void FileManager::handleRemoveFile(std::shared_ptr<Event> evt)
     logDebug << "File remove request received";
 }
 
-void FileManager::runLRUThread()
+void FileManager::initializeTasks()
 {
-    logDebug << "LRU thread started";
+    // Clear any existing tasks
+    mScheduledTasks.clear();
 
-    while (!mShouldStop) {
-        try {
-            // Wait for specified interval or be awakened by stop signal
-            std::unique_lock<std::mutex> lock(mLRUConditionMutex);
-            if (mLRUCondition.wait_for(
-                    lock, std::chrono::seconds(mOpt.LRUCheckInterval), [this] { return mShouldStop.load(); })) {
-                // Awakened by stop signal
-                break;
-            }
+    // Initialize Flush Access Records Task
+    mScheduledTasks.emplace_back(
+        "FlushAccessRecords", std::chrono::seconds(mOpt.AccessRecordFlushInterval), [this]() { FlushAccessRecords(); });
 
-            // Execute LRU check and elimination
-            CheckAndEliminateFiles();
+    // Initialize LRU Check Task
+    mScheduledTasks.emplace_back(
+        "LRUCheck", std::chrono::seconds(mOpt.LRUCheckInterval), [this]() { CheckAndEliminateFiles(); });
 
-        } catch (const std::exception& e) {
-            logWarn << "LRU thread exception: " << e.what();
-            // Wait for a period when exception occurs to avoid rapid loops
-            std::this_thread::sleep_for(std::chrono::seconds(10));
-        } catch (...) {
-            logWarn << "LRU thread unknown exception";
-            std::this_thread::sleep_for(std::chrono::seconds(10));
-        }
-    }
+    // Initialize File Report Task
+    mScheduledTasks.emplace_back(
+        "FileReport", std::chrono::seconds(mOpt.ReportInterval), [this]() { executeReportTask(); });
 
-    logDebug << "LRU thread stopped";
+    // Initialize Scan Cleanup Task
+    mScheduledTasks.emplace_back("ScanCleanup", std::chrono::seconds(mOpt.ScanInterval), [this]() {
+        scanAndCleanInconsistentFiles();
+        cleanStaleDownloads();
+    });
+
+    logDebug << "Initialized " << mScheduledTasks.size() << " scheduled tasks";
 }
 
-void FileManager::runFlushThread()
+std::chrono::steady_clock::time_point FileManager::getNextExecutionTime(const ScheduledTask& task) const
 {
-    logDebug << "Flush thread started";
+    return task.lastExecution + task.interval;
+}
 
-    while (!mShouldStop) {
-        try {
-            // Wait for specified flush interval or be awakened by stop signal
-            std::unique_lock<std::mutex> lock(mFlushConditionMutex);
-            if (mFlushCondition.wait_for(lock, std::chrono::seconds(mOpt.AccessRecordFlushInterval), [this] {
-                    return mShouldStop.load();
-                })) {
-                // Awakened by stop signal
-                break;
-            }
-
-            // Execute access record flush
-            FlushAccessRecords();
-
-        } catch (const std::exception& e) {
-            logWarn << "Flush thread exception: " << e.what();
-            // Wait for a period when exception occurs to avoid rapid loops
-            std::this_thread::sleep_for(std::chrono::seconds(10));
-        } catch (...) {
-            logWarn << "Flush thread unknown exception";
-            std::this_thread::sleep_for(std::chrono::seconds(10));
-        }
-    }
-
-    // Final flush before thread stops to ensure no data is lost
+void FileManager::executeTask(const ScheduledTask& task)
+{
     try {
-        FlushAccessRecords();
-        logDebug << "Final flush completed before thread exit";
+        logDebug << "Executing task: " << task.name;
+        task.execute();
     } catch (const std::exception& e) {
-        logWarn << "Final flush failed: " << e.what();
+        logWarn << "Task " << task.name << " failed with exception: " << e.what();
     } catch (...) {
-        logWarn << "Final flush unknown exception";
+        logWarn << "Task " << task.name << " failed with unknown exception";
     }
-
-    logDebug << "Flush thread stopped";
 }
 
-void FileManager::runReportThread()
+void FileManager::runTaskWorkerThread()
 {
-    logDebug << "Report thread started";
+    logDebug << "Unified task worker thread started";
 
     while (!mShouldStop) {
-        try {
-            // Wait for specified report interval or be awakened by stop signal
-            std::unique_lock<std::mutex> lock(mReportConditionMutex);
-            if (mReportCondition.wait_for(
-                    lock, std::chrono::seconds(mOpt.ReportInterval), [this] { return mShouldStop.load(); })) {
+        auto currentTime = std::chrono::steady_clock::now();
+        // Find the next task to execute and its execution time
+        auto nextTaskTime = std::chrono::steady_clock::time_point::max();
+        std::vector<size_t> readyTaskIndices; // Track which tasks are ready
+
+        // Check all tasks for readiness and find the next execution time
+        for (size_t i = 0; i < mScheduledTasks.size(); ++i) {
+            auto& task = mScheduledTasks[i];
+            auto taskNextTime = getNextExecutionTime(task);
+
+            if (currentTime >= taskNextTime) {
+                // Task is ready to execute
+                readyTaskIndices.push_back(i);
+            } else {
+                // Update next task time
+                nextTaskTime = std::min(nextTaskTime, taskNextTime);
+            }
+        }
+
+        // Execute all ready tasks and update their last execution time
+        for (size_t index : readyTaskIndices) {
+            auto& task = mScheduledTasks[index];
+            executeTask(task);
+            task.lastExecution = std::chrono::steady_clock::now();
+        }
+
+        if (readyTaskIndices.empty()) {
+            // Calculate wait time until next task or use default wait
+            std::chrono::milliseconds waitTime(1000); // Default wait time
+
+            if (nextTaskTime != std::chrono::steady_clock::time_point::max()) {
+                auto calculatedWait = std::chrono::duration_cast<std::chrono::milliseconds>(nextTaskTime - currentTime);
+                waitTime = std::min(calculatedWait, std::chrono::milliseconds(1000));
+            }
+
+            // Wait for the calculated time or stop signal
+            std::unique_lock<std::mutex> lock(mTaskConditionMutex);
+            if (mTaskCondition.wait_for(lock, waitTime, [this] { return mShouldStop.load(); })) {
                 // Awakened by stop signal
                 break;
             }
-
-            // Query files that haven't been reported for the longest time from database
-            auto db = getDB();
-            if (!db) {
-                logWarn << "Failed to get database connection for reporting files";
-                continue;
-            }
-
-            // Query files that haven't been reported for the longest time, sorted by lastReport in ascending order
-            // If lastReport is empty or 0, prioritize reporting
-            std::lock_guard<std::mutex> lockFOpt(mFileDBOptMutex);
-            auto files = db->stor.select(
-                columns(
-                    &FileItem::id,
-                    &FileItem::fileHash,
-                    &FileItem::blockHash,
-                    &FileItem::blockStart,
-                    &FileItem::blockEnd,
-                    &FileItem::lastAccess),
-                where(c(&FileItem::status) == FileStatus::AVAILABLE),
-                order_by(&FileItem::lastReport).asc(),
-                limit(mOpt.ReportBatchSize));
-
-            if (files.empty()) {
-                logDebug << "No files to report";
-                continue;
-            }
-
-            logDebug << "Reporting " << files.size() << " files to PCDN server";
-            uint64_t successfulReports = 0;
-
-            // Batch report files
-            std::vector<std::tuple<FileItem, std::string>> filesToReport;
-            for (const auto& file : files) {
-                FileItem item;
-                item.id = std::get<0>(file);
-                item.fileHash = std::get<1>(file);
-                item.blockHash = std::get<2>(file);
-                item.blockStart = std::get<3>(file);
-                item.blockEnd = std::get<4>(file);
-                filesToReport.push_back(std::tuple(item, ""));
-            }
-            try {
-                reportHaveFiles(filesToReport);
-            } catch (const std::exception& e) {
-                logWarn << "Failed to report files: " << e.what();
-                continue; // Report failed, skip this iteration
-            } catch (...) {
-                logWarn << "Unknown exception occurred during file reporting";
-                continue; // Report failed, skip this iteration
-            }
-
-            // Update report time in database
-            uint64_t currentTime = getCurrentTimestamp();
-            std::vector<uint64_t> fileIds;
-            for (const auto& file : files) {
-                fileIds.push_back(std::get<0>(file));
-            }
-            if (!fileIds.empty()) {
-                try {
-                    db->stor.update_all(set(c(&FileItem::lastReport) = currentTime), where(in(&FileItem::id, fileIds)));
-                    successfulReports += fileIds.size();
-                } catch (const std::exception& e) {
-                    logWarn << "Failed to batch update last report time: " << e.what();
-                }
-            }
-        } catch (const std::exception& e) {
-            logWarn << "Report thread exception: " << e.what();
-            // Wait for a period when exception occurs to avoid rapid loops
-            std::this_thread::sleep_for(std::chrono::seconds(10));
-        } catch (...) {
-            logWarn << "Report thread unknown exception";
-            std::this_thread::sleep_for(std::chrono::seconds(10));
         }
     }
-    logDebug << "Report thread stopped";
-}
 
-void FileManager::runScanThread()
-{
-    logDebug << "Scan thread started";
-
-    while (!mShouldStop) {
-        try {
-            // Wait for specified scan interval or be awakened by stop signal
-            std::unique_lock<std::mutex> lock(mScanConditionMutex);
-            if (mScanCondition.wait_for(
-                    lock, std::chrono::seconds(mOpt.ScanInterval), [this] { return mShouldStop.load(); })) {
-                // Awakened by stop signal
+    // Execute final cleanup tasks before thread stops
+    try {
+        // Execute flush one final time to ensure no data is lost
+        for (const auto& task : mScheduledTasks) {
+            if (task.name == "FlushAccessRecords") {
+                executeTask(task);
                 break;
             }
-
-            // Execute unified file system and database consistency check and cleanup
-            scanAndCleanInconsistentFiles();
-
-            // Clean expired download files
-            cleanStaleDownloads();
-        } catch (const std::exception& e) {
-            logWarn << "Scan thread exception: " << e.what();
-            // Wait for a period when exception occurs to avoid rapid loops
-            std::this_thread::sleep_for(std::chrono::seconds(30));
-        } catch (...) {
-            logWarn << "Scan thread unknown exception";
-            std::this_thread::sleep_for(std::chrono::seconds(30));
         }
+        logDebug << "Final cleanup completed before thread exit";
+    } catch (const std::exception& e) {
+        logWarn << "Final cleanup failed: " << e.what();
+    } catch (...) {
+        logWarn << "Final cleanup unknown exception";
     }
 
-    logDebug << "Scan thread stopped";
+    logDebug << "Unified task worker thread stopped";
+}
+
+void FileManager::executeReportTask()
+{
+    // Query files that haven't been reported for the longest time from database
+    auto db = getDB();
+    if (!db) {
+        logWarn << "Failed to get database connection for reporting files";
+        return;
+    }
+
+    // Query files that haven't been reported for the longest time, sorted by lastReport in ascending order
+    // If lastReport is empty or 0, prioritize reporting
+    std::lock_guard<std::mutex> lockFOpt(mFileDBOptMutex);
+    auto files = db->stor.select(
+        columns(
+            &FileItem::id,
+            &FileItem::fileHash,
+            &FileItem::blockHash,
+            &FileItem::blockStart,
+            &FileItem::blockEnd,
+            &FileItem::lastAccess),
+        where(c(&FileItem::status) == FileStatus::AVAILABLE),
+        order_by(&FileItem::lastReport).asc(),
+        limit(mOpt.ReportBatchSize));
+
+    if (files.empty()) {
+        logDebug << "No files to report";
+        return;
+    }
+
+    logDebug << "Reporting " << files.size() << " files to PCDN server";
+    uint64_t successfulReports = 0;
+
+    // Batch report files
+    std::vector<std::tuple<FileItem, std::string>> filesToReport;
+    for (const auto& file : files) {
+        FileItem item;
+        item.id = std::get<0>(file);
+        item.fileHash = std::get<1>(file);
+        item.blockHash = std::get<2>(file);
+        item.blockStart = std::get<3>(file);
+        item.blockEnd = std::get<4>(file);
+        filesToReport.push_back(std::tuple(item, ""));
+    }
+    try {
+        reportHaveFiles(filesToReport);
+    } catch (const std::exception& e) {
+        logWarn << "Failed to report files: " << e.what();
+        return; // Report failed, skip this iteration
+    } catch (...) {
+        logWarn << "Unknown exception occurred during file reporting";
+        return; // Report failed, skip this iteration
+    }
+
+    // Update report time in database
+    uint64_t currentTime = getCurrentTimestamp();
+    std::vector<uint64_t> fileIds;
+    for (const auto& file : files) {
+        fileIds.push_back(std::get<0>(file));
+    }
+    if (!fileIds.empty()) {
+        try {
+            db->stor.update_all(set(c(&FileItem::lastReport) = currentTime), where(in(&FileItem::id, fileIds)));
+            successfulReports += fileIds.size();
+        } catch (const std::exception& e) {
+            logWarn << "Failed to batch update last report time: " << e.what();
+        }
+    }
 }
 
 void FileManager::scanFilesystemAndDatabase(

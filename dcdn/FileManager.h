@@ -8,6 +8,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
+#include <functional>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -68,9 +69,9 @@ struct FileManagerOption
     std::uint8_t LRUTargetPercent = 70; // 70% of max storage size
     uint32_t AccessRecordFlushInterval = 3; // Access record flush interval to database (seconds)
     uint32_t LRUCheckInterval = 3; // LRU check interval (seconds)
-    uint32_t ReportInterval = 5; // File reporting interval, 1 hour
+    uint32_t ReportInterval = 60 * 60; // File reporting interval, 1 hour
     uint32_t ReportBatchSize = 10; // Number of files per report batch
-    uint32_t ScanInterval = 3; // Scan cleanup interval, 1 hour
+    uint32_t ScanInterval = 60; // Scan cleanup interval, 1 minute
     uint32_t DownloadTimeout = 30 * 60; // Download timeout, 30 minutes
 };
 
@@ -117,11 +118,27 @@ private:
 
     void loadAccessRecordsFromDB(); // Load file access records from database
 
-    // Scheduled tasks
-    void runLRUThread(); // LRU eviction thread function
-    void runFlushThread(); // Access record flush thread function
-    void runReportThread(); // Scheduled file reporting thread function
-    void runScanThread(); // Scan and clean files, maintain consistency, delete expired download files
+    // Task system abstraction - simple scheduled task system
+    struct ScheduledTask
+    {
+        std::string name;
+        std::chrono::seconds interval;
+        std::chrono::steady_clock::time_point lastExecution;
+        std::function<void()> execute;
+
+        ScheduledTask(const std::string& n, std::chrono::seconds i, std::function<void()> exec)
+            : name(n), interval(i), lastExecution(std::chrono::steady_clock::now()), execute(exec)
+        {
+        }
+    };
+
+    // Unified task management
+    void runTaskWorkerThread(); // Unified task worker thread function
+    void initializeTasks(); // Initialize all scheduled tasks
+    void executeTask(const ScheduledTask& task); // Execute a single task
+    std::chrono::steady_clock::time_point getNextExecutionTime(const ScheduledTask& task) const;
+
+    void executeReportTask(); // Execute file reporting task
     void scanAndCleanInconsistentFiles(); // Unified filesystem and database consistency check and cleanup
 
     // Helper method: scan filesystem and database, return file difference information
@@ -200,30 +217,14 @@ private:
     // Ensures no concurrent file create/delete operations during filesystem state scanning
     std::mutex mFileDBOptMutex;
 
-    // Timer-related
-    std::chrono::steady_clock::time_point mLastFlushTime;
-    std::chrono::steady_clock::time_point mLastLRUCheckTime;
+    // Task system
+    std::vector<ScheduledTask> mScheduledTasks;
 
-    // LRU thread control
+    // Unified task worker thread control
     std::atomic<bool> mShouldStop{false};
-    std::thread mLRUThread;
-    std::condition_variable mLRUCondition;
-    std::mutex mLRUConditionMutex;
-
-    // Flush thread control
-    std::thread mFlushThread;
-    std::condition_variable mFlushCondition;
-    std::mutex mFlushConditionMutex;
-
-    // Report thread control
-    std::thread mReportThread;
-    std::condition_variable mReportCondition;
-    std::mutex mReportConditionMutex;
-
-    // Scan cleanup thread control
-    std::thread mScanThread;
-    std::condition_variable mScanCondition;
-    std::mutex mScanConditionMutex;
+    std::thread mTaskWorkerThread;
+    std::condition_variable mTaskCondition;
+    std::mutex mTaskConditionMutex;
 };
 
 NS_END
