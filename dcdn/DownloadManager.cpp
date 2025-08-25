@@ -1428,16 +1428,19 @@ bool DownloadManager::p2pQueryPeersAsync_(TaskId id, size_t start, size_t end)
         buildQueryPeersRequest("127.0.0.1" /*可改为实际IP*/, t.Url, t.ContentHash, std::to_string(start), "", true);
     void* reqId = nullptr;
 
-    auto succ = [this, id, start, end](nlohmann::json& res) { 
-        this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(EventType::FunctionCall, [this, id, start, end, res = std::move(res)]() REQUIRES(dm_thread()) {
-            this->onP2PPeerQuerySuccess_(id, std::move(res), start, end);
-        }));
+    auto succ = [this, id, start, end](nlohmann::json& res) {
+        this->PostEvent(
+            std::make_shared<ArgEvent<std::function<void()>>>(
+                EventType::FunctionCall, [this, id, start, end, res = std::move(res)]() REQUIRES(dm_thread()) {
+                    this->onP2PPeerQuerySuccess_(id, std::move(res), start, end);
+                }));
     };
     // auto fail = [this, id, start](int code) REQUIRES(dm_thread()) { this->onP2PPeerQueryFail_(id, code, start); };
     auto fail = [this, id, start](int code) {
-        this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(EventType::FunctionCall, [this, id, start, code]() REQUIRES(dm_thread()) {
-            this->onP2PPeerQueryFail_(id, code, start); 
-        }));
+        this->PostEvent(
+            std::make_shared<ArgEvent<std::function<void()>>>(
+                EventType::FunctionCall,
+                [this, id, start, code]() REQUIRES(dm_thread()) { this->onP2PPeerQueryFail_(id, code, start); }));
     };
 
     auto mm = MainManager::Singlet();
@@ -1694,22 +1697,23 @@ TaskId DownloadManager::AddDownloadTask(
     auto prom = std::make_shared<std::promise<TaskId>>();
     auto fut = prom->get_future();
 
-    this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(
-        EventType::FunctionCall, [this, prom, url, contentHash, options = options]() REQUIRES(dm_thread()) {
-            // FSM 创建任务并启动流程
-            applyFsm_(0, CmdAdd{url, contentHash, options});
-            // FSM 写入的成员取回 taskId
-            TaskId idRet = mLastCreatedTaskId.load(std::memory_order_acquire);
-            prom->set_value(idRet);
+    this->PostEvent(
+        std::make_shared<ArgEvent<std::function<void()>>>(
+            EventType::FunctionCall, [this, prom, url, contentHash, options = options]() REQUIRES(dm_thread()) {
+                // FSM 创建任务并启动流程
+                applyFsm_(0, CmdAdd{url, contentHash, options});
+                // FSM 写入的成员取回 taskId
+                TaskId idRet = mLastCreatedTaskId.load(std::memory_order_acquire);
+                prom->set_value(idRet);
 
-            if (options.taskStateChangeEventCallback) {
-                Subscribe([idRet, options](const DMEvent& ev) {
-                    if (ev.id == idRet) {
-                        options.taskStateChangeEventCallback(ev);
-                    }
-                });
-            }
-        }));
+                if (options.taskStateChangeEventCallback) {
+                    Subscribe([idRet, options](const DMEvent& ev) {
+                        if (ev.id == idRet) {
+                            options.taskStateChangeEventCallback(ev);
+                        }
+                    });
+                }
+            }));
 
     return fut.get();
 }
@@ -1718,10 +1722,12 @@ bool DownloadManager::CancelDownloadTask(TaskId taskId)
 {
     auto prom = std::make_shared<std::promise<bool>>();
     auto fut = prom->get_future();
-    this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(EventType::FunctionCall, [this, prom, taskId]() REQUIRES(dm_thread()) {
-        applyFsm_(taskId, CmdCancel{taskId});
-        prom->set_value(true);
-    }));
+    this->PostEvent(
+        std::make_shared<ArgEvent<std::function<void()>>>(
+            EventType::FunctionCall, [this, prom, taskId]() REQUIRES(dm_thread()) {
+                applyFsm_(taskId, CmdCancel{taskId});
+                prom->set_value(true);
+            }));
     return fut.get();
 }
 
@@ -1729,10 +1735,12 @@ bool DownloadManager::PauseDownloadTask(TaskId taskId)
 {
     auto prom = std::make_shared<std::promise<bool>>();
     auto fut = prom->get_future();
-    this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(EventType::FunctionCall, [this, prom, taskId]() REQUIRES(dm_thread()) {
-        applyFsm_(taskId, CmdPause{taskId});
-        prom->set_value(true);
-    }));
+    this->PostEvent(
+        std::make_shared<ArgEvent<std::function<void()>>>(
+            EventType::FunctionCall, [this, prom, taskId]() REQUIRES(dm_thread()) {
+                applyFsm_(taskId, CmdPause{taskId});
+                prom->set_value(true);
+            }));
     return fut.get();
 }
 
@@ -1740,10 +1748,12 @@ bool DownloadManager::ResumeDownloadTask(TaskId taskId)
 {
     auto prom = std::make_shared<std::promise<bool>>();
     auto fut = prom->get_future();
-    this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(EventType::FunctionCall, [this, prom, taskId]() REQUIRES(dm_thread()) {
-        applyFsm_(taskId, CmdResume{taskId});
-        prom->set_value(true);
-    }));
+    this->PostEvent(
+        std::make_shared<ArgEvent<std::function<void()>>>(
+            EventType::FunctionCall, [this, prom, taskId]() REQUIRES(dm_thread()) {
+                applyFsm_(taskId, CmdResume{taskId});
+                prom->set_value(true);
+            }));
     return fut.get();
 }
 

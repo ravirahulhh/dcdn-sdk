@@ -199,7 +199,7 @@ bool UploadManager::initFileOperations(UploadFileTaskPtr task)
             std::ifstream sizeCheck(task->FilePath, std::ios::binary | std::ios::ate);
             size_t fileSize = sizeCheck.tellg();
             sizeCheck.close();
-            task->FileEnd = fileSize - 1;
+            task->FileEnd = fileSize;
         }
 
         task->File.open(task->FilePath, std::ios::binary);
@@ -241,9 +241,9 @@ bool UploadManager::initFileOperations(UploadFileTaskPtr task)
 void UploadManager::performFileSending(UploadFileTaskPtr task)
 {
     try {
+        size_t totalBytesInBlock = task->FileEnd - task->FileStart;
         while (task->Dc->bufferedAmount() < mMaxBufferedAmount.load() &&
                task->GetState() == UploadFileTask::State::Running) {
-            size_t totalBytesInBlock = (task->FileEnd - task->FileStart) + 1;
             size_t remainingBytes = totalBytesInBlock - task->BytesSent;
 
             if (remainingBytes > 0) {
@@ -270,9 +270,11 @@ void UploadManager::performFileSending(UploadFileTaskPtr task)
             }
 
             logDebug << "Uploading to peer: " << task->PeerID << " file: " << task->FileHash
-                     << " progress: " << task->BytesSent << "/" << totalBytesInBlock;
+                     << " progress: " << task->BytesSent << "/" << totalBytesInBlock
+                     << "  byteSent: " << task->BytesSent << "  tellg: " << task->File.tellg();
 
-            if (task->BytesSent >= totalBytesInBlock) {
+            if (task->BytesSent >= totalBytesInBlock || task->File.eof() ||
+                task->File.tellg() >= static_cast<std::streampos>(task->FileEnd)) {
                 logDebug << "File transfer completed, send TRANSFER_COMPLETE to " << task->Label();
                 task->Dc->send("TRANSFER_COMPLETE");
                 task->SetState(UploadFileTask::State::Completed);
@@ -308,7 +310,6 @@ void UploadManager::setupOnOpenCallback(std::shared_ptr<rtc::DataChannel> dc, Up
             logDebug << "DataChannel opened for task: " << channelTask->Label();
             if (channelTask->SetState(UploadFileTask::State::Running)) {
                 addActiveTask(channelTask);
-                mCv.notify_one();
             }
         } catch (const std::exception& e) {
             logError << "Exception in onOpen callback: " << e.what();
@@ -329,7 +330,6 @@ void UploadManager::setupOnBufferedAmountLowCallback(
             if (channelTask->GetState() == UploadFileTask::State::Buffered &&
                 channelTask->SetState(UploadFileTask::State::Running)) {
                 addActiveTask(channelTask);
-                mCv.notify_one();
             }
         } catch (const std::exception& e) {
             logError << "Exception in onBufferedAmountLow callback: " << e.what();
@@ -369,7 +369,6 @@ void UploadManager::setupOnMessageCallback(std::shared_ptr<rtc::DataChannel> dc,
                     logInfo << "Received RESUME for: " << channelTask->Label();
                     if (channelTask->SetState(UploadFileTask::State::Running)) {
                         addActiveTask(channelTask);
-                        mCv.notify_one();
                     }
                 }
             }
@@ -442,7 +441,7 @@ void UploadManager::run()
             }
 
             if (activeTasks.empty()) {
-                std::unique_lock<std::mutex> lock(mTaskMapMutex);
+                std::unique_lock<std::mutex> lock(mActiveTaskMutex);
                 mCv.wait_for(lock, std::chrono::milliseconds(100));
                 continue;
             }

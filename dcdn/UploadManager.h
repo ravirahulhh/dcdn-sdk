@@ -250,10 +250,14 @@ private:
                 break;
             }
         }
-        if (!exists) {
+
+        auto state = task->GetState();
+        if (!exists && state != UploadFileTask::State::Cancelled && state != UploadFileTask::State::Completed &&
+            state != UploadFileTask::State::Failed) {
             logInfo << "Add active task: " << task->FileHash << " from block: " << task->BlockStart
                     << " to block: " << task->BlockEnd;
             mActiveTask.push_back(task);
+            mCv.notify_one();
         }
     }
 
