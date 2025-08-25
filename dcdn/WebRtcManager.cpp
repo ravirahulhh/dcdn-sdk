@@ -8,12 +8,14 @@ NS_BEGIN(dcdn)
 
 static const std::string webRtcConnProtocol = "ProtocolWebRTC";
 
+static const std::string candidatePlaceholder = "CANDIDATE_PLACEHOLDER";
+static const std::string candidatePrefix = "a=candidate:";
+
 WebRtcManager::WebRtcManager(MainManager* man): BaseManager(man)
 {
     mCert = generate_ecdsa_certificate();
     mLastGatherTime = std::chrono::steady_clock::now() - std::chrono::hours(24);
 }
-
 void WebRtcManager::run()
 {
     logInfo << "WebRtc running";
@@ -87,13 +89,10 @@ void WebRtcManager::gatherDone()
         auto dsOpt = mPc->localDescription();
         if (dsOpt) {
             std::string sdp(dsOpt.value());
-            mSdp = sdp;
+            parseCandidates(sdp);
 #ifdef DEBUG_LOCAL_P2P
             std::cout << mSdp << std::endl;
 #endif
-            // TODO:
-            // 解析出candidates并保存，合并已保存的candidates到sdp中，因为有时stun
-            // server无法到达从而会导致本次sdp缺失外网candidate
         }
         report();
     } catch (std::exception& excp) {
@@ -118,6 +117,58 @@ void WebRtcManager::report()
     } catch (...) {
         logWarn << "webrtc report unknown exception";
     }
+}
+
+void WebRtcManager::parseCandidates(const std::string& sdp)
+{
+    logDebug << "parseCandidates, sdp=" << sdp;
+    std::vector<rtc::Candidate> candidates;
+    std::istringstream sdpStream(sdp);
+    std::string line;
+    bool isPlaceholderInResult{false};
+    std::ostringstream result;
+    while (std::getline(sdpStream, line)) {
+        if (line.empty()) {
+            continue;
+        }
+        if (line.compare(0, candidatePrefix.size(), candidatePrefix) == 0) {
+            logDebug << "candidate: " << line;
+            candidates.push_back(rtc::Candidate(line));
+            if (!isPlaceholderInResult) {
+                result << candidatePlaceholder;
+                isPlaceholderInResult = true;
+            }
+        } else {
+            result << line << '\n';
+        }
+    }
+
+    for (auto candidate : candidates) {
+        auto it = std::find(mCandidates.begin(), mCandidates.end(), candidate);
+        if (it != mCandidates.end()) {
+            logDebug << "update candidate: " << candidate;
+            // 比较了主要部分，如果剩余部分有变化，也会更新
+            *it = candidate;
+        } else {
+            logDebug << "add candidate: " << candidate;
+            mCandidates.push_back(candidate);
+        }
+    }
+
+    std::ostringstream candidatesStr;
+    for (const auto& candidate : mCandidates) {
+        candidatesStr << candidate << "\r\n";
+    }
+    logDebug << "local candidate collect:" << candidatesStr.str();
+
+    std::string resultStr = result.str();
+    size_t placeholderPos = resultStr.find(candidatePlaceholder);
+    if (placeholderPos != std::string::npos) {
+        resultStr.replace(placeholderPos, candidatePlaceholder.size(), candidatesStr.str());
+    }
+    logDebug << "local placed sdp:" << resultStr;
+
+    mSdp = resultStr;
 }
 
 NS_END

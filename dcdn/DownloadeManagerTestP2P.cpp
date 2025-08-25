@@ -12,7 +12,7 @@
 
 int main()
 {
-     static plog::ConsoleAppender<plog::TxtFormatter> consoleAppender;
+    static plog::ConsoleAppender<plog::TxtFormatter> consoleAppender;
     // plog::Severity lvl = plog::debug;
     // static plog::ConsoleAppender<plog::TxtFormatter> consoleAppender;
     plog::Severity lvl = plog::debug;
@@ -28,7 +28,7 @@ int main()
     opt.ServerCfg = DcdnServerCfg{
         "https://api-pcdn.capell.io", // api
         "https://api-pcdn.capell.io", // evt
-        "wss://cmd-pcdn.capell.io"    // cmd
+        "wss://cmd-pcdn.capell.io" // cmd
     };
     int ret = dcdn::MainManager::Init(opt);
     if (ret != 1) {
@@ -43,8 +43,8 @@ int main()
 
     const auto cp = static_cast<dcdn::WebRtcManager*>(dcdn::MainManager::Singlet()->GetWebRtcManager().get())->Cert();
     std::cout << "Main" << "keyPemFile" << cp.keyPem << "certPemFile" << cp.certPem << std::endl;
-    
-   auto mgr = std::dynamic_pointer_cast<dcdn::DownloadManager>(m->GetDownloadManager());
+
+    auto mgr = std::dynamic_pointer_cast<dcdn::DownloadManager>(m->GetDownloadManager());
 
     // 配置为 HTTP_ONLY 策略，最大并发 4
     // mgr.SetStrategy(dcdn::DownloadStrategy::P2P_ONLY);
@@ -73,8 +73,8 @@ int main()
                       << "Task Id :" << e->id << std::endl;
         } else if (auto* p = dynamic_cast<const dcdn::ETaskProgress*>(&ev)) {
             // p->id, p->downloaded, p->total
-            std::cout << "ETaskProgress downloaded:" << p->downloaded << " total:" << p->total 
-                      << "Task Id :" << p->id << std::endl;
+            std::cout << "ETaskProgress downloaded:" << p->downloaded << " total:" << p->total << "Task Id :" << p->id
+                      << std::endl;
             if (p->downloaded == p->total) {
                 std::cout << "下载完成" << std::endl;
             }
@@ -116,35 +116,34 @@ int main()
     //         }
     //         break;
     //     }
-        
 
-        // 取消示例
-        // if (percent > 1){
-        //    auto success = mgr.cancelDownloadTask(taskId);
-        //    if (success) std::cout << "main: 取消任务成功" << std::endl;
-        //    else std::cout << "main: 取消任务失败" << std::endl;
-        // }
-        //
-        // 暂停/继续示例
-        // if (percent > 5 && firstPause) {
-        //    auto success = mgr.PauseDownloadTask(taskId);
-        //    if (success) std::cout << "main: 暂停任务成功" << std::endl;
-        //    else std::cout << "main: 暂停任务失败" << std::endl;
-        //    std::this_thread::sleep_for(std::chrono::seconds(1));
-        //    std::cout << "main: 继续任务" << std::endl;
-        //    success = mgr.ResumeDownloadTask(taskId);
-        //    if (success) std::cout << "main: 继续任务成功" << std::endl;
-        //    else std::cout << "main: 继续任务失败" << std::endl;
-        //    firstPause = false;
-        // }
+    // 取消示例
+    // if (percent > 1){
+    //    auto success = mgr.cancelDownloadTask(taskId);
+    //    if (success) std::cout << "main: 取消任务成功" << std::endl;
+    //    else std::cout << "main: 取消任务失败" << std::endl;
+    // }
+    //
+    // 暂停/继续示例
+    // if (percent > 5 && firstPause) {
+    //    auto success = mgr.PauseDownloadTask(taskId);
+    //    if (success) std::cout << "main: 暂停任务成功" << std::endl;
+    //    else std::cout << "main: 暂停任务失败" << std::endl;
+    //    std::this_thread::sleep_for(std::chrono::seconds(1));
+    //    std::cout << "main: 继续任务" << std::endl;
+    //    success = mgr.ResumeDownloadTask(taskId);
+    //    if (success) std::cout << "main: 继续任务成功" << std::endl;
+    //    else std::cout << "main: 继续任务失败" << std::endl;
+    //    firstPause = false;
+    // }
 
-        // std::this_thread::sleep_for(std::chrono::seconds(1));
+    // std::this_thread::sleep_for(std::chrono::seconds(1));
     // }
     std::cout << "Main exit" << std::endl;
     std::mutex lock;
     std::condition_variable cv;
     std::unique_lock<std::mutex> lck(lock); // <1>
-    while (true){
+    while (true) {
         cv.wait(lck);
     }
     return 0;

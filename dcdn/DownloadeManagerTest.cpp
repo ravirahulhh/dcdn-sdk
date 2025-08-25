@@ -58,7 +58,7 @@ int main()
 
     // 238cc5e19b0f043135227ca44fc93aed of https://testfileorg.netwet.net/500MB-CZIPtestfile.org.zip first part
     opt.RangeStart = 0;
-    opt.RangeEnd   = 262143999ULL;
+    opt.RangeEnd = 262143999ULL;
 
     // md5 27e8e8c55dcaa8fdbcc654b540fefd65 of https://testfileorg.netwet.net/500MB-CZIPtestfile.org.zip second part
     // opt.RangeStart = 262144000;
@@ -74,7 +74,7 @@ int main()
                       << "Task Id :" << e->id << std::endl;
         } else if (auto* p = dynamic_cast<const dcdn::ETaskProgress*>(&ev)) {
             // p->id, p->downloaded, p->total
-            // std::cout << "ETaskProgress downloaded:" << p->downloaded << " total:" << p->total 
+            // std::cout << "ETaskProgress downloaded:" << p->downloaded << " total:" << p->total
             //           << "Task Id :" << p->id << std::endl;
             if (p->downloaded == p->total) {
                 std::cout << "下载完成" << std::endl;
@@ -88,7 +88,8 @@ int main()
 
     opt.taskStateChangeEventCallback = [](const dcdn::DMEvent& ev) {
         if (auto* p = dynamic_cast<const dcdn::ETaskStatusChanged*>(&ev)) {
-            std::cout << "task id :" << p->id << "status changed from:" << static_cast<int>(p->from) << " to:" << static_cast<int>(p->to) << std::endl;
+            std::cout << "task id :" << p->id << "status changed from:" << static_cast<int>(p->from)
+                      << " to:" << static_cast<int>(p->to) << std::endl;
             if (p->to == dcdn::TaskStatus::Completed) {
                 std::cout << "下载完成" << std::endl;
             }

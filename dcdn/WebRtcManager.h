@@ -10,7 +10,6 @@
 #include <memory>
 #include <mutex>
 #include <string>
-#include <thread>
 
 #include "BaseManager.h"
 #include "Cert.h"
@@ -38,6 +37,7 @@ private:
     void gather();
     void gatherDone();
     void report();
+    void parseCandidates(const std::string& sdp);
     enum GatherStatus
     {
         GatherIdle,
@@ -55,6 +55,7 @@ private:
     std::atomic<GatherStatus> mGatherStatus = GatherIdle;
     std::shared_ptr<rtc::PeerConnection> mPc;
     std::string mSdp;
+    std::vector<rtc::Candidate> mCandidates;
 };
 
 NS_END
