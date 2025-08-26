@@ -49,7 +49,8 @@ static void write_bytes_clipped(
     std::shared_ptr<std::fstream> file,
     TaskId taskId,
     DownloadManager::Dependencies deps,
-    DrainResult& agg // 汇总
+    DrainResult& agg, // 汇总,
+    bool processIo = true // 是否进行 IO 处理
 )
 {
     if (!data || bufLen == 0)
@@ -87,8 +88,16 @@ static void write_bytes_clipped(
         }
     }
 
-    bool wrote = false;
+    if (!processIo) {
+        agg.bytesWritten += accept;
+        if (agg.firstWriteAbsBegin == SIZE_MAX)
+            agg.firstWriteAbsBegin = wrBeg;
+        agg.lastWriteAbsEnd = wrEnd;
+        return;
+    }
 
+    // =========================Process IO=========================
+    bool wrote = false;
     // Write to IFileStore first
     if (deps.files) {
         wrote = deps.files->Write(taskId, dstOff, data + srcOff, accept);
@@ -138,7 +147,7 @@ static void write_bytes_clipped(
                     ofs.write(reinterpret_cast<const char*>(data + srcOff), accept);
                     wrote = true;
                 } else {
-                    logWarn << "[write_bytes_clipped] open fallback file failed: " << opts.OutputPath;
+                    logError << "[write_bytes_clipped] open fallback file failed: " << opts.OutputPath;
                 }
             }
         }
@@ -504,7 +513,6 @@ void DownloadManager::processHttpEvent(std::shared_ptr<util::DownloaderTask> ev)
         }
         // probe 任务没有固定 length，用"这次读到的数据长度"作为临时范围
         segStart = active.offset;
-        ;
         segEnd = active.offset + ((probeDataLen > 0) ? (probeDataLen - 1) : 0);
 
         if (auto ht = dynamic_cast<util::HttpDownloaderTask*>(ev.get())) {
@@ -752,7 +760,6 @@ void DownloadManager::applyFsm_(const IOData& ev)
         }
     }
 
-    // ========== B) 通用：将 buffer 链按 [segStart, segEnd] clip 并写入 ==========
     FileDownloadOptions opts;
     std::shared_ptr<std::fstream> file;
     {
@@ -766,6 +773,8 @@ void DownloadManager::applyFsm_(const IOData& ev)
     if (itF != mParentFiles.end())
         file = itF->second;
 
+    // ========== C) 通用：将 buffer 链按 [segStart, segEnd] clip 并写入 ==========
+
     DrainResult agg{};
     auto head = ev.head;
     auto b = ev.head;
@@ -774,7 +783,18 @@ void DownloadManager::applyFsm_(const IOData& ev)
         const size_t off = b->Offset(); // 资源绝对偏移
         // logDebug << "[P2P][Write] task id=" << ev.id << " range " << off << "-" << (off + len - 1) << std::endl;
         auto data = reinterpret_cast<const uint8_t*>(b->Data());
-        write_bytes_clipped(data, len, off, ev.segStart, ev.segEnd, opts, file, ev.id, mDeps, agg);
+        write_bytes_clipped(
+            data,
+            len,
+            off,
+            ev.segStart,
+            ev.segEnd,
+            opts,
+            file,
+            ev.id,
+            mDeps,
+            agg,
+            !(opts.Strategy == DownloadStrategy::Stream)); // forbidden process io in stream mode
         b = b->Next();
     }
 
@@ -1030,7 +1050,6 @@ void DownloadManager::applyFsm_(TaskId id, const PlanReady& ev)
 
     // 2) plan 为空：按策略处理回退/失败
     if (ev.chunks.empty()) {
-        logError << "进入未完善的分支（applyFsm plan empty）";
         std::string urlLocal;
         {
             AnnotatedMutex::Guard lk(mTasksMutex);
@@ -1041,6 +1060,7 @@ void DownloadManager::applyFsm_(TaskId id, const PlanReady& ev)
         const size_t startNext = ev.startHint;
         const size_t endHint = opt.HasRange ? opt.RangeEnd : SIZE_MAX;
         logWarn << "P2P plan empty, taskId=" << id << " start=" << startNext << " end=" << endHint;
+        logWarn << "[P2p] 返回空的调度列表 taskId=" << id << " start=" << ev.startHint << "end=" << ev.endHint;
         if (opt.Strategy == DownloadStrategy::Stream) {
             if (opt.StreamFallbackHttpIfNoP2P) {
                 if (endHint == SIZE_MAX) {
@@ -1157,6 +1177,7 @@ void DownloadManager::applyFsm_(TaskId /*id*/, const CmdAdd& cmd)
         }
     } else if (cmd.opt.Strategy == DownloadStrategy::Stream) {
         // 1） 初始化流式状态
+        logDebug << "CmdADD:Init stream state for task " << id;
         {
             AnnotatedMutex::Guard lk(mTasksMutex);
             auto& t = mTasks[id];
@@ -1166,21 +1187,27 @@ void DownloadManager::applyFsm_(TaskId /*id*/, const CmdAdd& cmd)
         size_t warmup = std::max<size_t>(cmd.opt.StreamWarmupBytes, cmd.opt.ChunkSize);
         size_t warmupStart = cmd.opt.HasRange ? cmd.opt.RangeStart : 0;
         size_t warmupEnd = warmupStart + warmup - 1;
-        {
-            // 记录流式阶段
-            mStreamState[id].phase = StreamState::Phase::WarmupHttp;
-            mStreamState[id].warmupEnd = warmupEnd;
+        if (cmd.opt.HttpWarmupEnabled) {
+            {
+                // 记录流式阶段
+                mStreamState[id].phase = StreamState::Phase::WarmupHttp;
+                mStreamState[id].warmupEnd = warmupEnd;
+            }
+            logInfo << "CmdAdd: stream warmup start " << warmupStart << " end " << warmupEnd;
+        } else {
+            mStreamState[id].phase = StreamState::Phase::P2P;
+            mStreamState[id].warmupEnd = 0;
         }
         // 3) 只下发首播一个HTTP分片
-        if (cmd.opt.HttpWarmupEnabled) {
+        if (cmd.opt.HttpWarmupEnabled && !cmd.url.empty()) {
             scheduleHttpChunk_(id, cmd.url, warmupStart, warmupEnd);
         } else {
             bool ok = p2pQueryPeersAsync_(
                 id, cmd.opt.HasRange ? cmd.opt.RangeStart : 0, cmd.opt.HasRange ? cmd.opt.RangeEnd : SIZE_MAX);
             if (!ok) {
-
+                // TODO: handle query failed in cmd add
                 logError << "未处理的P2PQueryPeersAsync failed";
-
+                std::abort();
             }
         }
     } else {
@@ -1424,7 +1451,6 @@ void DownloadManager::scheduleHttpChunk_(TaskId id, const std::string& url, size
     opt.End = end;
     opt.Notify = &DownloadManager::coreNotifyCallbackHttp;
     opt.Receiver = this;
-    logInfo << "创建任务 start " << start << " end " << end << std::endl;
     auto sub = mDeps.http->CreateTask(&opt);
     if (!sub) {
         logWarn << "CreateTask failed range " << start << "-" << end;
@@ -1453,6 +1479,7 @@ void DownloadManager::scheduleHttpChunk_(TaskId id, const std::string& url, size
     mDlByTaskHttp[id].push_back(sub);
 
     mDeps.http->AddTask(sub);
+    logInfo << "[HTTP下载引擎]创建了任务, taskId=" << id << ", [" << start << ", " << end << "]" << std::endl;
 }
 
 void DownloadManager::planAndDispatchHttp_(
@@ -1917,8 +1944,9 @@ TaskId DownloadManager::AddDownloadTask(
                     }
                 });
             }
-            if (options.StreamCb) {
-                SubscribeStream(idRet, options.StreamCb);
+            if (options.Strategy == DownloadStrategy::Stream && options.StreamReadyCb) {
+                SubscribeStream(idRet, options.StreamReadyCb);
+                initNextStreamBufOffset(options);
             }
         }));
 
@@ -1962,13 +1990,20 @@ bool DownloadManager::ResumeDownloadTask(TaskId taskId)
 }
 
 // ========== 状态查询 ==========
-DownloadTask DownloadManager::GetTaskStatus(TaskId taskId) const
+DownloadTask DownloadManager::GetTask(TaskId taskId) const
 {
     AnnotatedMutex::Guard lk(mTasksMutex);
     auto it = mTasks.find(taskId);
     if (it != mTasks.end())
         return it->second;
     return {};
+}
+TaskStatus DownloadManager::GetTaskStatus(TaskId taskId) const{
+    AnnotatedMutex::Guard lk(mTasksMutex);
+    auto it = mTasks.find(taskId);
+    if (it != mTasks.end())
+        return it->second.Status;
+    return TaskStatus::None;
 }
 
 std::vector<DownloadTask> DownloadManager::GetAllTasks() const
@@ -1994,85 +2029,69 @@ void DownloadManager::SubscribeStream(TaskId taskId, StreamDataReadyCallback cb)
 {
     // 适配器：订阅内部事件并在收到 EStreamBytes 时把 [start,end] 裁剪成连续视图喂给 C 风格回调
     // 生命周期契约：指针仅在回调期间有效（Borrowed 模式）
-    auto sid = Subscribe([taskId, cb = cb](const DMEvent& ev) {
-        if (ev.id != taskId)
+    auto sid = Subscribe([taskId, notifyStreamReady = cb, expectedBufOffset = mStreamNextNotifyOffset, this](
+                             const DMEvent& ev) REQUIRES(dm_thread()) {
+        if (ev.id != taskId) {
             return;
+        }
         auto p = dynamic_cast<const EStreamBytes*>(&ev);
-        if (!p || !p->head)
+        if (!p || !p->head) {
+            logWarn << "[SubscribeStream Cb] 异常的空数据包 taskId=" << taskId;
             return;
+        }
 
         const size_t start = p->start;
         const size_t end = p->end;
-        if (end < start)
+        if (end < start) {
+            logError << "[SubscribeStream Cb] 异常的开始和结束 taskId=" << taskId << " start=" << start
+                     << " end=" << end;
             return;
-        const size_t need = end - start + 1;
+        }
 
-        // 优先尝试零拷贝：看看 [start,end] 是否完全落在某个单块 buffer 内
-        for (auto b = p->head; b; b = b->Next()) {
-            const size_t bOff = b->Offset(); // 绝对偏移
-            const size_t bLen = b->Length();
-            const size_t bEnd = bOff + (bLen ? (bLen - 1) : 0);
-            if (start >= bOff && end <= bEnd) {
-                const uint8_t* ptr = reinterpret_cast<const uint8_t*>(b->Data()) + (start - bOff);
-                // cb(taskId,); // Borrowed：仅在回调期间有效
-                return;
+        bool needClip = false;
+        size_t bufChainActual = 0;
+        {
+            const size_t need = end - start + 1;
+            auto tmp = p->head;
+            while (tmp) {
+                bufChainActual += tmp->Length();
+                tmp = tmp->Next();
             }
+
+            if (bufChainActual != need) {
+                logWarn << "[SubscribeStream Cb] Buffer chain 实际长度和分片区见不一致，裁剪.. taskId=" << taskId
+                        << " expect start=" << start << "expect end=" << end << "expected need=" << need
+                        << " bufChainActualTotal=" << bufChainActual << "buffer actual start " << p->head->Offset();
+            }
+            needClip = (bufChainActual != need);
         }
 
-        // 否则需要聚合拷贝（仍是 Borrowed：仅在回调期间有效）
-        // TODO: 避免拷贝，把"连续视图"换成分散/聚合（scatter-gather）视图。(借鉴系统接口（struct iovec / readv /
-        // sendmsg）)， 给Download manager增加一个"零拷贝可选"的回调,using StreamHandlerSG    =
-        // std::function<void(TaskId, const dcdn_span*, size_t, size_t /*total*/, size_t /*start*/)>; c api definition
-        // typedef unsigned long long dcdn_task_id;
-        // typedef struct dcdn_span {
-        //     const uint8_t* data;  // 指向底层 buffer 中的一段
-        //     size_t         len;   // 这段长度
-        //     size_t         offset; // 绝对偏移（便于上层定位）
-        // } dcdn_span;
-
-        // // 零拷贝 scatter-gather 回调：spans 数组表示一组连续的视图
-        // typedef void (*dcdn_stream_handler_sg)(
-        //     dcdn_task_id task_id,
-        //     const dcdn_span* spans, size_t nspans,
-        //     size_t total_size,    // sum(len)
-        //     size_t start_offset   // spans[0].offset
-        // );
-
-        std::vector<uint8_t> agg;
-        agg.resize(need);
-
-        size_t written = 0;
-        // 将链表中与 [start,end] 交集的部分 copy 到 agg 对应位置
-        for (auto b = p->head; b && written < need; b = b->Next()) {
-            const size_t bOff = b->Offset();
-            const size_t bLen = b->Length();
-            if (bLen == 0)
-                continue;
-            const size_t bEnd = bOff + bLen - 1;
-
-            // 交集 [wrBeg, wrEnd]
-            const size_t wrBeg = (start > bOff) ? start : bOff;
-            const size_t wrEnd = (end < bEnd) ? end : bEnd;
-            if (wrBeg > wrEnd)
-                continue;
-
-            const size_t n = wrEnd - wrBeg + 1;
-            const size_t src = wrBeg - bOff;
-            const size_t dst = wrBeg - start;
-
-            std::memcpy(agg.data() + dst, reinterpret_cast<const uint8_t*>(b->Data()) + src, n);
-            written += n;
+        auto newBufHead = p->head;
+        if (needClip) {
+            newBufHead = clipBufferChain(p->head, start, end);
         }
 
-        if (written == need) {
-            // TODO:
-            if (cb) cb(taskId, nullptr);
-            // cb(taskId, agg.data(), need, start); // Borrowed：仅在回调期间有效
+        auto curBufOffset = p->head->Offset();
+        if (curBufOffset == expectedBufOffset) {
+            // merge chain and notify  buffer ready
+            tryMergeStreamBufferChain(ev.id, curBufOffset);
+
+            void* receiver = nullptr;
+            {
+                AnnotatedMutex::Guard lk(mTasksMutex);
+                auto it = mTaskOptions.find(ev.id);
+                if (it != mTaskOptions.end()) {
+                    receiver = it->second.StreamDataCbReceiver;
+                }
+            }
+            notifyStreamReady(ev.id, receiver);
         } else {
-            // 理论上不会出现，除非底层链上数据与事件声明不一致
-            logWarn << "[SubscribeStream] gather size mismatch: written=" << written << " need=" << need;
+            logInfo << "[SubscribeStream Cb] 不连续的数据包，不通知，暂存 taskId=" << taskId
+                    << " expectedOffset=" << expectedBufOffset << " thisBufOffset=" << curBufOffset
+                    << " len=" << bufChainActual;
+            AnnotatedMutex::Guard lk(mTasksMutex);
+            mTaskStreamBuffer[ev.id][curBufOffset] = std::move(newBufHead);
         }
-        // agg 在回调返回后析构释放
     });
 
     // save sub-id to RemoveStreamCallback
@@ -2096,8 +2115,27 @@ void DownloadManager::RemoveStreamCallback(TaskId taskId)
         Unsubscribe(sid);
     }
 }
-std::shared_ptr<util::DownloaderTaskBuffer>  DownloadManager::ReadData(TaskId id ){
- // TODO:
+std::shared_ptr<util::DownloaderTaskBuffer> DownloadManager::ReadData(TaskId id)
+{
+    // TODO: 改锁锁的代码片段较长，优化
+    AnnotatedMutex::Guard lk(mTasksMutex);
+    auto it = mTaskStreamBuffer.find(id);
+    if (it == mTaskStreamBuffer.end()) {
+        logError << "[ReadData] unexpected taskId=" << id << "data not found with ";
+        return nullptr;
+    }
+    auto curReadOffset = mStreamNextReadOffset;
+    auto curHead = it->second[curReadOffset];
+    assert(curHead->Offset() == curReadOffset);
+    while (curHead) {
+        mStreamNextReadOffset += curHead->Length();
+        curHead = curHead->Next();
+    }
+    auto n = mTaskStreamBuffer[id].erase(curReadOffset);
+    assert(n == 1);
+    logInfo << "[ReadData] taskId=" << id << " curReadOffset=" << curReadOffset
+            << " mStreamNextReadOffset=" << mStreamNextReadOffset << " erase StreamBufferMap n=" << n;
+    return curHead;
 }
 
 DownloadManager::SubId DownloadManager::Subscribe(Handler h)
@@ -2154,7 +2192,7 @@ void DownloadManager::notifyDataReady(
     size_t start,
     size_t end)
 {
-    publish_(EStreamBytes{id, head, start, end, /*contiguous?*/ true});
+    publish_(EStreamBytes{id, head, start, end});
 }
 
 void DownloadManager::cancelAllSubs_(TaskId id, bool http, bool p2p)
@@ -2240,6 +2278,168 @@ void DownloadManager::publish_(const DMEvent& ev)
         // };
         // 无操作；留给具体项目的 IEventBus 实现去接
     }
+}
+
+inline void DownloadManager::initNextStreamBufOffset(const FileDownloadOptions& opt)
+{
+    if (opt.Strategy == DownloadStrategy::Stream && opt.HasRange) {
+        logInfo << "init next stream buf offset: " << opt.RangeStart;
+        {
+            mStreamNextNotifyOffset = opt.RangeStart;
+        }
+    }
+}
+
+// 裁剪 DownloaderTaskBuffer 链，仅保留 [clipStart, clipEnd] 区间
+std::shared_ptr<util::DownloaderTaskBuffer>
+DownloadManager::clipBufferChain(std::shared_ptr<util::DownloaderTaskBuffer> head, size_t clipStart, size_t clipEnd)
+{
+    assert(clipStart <= clipEnd);
+    assert(head);
+    // if (!head){
+    //     return nullptr;
+    // }
+    // if (clipEnd < clipStart){
+    //     return nullptr;
+    // }
+
+    using VecBuf = util::DownloaderTaskContainerBuffer<std::vector<unsigned char>>;
+
+    std::shared_ptr<util::DownloaderTaskBuffer> newHead;
+    std::shared_ptr<util::DownloaderTaskBuffer> prev;
+
+    auto node = head;
+    while (node) {
+        const size_t len = node->Length();
+        if (len == 0) {
+            logWarn << "empty buffer in chain";
+            node = node->Next();
+            continue;
+        }
+        const size_t bufBeg = node->Offset();
+        const size_t bufEnd = bufBeg + len - 1;
+
+        // 与裁剪区间 [clipStart, clipEnd] 求交
+        if (bufEnd < clipStart) {
+            node = node->Next();
+            continue;
+        }
+        if (bufBeg > clipEnd) {
+            break;
+        }
+
+        const size_t takeBeg = std::max(bufBeg, clipStart);
+        const size_t takeEnd = std::min(bufEnd, clipEnd);
+        const size_t takeLen = (takeEnd >= takeBeg) ? (takeEnd - takeBeg + 1) : 0;
+        if (takeLen == 0) {
+            node = node->Next();
+            continue;
+        }
+
+        std::shared_ptr<util::DownloaderTaskBuffer> outNode;
+        if (takeBeg == bufBeg && takeEnd == bufEnd) {
+            // 完全命中：复用当前节点，避免拷贝
+            outNode = node;
+        } else {
+            // 部分命中：仅复制命中区间（常见场景：只裁剪最后一个节点）
+            auto vb = std::make_shared<VecBuf>();
+            std::vector<unsigned char> tmp;
+            tmp.resize(takeLen);
+            const auto* src = node->Data();
+            const size_t srcOff = takeBeg - bufBeg;
+            std::memcpy(tmp.data(), src + srcOff, takeLen);
+            vb->Set(takeBeg, std::move(tmp));
+            outNode = vb;
+            logDebug << "[clipBufferChain] clip buffer " << node->Offset() << "-" << node->Length() << " to " << takeBeg
+                     << "-" << takeLen;
+        }
+
+        if (!newHead) {
+            newHead = outNode;
+            prev = outNode;
+        } else {
+            prev->Concat(outNode);
+            prev = outNode;
+        }
+
+        // 如果已经到达 clipEnd，停止并断开 next（避免泄漏后续节点）
+        if (takeEnd == clipEnd) {
+            break;
+        }
+        node = node->Next();
+    }
+
+    if (prev) {
+        prev->Concat(nullptr);
+    }
+
+    return newHead; // may be old or new
+}
+
+// 仅拼接并删除 map 中可连续的链表节点：
+// mTaskStreamBuffer[id] 结构： key = 起始绝对偏移，value = 该偏移处的一条 buffer 链(head)
+// 目标：把从 offset 开始，后续 key == 当前链末尾 nextOffset 的节点依次拼接到当前链末端，并从 map 中删除被拼接的节点。
+size_t DownloadManager::tryMergeStreamBufferChain(TaskId id, size_t offset)
+{
+    // TODO: 该锁锁的代码片段较长，优化
+    AnnotatedMutex::Guard lk(mTasksMutex);
+
+    auto itTask = mTaskStreamBuffer.find(id);
+    if (itTask == mTaskStreamBuffer.end())
+        return 0;
+
+    auto& segMap = itTask->second; // map<size_t, std::shared_ptr<DownloaderTaskBuffer>>
+    auto itHead = segMap.find(offset);
+    if (itHead == segMap.end() || !itHead->second)
+        return 0;
+
+    auto head = itHead->second;
+    auto tail = head;
+    size_t nextOffset = 0;
+    {
+        assert(head);
+        nextOffset = head->Offset();
+        while (tail->Next()) {
+            tail = tail->Next();
+        }
+        nextOffset = tail->Offset() + tail->Length();
+    }
+
+    size_t mergedBytes = 0; 
+    for (;;) {
+        auto itNext = segMap.find(nextOffset);
+        if (itNext == segMap.end() || !itNext->second)
+            break; // no more to merge 
+
+        auto nextHead = itNext->second;
+
+        tail->Concat(nextHead);
+
+        size_t added = 0;
+        auto p = nextHead;
+        while (p) {
+            added += p->Length();
+            if (!p->Next())
+                tail = p; // new tail
+            p = p->Next();
+        }
+
+        mergedBytes += added;
+        nextOffset += added; // new nextOffset
+
+        // remove already merged node from map
+        segMap.erase(itNext);
+        logInfo << "[tryMergeStreamBufferChain]: merged buffer chain of " << added << " bytes from offset " << nextOffset << " to buffer chain of offset " << head->Offset();
+    }
+
+    if (mStreamNextNotifyOffset == offset) {
+        mStreamNextNotifyOffset = nextOffset; 
+        logDebug << "[tryMergeStreamBufferChain]: 并的是写入端的连续推进点，推进写指针 updated mStreamNextWriteOffset to " << mStreamNextNotifyOffset;
+    }
+
+    segMap[offset] = head;
+
+    return mergedBytes;
 }
 
 void DownloadManager::SetStrategy(DownloadStrategy strategy)

@@ -85,6 +85,7 @@ enum class DownloadStrategy
 
 enum class TaskStatus
 {
+    None,
     Pending,
     Running,
     Paused,
@@ -94,7 +95,7 @@ enum class TaskStatus
 };
 
 using TaskId = uint64_t;
-typedef void(*StreamDataReadyCallback)(TaskId taskId, void* receiver);
+typedef void (*StreamDataReadyCallback)(TaskId taskId, void* receiver);
 
 struct FileDownloadOptions
 {
@@ -115,11 +116,11 @@ struct FileDownloadOptions
     IEventBus::Handler taskStateChangeEventCallback;
 
     // === Stream-only tuning ===
-    void *StreamDataCbReceiver = nullptr;
-    StreamDataReadyCallback StreamCb = nullptr;
+    void* StreamDataCbReceiver = nullptr;
+    StreamDataReadyCallback StreamReadyCb = nullptr;
+    bool HttpWarmupEnabled = false; // Stream 模式下是否启用HTTP预热
     size_t StreamWarmupBytes = 256 * 1024; // 首播HTTP预热，默认256KB
     bool StreamFallbackHttpIfNoP2P = true; // P2P空/失败时是否回退HTTP
-    bool HttpWarmupEnabled = false; // Stream 模式下是否启用HTTP预热
     size_t maxStreamBufferBytes = 50 * 1024 * 1024; // 流式传输最大缓存
 };
 
@@ -252,11 +253,10 @@ struct EStreamBytes: DMEvent
 {
     // pointer to the head of a linked list of buffers
     std::shared_ptr<util::DownloaderTaskBuffer> head;
-    size_t start; // absolute
-    size_t end; // inclusive
-    bool contiguous; // 可选：是否保证 [start,end] 在单一连续切片内
-    EStreamBytes(TaskId id, std::shared_ptr<util::DownloaderTaskBuffer> head, size_t start, size_t end, bool contiguous)
-        : DMEvent(id), head(std::move(head)), start(start), end(end), contiguous(contiguous)
+    size_t start; // absolute, start(offset) of the whole buffer chain data
+    size_t end; // inclusive, end of the whole buffer chain
+    EStreamBytes(TaskId id, std::shared_ptr<util::DownloaderTaskBuffer> head, size_t start, size_t end)
+        : DMEvent(id), head(std::move(head)), start(start), end(end)
     {
     }
 };
@@ -292,7 +292,8 @@ public:
     bool ResumeDownloadTask(TaskId taskId);
 
     // Thread Safe
-    DownloadTask GetTaskStatus(TaskId taskId) const;
+    DownloadTask GetTask(TaskId taskId) const;
+    TaskStatus GetTaskStatus(TaskId taskId) const;
     std::vector<DownloadTask> GetAllTasks() const;
     double GetOverallSpeed() const;
 
@@ -303,8 +304,8 @@ public:
     void Unsubscribe(SubId id);
 
     // 供上层调用的便捷接口(对事件订阅的语法糖封装)
-    void SubscribeStream(TaskId taskId, StreamDataReadyCallback callback);
-    void RemoveStreamCallback(TaskId taskId);
+    void SubscribeStream(TaskId taskId, StreamDataReadyCallback callback) REQUIRES(dm_thread());
+    void RemoveStreamCallback(TaskId taskId) REQUIRES(dm_thread());
     std::shared_ptr<util::DownloaderTaskBuffer> ReadData(TaskId taskId);
 
     void Init();
@@ -595,6 +596,18 @@ private:
         size_t warmupEnd = 0; // inclusive
     };
     std::unordered_map<TaskId, StreamState> mStreamState GUARDED_BY(dm_thread());
+    size_t mStreamNextNotifyOffset GUARDED_BY(dm_thread()) = 0; // 顺序写控制
+    size_t mStreamNextReadOffset GUARDED_BY(mTasksMutex) = 0; 
+    // taskid --> writeOffset -> buffer chain head
+    std::unordered_map<TaskId, std::unordered_map<size_t, std::shared_ptr<util::DownloaderTaskBuffer>>>
+        mTaskStreamBuffer GUARDED_BY(mTasksMutex);
+    void initNextStreamBufOffset(const FileDownloadOptions& opt) REQUIRES(dm_thread());
+    std::shared_ptr<util::DownloaderTaskBuffer> clipBufferChain(
+        std::shared_ptr<util::DownloaderTaskBuffer> head,
+        size_t clipStart,
+        size_t clipEnd) REQUIRES(dm_thread());
+    // merge stream buffer (mTaskStreamBuffer) chain begin at offset
+    size_t tryMergeStreamBufferChain(TaskId id, size_t offset) REQUIRES(dm_thread());
 
 private:
     DmLoopThreadCap loop_cap_;

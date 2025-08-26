@@ -64,7 +64,7 @@ int main()
             }
         }
     };
-    opt.StreamCb = [](dcdn::TaskId taskId, void* ){
+    opt.StreamReadyCb = [](dcdn::TaskId taskId, void* ){
         // std::cout << "stream cb [" << offset << "," << offset + size - 1 << "]" << std::endl;
     };
 
