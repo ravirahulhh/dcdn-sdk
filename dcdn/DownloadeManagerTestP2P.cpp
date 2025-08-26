@@ -19,11 +19,11 @@ int main()
     // plog::init<DCDN_LOGGER_ID>(lvl, consoleAppender);
     plog::init<DCDN_LOGGER_ID>(lvl, &consoleAppender);
     dcdn::MainManagerOption opt;
-    opt.WorkDir = "./data";
+    opt.WorkDir = "./data3";
     opt.ApiKey = "123456";
-    opt.DeviceId = "device3122";
+    opt.DeviceId = "device31221";
     opt.DeviceInfo = DcdnDeviceInfo{
-        const_cast<char*>("device3122"), const_cast<char*>("Linux"), const_cast<char*>("Linux"), 8, 16384};
+        const_cast<char*>("device31221"), const_cast<char*>("Linux"), const_cast<char*>("Linux"), 8, 16384};
     opt.DiskInfo = DcdnDiskInfo{1000000000, 800000000, 200000000};
     opt.ServerCfg = DcdnServerCfg{
         "https://api-pcdn.capell.io", // api
@@ -54,7 +54,7 @@ int main()
     // std::string url = "https://testfileorg.netwet.net/500MB-CZIPtestfile.org.zip";
     // std::string url = "http://localhost:8080/100MB.bin";
     // std::string url = "https://ash-speed.hetzner.com/1GB.bin";
-    // std::string url = "https://d1.xia12345.com/video/202310/6524242c37926f1bd8c374d8/hd.mp4";
+    std::string url = "https://d1.xia12345.com/video/202310/6524242c37926f1bd8c374d8/hd.mp4";
 
     // 下载区间 [start, end]，并把结果写成一个小文件（相对偏移）：
     dcdn::FileDownloadOptions opts;

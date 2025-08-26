@@ -73,15 +73,14 @@ static void write_bytes_clipped(
     } else if (bufEnd > clipEnd) {
         logWarn << "[write_bytes_clipped] bufEnd(" << bufEnd << ") > clipEnd(";
     }
-    // 1) 如果是“按 Range 写到独立文件”，则把 wrBeg 折算成相对 RangeStart 的偏移
-    // 2) 否则按资源绝对偏移 wrBeg 写入
+    // if option write to separate file is enabled, wrBeg is relative to RangeStart
+    // otherwise, wrBeg is absolute
     size_t dstOff = wrBeg;
     if (opts.HasRange && opts.WriteRangeToSeparateFile) {
-        // 防御：避免 RangeStart > wrBeg 导致 size_t underflow
         if (wrBeg >= opts.RangeStart) {
             dstOff = wrBeg - opts.RangeStart;
         } else {
-            // 异常：日志并回退为 0
+            // unexpected case, fallback to 0
             logWarn << "[write_bytes_clipped] wrBeg(" << wrBeg << ") < RangeStart(" << opts.RangeStart
                     << "), fallback dstOff=0";
             dstOff = 0;
@@ -90,7 +89,7 @@ static void write_bytes_clipped(
 
     bool wrote = false;
 
-    // IFileStore first
+    // Write to IFileStore first
     if (deps.files) {
         wrote = deps.files->Write(taskId, dstOff, data + srcOff, accept);
         if (!wrote) {
@@ -99,13 +98,13 @@ static void write_bytes_clipped(
         }
     }
 
-    // —— 没有 IFileStore 才走 OutputStream / 本地文件
+    // if no IFileStore, write to OutputStream or local file
     if (!wrote) {
         if (opts.OutputStream) {
             try {
-                // 这里假定 OutputStream 只用于串流（顺序写）。如果存在乱序写，建议不要使用 OutputStream。
+                // 这里假定 OutputStream 只用于串流（顺序写）。如果存在乱序写，不要使用 OutputStream。
                 // 若要严格保证位置，可考虑 dynamic_cast 到 std::ostream* 是否可 seekp，
-                // 但通常 OutputStream 代表“顺序消耗”，这里不 seek。
+                // 但通常 OutputStream 代表"顺序消耗"，这里不 seek。
                 opts.OutputStream->write(reinterpret_cast<const char*>(data + srcOff), accept);
                 wrote = true;
             } catch (...) {
@@ -113,12 +112,11 @@ static void write_bytes_clipped(
                 logWarn << "[write_bytes_clipped] OutputStream write threw exception";
             }
         } else if (!opts.OutputPath.empty()) {
-            // 优先使用已缓存的父文件句柄
+            // use cached parent file handle if available
             if (file && file->good()) {
                 try {
                     file->seekp(static_cast<std::streamoff>(dstOff), std::ios::beg);
-                    // logDebug << "#seekp write[" << dstOff << "," << dstOff + accept - 1 << "]" << "srcOff " <<
-                    // srcOff;
+                    // logDebug << "#seekp write[" << dstOff << "," << dstOff + accept - 1 << "]" << "srcOff " <<srcOff;
                     file->write(reinterpret_cast<const char*>(data + srcOff), accept);
                     wrote = true;
                 } catch (...) {
@@ -518,7 +516,7 @@ void DownloadManager::processHttpEvent(std::shared_ptr<util::DownloaderTask> ev)
     IOData dataEv{};
     dataEv.id = active.parentTaskId;
     dataEv.absOffset = segStart; // 这里作为"本次写入起点"的提示值；真正写入用 buffer->Offset 裁剪
-    dataEv.data = buffer;
+    dataEv.head = buffer;
     dataEv.segStart = segStart;
     dataEv.segEnd = segEnd;
     dataEv.isProbe = active.isProbe;
@@ -598,7 +596,7 @@ void DownloadManager::processP2pEvent(std::shared_ptr<util::DownloaderTask> ev)
     IOData dataEv{};
     dataEv.id = active.parentTaskId;
     dataEv.absOffset = segBeg;
-    dataEv.data = buffer;
+    dataEv.head = buffer;
     dataEv.segStart = segBeg;
     dataEv.segEnd = segEnd;
     dataEv.isProbe = false;
@@ -683,6 +681,9 @@ void DownloadManager::applyFsm_(const IOData& ev)
 {
     // ========== A) 若是 probe 且已经拿到 Content-Length，则立刻切分并取消 probe ==========
     if (ev.isProbe && ev.contentLenHint > 0) {
+        // cancel probe
+        cancelHttpProbeIfAny_(ev.id);
+
         FileDownloadOptions opts;
         bool needSplit = false;
         size_t totalLen = 0;
@@ -720,9 +721,34 @@ void DownloadManager::applyFsm_(const IOData& ev)
         }
 
         if (needSplit) {
-            // NOTE: the internal splitTask will locate and cancel running probe subtasks
-            splitTask(ev.id, ev.probeLenSnapshot, totalLen, baseOffset);
-            // no return here to keep probe data
+            // Stream 模式不走 splitTask 的多分片并发，保持顺序/单路
+            if (opts.Strategy == DownloadStrategy::Stream) {
+                // 在 Stream 下，仅利用 probe 拿到的 totalSize/baseOffset，后续由 IOEnd 的 Stream 分支推进；
+                // 如果当前已经处于 HTTP 回退阶段（如 P2P 失败），则按顺序只下发一个 HTTP chunk。
+                // 这里不调用 splitTask，避免批量切分和 pending 积压。
+
+                // 若需要立即继续 HTTP（例如从  probe 已读位置继续），可以触发一个顺序分片：
+                // 继续区间 = [baseOffset + ev.probeLenSnapshot, baseOffset + totalLen - 1]
+                const size_t contStart = baseOffset + ev.probeLenSnapshot;
+                const size_t contEnd = (totalLen > 0) ? (baseOffset + totalLen - 1) : baseOffset;
+                if (contStart <= contEnd) {
+                    std::string urlLocal;
+                    {
+                        AnnotatedMutex::Guard lk(mTasksMutex);
+                        auto itT = mTasks.find(ev.id);
+                        if (itT != mTasks.end())
+                            urlLocal = itT->second.Url;
+                    }
+                    // 只发一个连续的 HTTP chunk，保持 Stream 顺序；后续由 IOEnd 的 Stream 分支推进
+                    scheduleHttpChunk_(ev.id, urlLocal, contStart, contEnd);
+                }
+                // 保持 probe 数据也走下面的通用写入路径
+            } else {
+                // 非 Stream 策略，仍然使用 splitTask 进行并发切分
+                // NOTE: the internal splitTask will locate and cancel running probe subtasks
+                planAndDispatchHttp_(ev.id, opts, ev.probeLenSnapshot, totalLen, baseOffset);
+            }
+            // 不 return，保留 probe 数据进入通用写入
         }
     }
 
@@ -741,32 +767,25 @@ void DownloadManager::applyFsm_(const IOData& ev)
         file = itF->second;
 
     DrainResult agg{};
-    auto b = ev.data;
+    auto head = ev.head;
+    auto b = ev.head;
     while (b) {
         const size_t len = b->Length();
         const size_t off = b->Offset(); // 资源绝对偏移
         // logDebug << "[P2P][Write] task id=" << ev.id << " range " << off << "-" << (off + len - 1) << std::endl;
-        write_bytes_clipped(
-            reinterpret_cast<const uint8_t*>(b->Data()),
-            len,
-            off,
-            ev.segStart,
-            ev.segEnd,
-            opts,
-            file,
-            ev.id,
-            mDeps,
-            agg);
+        auto data = reinterpret_cast<const uint8_t*>(b->Data());
+        write_bytes_clipped(data, len, off, ev.segStart, ev.segEnd, opts, file, ev.id, mDeps, agg);
         b = b->Next();
     }
 
-    // 进度 + buffer-ready
     if (agg.bytesWritten > 0) {
         updateTaskProgress(ev.id, agg.bytesWritten);
+        // TODO: "阈值/节流"：如果流式消费者不需要每个小块都回调，设一个触发阈值（比如每 >=64KB 或每 40ms 聚合一次）再
+        // publish ?
         const size_t readyBeg = (agg.firstWriteAbsBegin == SIZE_MAX) ? ev.segStart : agg.firstWriteAbsBegin;
         const size_t readyEnd = agg.lastWriteAbsEnd;
         if (readyBeg <= readyEnd)
-            notifyBufferReady(ev.id, readyBeg, readyEnd);
+            notifyDataReady(ev.id, head, readyBeg, readyEnd);
     }
 
     // 心跳/actualGot（尽量定位对应 subtask）
@@ -863,6 +882,58 @@ void DownloadManager::applyFsm_(const IOEnd& ev)
                 << "actual got=" << ev.actuallyGot;
     }
 
+    // --- Stream special handling ---
+    bool isStream = false;
+    size_t warmupEnd = 0;
+    {
+        auto it = mStreamState.find(ev.id);
+        if (it != mStreamState.end() && it->second.phase != StreamState::Phase::None) {
+            isStream = true;
+            warmupEnd = it->second.warmupEnd;
+        }
+    }
+    if (isStream) {
+        // 若仍在Warmup阶段，且本次HTTP分片已覆盖warmupEnd，则切到P2P
+        if (mStreamState[ev.id].phase == StreamState::Phase::WarmupHttp) {
+            const bool coveredWarmup = (ev.segEnd >= warmupEnd);
+            // TODO: 开启
+            if (coveredWarmup) {
+                mStreamState[ev.id].phase = StreamState::Phase::P2P;
+
+                // 计算后续区间
+                size_t nextStart = warmupEnd + 1;
+                FileDownloadOptions opt;
+                std::string urlLocal;
+                {
+                    AnnotatedMutex::Guard lk(mTasksMutex);
+                    auto itOpt = mTaskOptions.find(ev.id);
+                    if (itOpt != mTaskOptions.end())
+                        opt = itOpt->second;
+                    auto itT = mTasks.find(ev.id);
+                    if (itT != mTasks.end())
+                        urlLocal = itT->second.Url;
+                }
+                size_t endHint = opt.HasRange ? opt.RangeEnd : SIZE_MAX;
+
+                // 首选P2P，失败且允许回退时再HTTP
+                bool ok = p2pQueryPeersAsync_(ev.id, nextStart, endHint);
+                if (!ok && opt.StreamFallbackHttpIfNoP2P) {
+                    logInfo << "[Stream] P2P unavailable, fallback HTTP for the rest";
+                    if (endHint == SIZE_MAX) {
+                        // 未知终点，先探测，再分片
+                        scheduleHttpProbe_(ev.id, urlLocal);
+                    } else {
+                        scheduleHttpChunk_(ev.id, urlLocal, nextStart, endHint);
+                    }
+                }
+            }
+        }
+
+        applyFsm_(ev.id, FinalizeCheck{ev.id});
+        // Stream 模式：不从 pendingRanges 续排普通HTTP（保持顺序与单路）
+        return;
+    }
+
     // 4) 按策略续排一个 pending
     bool paused = false, cancelled = false;
     DownloadStrategy strategy = DownloadStrategy::HTTP_ONLY;
@@ -931,32 +1002,86 @@ void DownloadManager::applyFsm_(TaskId id, const TaskFailed& ev)
 // ========== FSM：计划就绪（P2P peers 查询结果）==========
 void DownloadManager::applyFsm_(TaskId id, const PlanReady& ev)
 {
+    // 1) 记录/更新任务状态与 p2p 查询状态
+    FileDownloadOptions opt;
     {
         AnnotatedMutex::Guard lk(mTasksMutex);
         auto it = mTasks.find(id);
-        if (it == mTasks.end()) {
-            // task may be cancelled/deleted, nothing to do
-        } else {
-            // only use hint when TotalSize is not set
+        if (it != mTasks.end()) {
+            // 仅当 TotalSize 未设置时使用 size hint
             if (it->second.TotalSize == 0 && ev.totalSizeHint > 0) {
                 it->second.TotalSize = ev.totalSizeHint;
             }
-            // Pending -> Running
             if (it->second.Status == TaskStatus::Pending) {
                 transitionLocked_(id, TaskStatus::Running);
             }
-            auto& st = p2pStates_[id][ev.startHint];
-            st.queryInFlight = false;
-            st.queryDone = true;
-            st.lastQueryErr = 0;
-            st.offset = ev.startHint;
-            st.plan = ev.chunks;
         }
+        auto itOpt = mTaskOptions.find(id);
+        if (itOpt != mTaskOptions.end())
+            opt = itOpt->second;
+
+        auto& st = p2pStates_[id][ev.startHint];
+        st.queryInFlight = false;
+        st.queryDone = true;
+        st.lastQueryErr = 0;
+        st.offset = ev.startHint;
+        st.plan = ev.chunks; // may be empty
     }
 
+    // 2) plan 为空：按策略处理回退/失败
+    if (ev.chunks.empty()) {
+        logError << "进入未完善的分支（applyFsm plan empty）";
+        std::string urlLocal;
+        {
+            AnnotatedMutex::Guard lk(mTasksMutex);
+            auto itT = mTasks.find(id);
+            if (itT != mTasks.end())
+                urlLocal = itT->second.Url;
+        }
+        const size_t startNext = ev.startHint;
+        const size_t endHint = opt.HasRange ? opt.RangeEnd : SIZE_MAX;
+        logWarn << "P2P plan empty, taskId=" << id << " start=" << startNext << " end=" << endHint;
+        if (opt.Strategy == DownloadStrategy::Stream) {
+            if (opt.StreamFallbackHttpIfNoP2P) {
+                if (endHint == SIZE_MAX) {
+                    // 终点未知：先探测再分片
+                    scheduleHttpProbe_(id, urlLocal);
+                    logDebug
+                        << "P2P plan empty, StreamFallbackHttpIfNoP2P enabled, endHit unknown, Fallback to HTTP probe, taskId="
+                        << id;
+                } else {
+                    scheduleHttpChunk_(id, urlLocal, startNext, endHint);
+                }
+            } else {
+                applyFsm_(id, TaskFailed{-3, "No P2P plan and Stream fallback disabled"});
+            }
+            applyFsm_(id, FinalizeCheck{id});
+            return;
+        }
+
+        if (opt.Strategy == DownloadStrategy::HYBRID) {
+            if (endHint == SIZE_MAX) {
+                scheduleHttpProbe_(id, urlLocal);
+            } else {
+                scheduleHttpChunk_(id, urlLocal, startNext, endHint);
+            }
+            applyFsm_(id, FinalizeCheck{id});
+            return;
+        }
+
+        if (opt.Strategy == DownloadStrategy::P2P_ONLY) {
+            applyFsm_(id, TaskFailed{-3, "No P2P peers available"});
+            applyFsm_(id, FinalizeCheck{id});
+            return;
+        }
+
+        applyFsm_(id, FinalizeCheck{id});
+        return;
+    }
+
+    // 3) plan 不为空
     scheduleP2PChunks_(id, ev.chunks, ev.startHint, ev.endHint);
     applyFsm_(id, FinalizeCheck{id});
-    // TODO: may publish planReadyEvent here
 }
 
 // ========== FSM：StallFound（看门狗通知）==========
@@ -1002,7 +1127,7 @@ void DownloadManager::applyFsm_(TaskId /*id*/, const CmdAdd& cmd)
                 t.TotalSize = len;
                 transitionLocked_(id, TaskStatus::Running);
             }
-            splitTask(id, 0, len, start);
+            planAndDispatchHttp_(id, cmd.opt, 0, len, start);
         } else {
             scheduleHttpProbe_(id, cmd.url);
             {
@@ -1030,7 +1155,36 @@ void DownloadManager::applyFsm_(TaskId /*id*/, const CmdAdd& cmd)
             mTasks[id].Status = TaskStatus::Failed;
             transitionLocked_(id, TaskStatus::Failed);
         }
-    } else { // HYBRID：先走 P2P，失败/不足时回落 HTTP（此处简单启动 P2P）
+    } else if (cmd.opt.Strategy == DownloadStrategy::Stream) {
+        // 1） 初始化流式状态
+        {
+            AnnotatedMutex::Guard lk(mTasksMutex);
+            auto& t = mTasks[id];
+            transitionLocked_(id, TaskStatus::Running);
+        }
+        // 2) 计算 warmup 范围
+        size_t warmup = std::max<size_t>(cmd.opt.StreamWarmupBytes, cmd.opt.ChunkSize);
+        size_t warmupStart = cmd.opt.HasRange ? cmd.opt.RangeStart : 0;
+        size_t warmupEnd = warmupStart + warmup - 1;
+        {
+            // 记录流式阶段
+            mStreamState[id].phase = StreamState::Phase::WarmupHttp;
+            mStreamState[id].warmupEnd = warmupEnd;
+        }
+        // 3) 只下发首播一个HTTP分片
+        if (cmd.opt.HttpWarmupEnabled) {
+            scheduleHttpChunk_(id, cmd.url, warmupStart, warmupEnd);
+        } else {
+            bool ok = p2pQueryPeersAsync_(
+                id, cmd.opt.HasRange ? cmd.opt.RangeStart : 0, cmd.opt.HasRange ? cmd.opt.RangeEnd : SIZE_MAX);
+            if (!ok) {
+
+                logError << "未处理的P2PQueryPeersAsync failed";
+
+            }
+        }
+    } else {
+        // HYBRID：先走 P2P，失败/不足时回落 HTTP（此处简单启动 P2P）
         AnnotatedMutex::Guard lk(mTasksMutex);
         mTasks[id].Status = TaskStatus::Running;
         transitionLocked_(id, TaskStatus::Running);
@@ -1172,6 +1326,42 @@ void DownloadManager::ensurePreallocate_(TaskId id, size_t totalSize)
     }
 }
 
+void DownloadManager::cancelHttpProbeIfAny_(TaskId id)
+{
+    std::shared_ptr<util::DownloaderTask> probeToCancel;
+    {
+        // find the probe task
+        auto itD = mDlByTaskHttp.find(id);
+        if (itD != mDlByTaskHttp.end()) {
+            for (auto& sp : itD->second) {
+                if (!sp)
+                    continue;
+                auto raw = sp.get();
+                auto itActive = mActiveByPtrHttp.find(raw);
+                if (itActive != mActiveByPtrHttp.end() && itActive->second.isProbe) {
+                    probeToCancel = sp;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (probeToCancel && mDeps.http) {
+        mDeps.http->CancelTask(probeToCancel);
+        // clean up local index && add cancel mark
+        {
+            AnnotatedMutex::Guard lk(mEventMutex);
+            mActiveByPtrHttp.erase(probeToCancel.get());
+            auto& vec = mDlByTaskHttp[id];
+            vec.erase(std::remove(vec.begin(), vec.end(), probeToCancel), vec.end());
+            mCancelledRawHttp.insert(probeToCancel.get());
+            mDlEventsHttp.erase(probeToCancel.get());
+        }
+        logInfo << "[HTTP] probe cancelled, taskId=" << id;
+    }
+    return;
+}
+
 void DownloadManager::scheduleHttpProbe_(TaskId id, const std::string& url)
 {
     if (!mDeps.http) {
@@ -1265,10 +1455,13 @@ void DownloadManager::scheduleHttpChunk_(TaskId id, const std::string& url, size
     mDeps.http->AddTask(sub);
 }
 
-// ========== HTTP-only：切分 ==========
-void DownloadManager::splitTask(TaskId id, size_t probedDataLen, size_t totalSize, size_t baseOffset)
+void DownloadManager::planAndDispatchHttp_(
+    TaskId id,
+    const FileDownloadOptions& opts,
+    size_t probedDataLen,
+    size_t totalSize,
+    size_t baseOffset)
 {
-    FileDownloadOptions opts;
     std::string url;
     {
         AnnotatedMutex::Guard lk(mTasksMutex);
@@ -1276,41 +1469,13 @@ void DownloadManager::splitTask(TaskId id, size_t probedDataLen, size_t totalSiz
         if (it == mTasks.end())
             return;
         url = it->second.Url;
-        auto itOpt = mTaskOptions.find(id);
-        if (itOpt != mTaskOptions.end())
-            opts = itOpt->second;
     }
+
+    const bool isStream = (opts.Strategy == DownloadStrategy::Stream);
 
     ensurePreallocate_(id, totalSize);
 
-    // 清理 probe（若有）
-    std::shared_ptr<util::DownloaderTask> probeToCancel;
-    size_t already = 0;
-    {
-        auto itD = mDlByTaskHttp.find(id);
-        if (itD != mDlByTaskHttp.end()) {
-            for (auto& sp : itD->second) {
-                if (!sp)
-                    continue;
-                auto raw = sp.get();
-                auto itActive = mActiveByPtrHttp.find(raw);
-                if (itActive != mActiveByPtrHttp.end() && itActive->second.isProbe) {
-                    probeToCancel = sp;
-                    break;
-                }
-            }
-        }
-    }
-    if (probeToCancel && mDeps.http) {
-        already = probedDataLen;
-        mDeps.http->CancelTask(probeToCancel);
-        AnnotatedMutex::Guard lk(mEventMutex);
-        mActiveByPtrHttp.erase(probeToCancel.get());
-        auto& vec = mDlByTaskHttp[id];
-        vec.erase(std::remove(vec.begin(), vec.end(), probeToCancel), vec.end());
-        mCancelledRawHttp.insert(probeToCancel.get());
-        mDlEventsHttp.erase(probeToCancel.get());
-    }
+    size_t already = probedDataLen;
 
     const size_t absBegin = baseOffset;
     const size_t absEnd = baseOffset + totalSize - 1;
@@ -1321,26 +1486,10 @@ void DownloadManager::splitTask(TaskId id, size_t probedDataLen, size_t totalSiz
         return;
     }
 
-    if (already > 0) {
-        AnnotatedMutex::Guard lk(mTasksMutex);
-        auto itT = mTasks.find(id);
-        if (itT != mTasks.end()) {
-            itT->second.LastUpdate = std::chrono::system_clock::now();
-            calculateSpeedLocked(itT->second, itT->second.LastUpdate);
-        }
-    }
-
-    auto chunkHitByConcurrent = opts.MaxConcurrent > 0 ? totalSize / opts.MaxConcurrent : 0;
-    size_t chunk = (opts.ChunkSize ? opts.ChunkSize : (1u << 20));
-    chunk = std::max(chunk, chunkHitByConcurrent);
-    std::vector<Range> ranges;
-    for (size_t pos = rangeStart; pos <= absEnd;) {
-        size_t rEnd = std::min(pos + chunk - 1, absEnd);
-        ranges.push_back({pos, rEnd});
-        logInfo << "range: [" << pos << ", " << rEnd << "]" << std::endl;
-        if (rEnd == absEnd)
-            break;
-        pos = rEnd + 1;
+    const size_t chunkSize = computeChunkSize_(totalSize, opts, /*isStream=*/isStream);
+    std::vector<Range> ranges = computeHttpRanges_(rangeStart, absEnd, chunkSize);
+    for (const auto& r : ranges) {
+        logInfo << "range: [" << r.start << ", " << r.end << "]" << std::endl;
     }
 
     if (ranges.empty()) {
@@ -1348,7 +1497,7 @@ void DownloadManager::splitTask(TaskId id, size_t probedDataLen, size_t totalSiz
         return;
     }
 
-    const size_t canLaunch = std::min(ranges.size(), mMaxConcurrent);
+    const size_t canLaunch = isStream ? std::min<size_t>(ranges.size(), 1) : std::min(ranges.size(), mMaxConcurrent);
     std::shared_ptr<std::fstream> parentFile;
     {
         AnnotatedMutex::Guard lk(mEventMutex);
@@ -1382,15 +1531,55 @@ void DownloadManager::splitTask(TaskId id, size_t probedDataLen, size_t totalSiz
     }
 
     if (ranges.size() > canLaunch) {
-        AnnotatedMutex::Guard lk(mEventMutex);
-        auto& q = mPendingRanges[id];
-        for (size_t i = canLaunch; i < ranges.size(); ++i)
-            q.push_back(ranges[i]);
+        if (!isStream) {
+            AnnotatedMutex::Guard lk(mEventMutex);
+            auto& q = mPendingRanges[id];
+            for (size_t i = canLaunch; i < ranges.size(); ++i)
+                q.push_back(ranges[i]);
+        } else {
+            // Stream：不积压剩余分片，保持顺序推进（由 IOEnd 的 Stream 分支继续调度）
+        }
     }
     applyFsm_(id, FinalizeCheck{id});
 }
 
-// ========== P2P peers 异步查询 ==========
+std::vector<DownloadManager::Range> DownloadManager::computeHttpRanges_(size_t rangeStart, size_t absEnd, size_t chunk)
+    const
+{
+    std::vector<Range> ranges;
+    if (rangeStart > absEnd || chunk == 0)
+        return ranges;
+
+    size_t pos = rangeStart;
+    while (pos <= absEnd) {
+        const size_t rEnd = std::min(pos + chunk - 1, absEnd);
+        ranges.push_back({pos, rEnd});
+        if (rEnd == absEnd)
+            break;
+        pos = rEnd + 1;
+    }
+    return ranges;
+}
+
+size_t DownloadManager::computeChunkSize_(size_t totalSize, const FileDownloadOptions& opts, bool isStream) const
+{
+    // 基础 chunk
+    size_t chunk = (opts.ChunkSize ? opts.ChunkSize : (1u << 20)); // 默认 1MB
+
+    if (!isStream) {
+        // 并发放大：保证每路至少分到 totalSize / MaxConcurrent 的粒度
+        if (opts.MaxConcurrent > 0) {
+            const size_t per = (opts.MaxConcurrent > 0) ? (totalSize / opts.MaxConcurrent) : 0;
+            if (per > 0)
+                chunk = std::max(chunk, per);
+        }
+    }
+    // 兜底：不返回 0，避免调用方除零/死循环
+    if (chunk == 0)
+        chunk = 1;
+    return chunk;
+}
+
 static inline json buildQueryPeersRequest(
     const std::string& ip,
     const std::string& url,
@@ -1429,18 +1618,16 @@ bool DownloadManager::p2pQueryPeersAsync_(TaskId id, size_t start, size_t end)
     void* reqId = nullptr;
 
     auto succ = [this, id, start, end](nlohmann::json& res) {
-        this->PostEvent(
-            std::make_shared<ArgEvent<std::function<void()>>>(
-                EventType::FunctionCall, [this, id, start, end, res = std::move(res)]() REQUIRES(dm_thread()) {
-                    this->onP2PPeerQuerySuccess_(id, std::move(res), start, end);
-                }));
+        this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(
+            EventType::FunctionCall, [this, id, start, end, res = std::move(res)]() REQUIRES(dm_thread()) {
+                this->onP2PPeerQuerySuccess_(id, std::move(res), start, end);
+            }));
     };
     // auto fail = [this, id, start](int code) REQUIRES(dm_thread()) { this->onP2PPeerQueryFail_(id, code, start); };
     auto fail = [this, id, start](int code) {
-        this->PostEvent(
-            std::make_shared<ArgEvent<std::function<void()>>>(
-                EventType::FunctionCall,
-                [this, id, start, code]() REQUIRES(dm_thread()) { this->onP2PPeerQueryFail_(id, code, start); }));
+        this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(
+            EventType::FunctionCall,
+            [this, id, start, code]() REQUIRES(dm_thread()) { this->onP2PPeerQueryFail_(id, code, start); }));
     };
 
     auto mm = MainManager::Singlet();
@@ -1475,16 +1662,34 @@ void DownloadManager::onP2PPeerQueryFail_(TaskId id, int errCode, size_t start)
     }
 
     bool strategyP2pOnly = false;
+    bool strategyStream = false;
+    FileDownloadOptions opt;
     {
         AnnotatedMutex::Guard lk(mTasksMutex);
         auto it = mTaskOptions.find(id);
-        strategyP2pOnly = (it != mTaskOptions.end() && it->second.Strategy == DownloadStrategy::P2P_ONLY);
+        if (it != mTaskOptions.end()) {
+            strategyP2pOnly = (it->second.Strategy == DownloadStrategy::P2P_ONLY);
+            strategyStream = (it->second.Strategy == DownloadStrategy::Stream);
+            opt = it->second;
+        }
     }
     if (strategyP2pOnly) {
         applyFsm_(id, TaskFailed{errCode, "P2P peer query failed"});
+    } else if (strategyStream && opt.StreamFallbackHttpIfNoP2P) {
+        // 回退为HTTP：未知end -> probe；已知end -> chunk
+        std::string urlLocal;
+        {
+            AnnotatedMutex::Guard lk(mTasksMutex);
+            auto itT = mTasks.find(id);
+            if (itT != mTasks.end())
+                urlLocal = itT->second.Url;
+        }
+        const size_t endHint = opt.HasRange ? opt.RangeEnd : SIZE_MAX;
+        if (endHint == SIZE_MAX)
+            scheduleHttpProbe_(id, urlLocal);
+        else
+            scheduleHttpChunk_(id, urlLocal, start, endHint);
     } else {
-        // TODO: implement: HYBRID or http：回退到 HTTP 探测
-        logError << "[P2P] onP2PPeerQueryFail_ taskId=" << id << " start=" << start << " errCode=" << errCode;
         applyFsm_(id, TaskFailed{errCode, "P2P peer query failed"});
     }
     applyFsm_(id, FinalizeCheck{id});
@@ -1523,7 +1728,7 @@ void DownloadManager::onP2PPeerQuerySuccess_(TaskId id, nlohmann::json res, size
     }
 
     PlanReady ev;
-    ev.chunks = std::move(plan);
+    ev.chunks = std::move(plan); // may be empty
     ev.startHint = start;
     ev.endHint = end;
     ev.totalSizeHint = totalSizeFromApi;
@@ -1688,7 +1893,6 @@ bool DownloadManager::startOneP2PChunk_(TaskId id, const PeerChunk& pc)
     return true;
 }
 
-// ========== 任务管理（线程安全：投递到事件循环）==========
 TaskId DownloadManager::AddDownloadTask(
     const std::string& url,
     const std::string& contentHash,
@@ -1697,23 +1901,26 @@ TaskId DownloadManager::AddDownloadTask(
     auto prom = std::make_shared<std::promise<TaskId>>();
     auto fut = prom->get_future();
 
-    this->PostEvent(
-        std::make_shared<ArgEvent<std::function<void()>>>(
-            EventType::FunctionCall, [this, prom, url, contentHash, options = options]() REQUIRES(dm_thread()) {
-                // FSM 创建任务并启动流程
-                applyFsm_(0, CmdAdd{url, contentHash, options});
-                // FSM 写入的成员取回 taskId
-                TaskId idRet = mLastCreatedTaskId.load(std::memory_order_acquire);
-                prom->set_value(idRet);
+    this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(
+        EventType::FunctionCall, [this, prom, url, contentHash, options = options]() REQUIRES(dm_thread()) {
+            // FSM 创建任务并启动流程
+            // TODO: 消除增加任务和回调可能丢失之间的竞态条件
+            applyFsm_(0, CmdAdd{url, contentHash, options});
+            // FSM 写入的成员取回 taskId
+            TaskId idRet = mLastCreatedTaskId.load(std::memory_order_acquire);
+            prom->set_value(idRet);
 
-                if (options.taskStateChangeEventCallback) {
-                    Subscribe([idRet, options](const DMEvent& ev) {
-                        if (ev.id == idRet) {
-                            options.taskStateChangeEventCallback(ev);
-                        }
-                    });
-                }
-            }));
+            if (options.taskStateChangeEventCallback) {
+                Subscribe([idRet, options](const DMEvent& ev) {
+                    if (ev.id == idRet) {
+                        options.taskStateChangeEventCallback(ev);
+                    }
+                });
+            }
+            if (options.StreamCb) {
+                SubscribeStream(idRet, options.StreamCb);
+            }
+        }));
 
     return fut.get();
 }
@@ -1722,12 +1929,11 @@ bool DownloadManager::CancelDownloadTask(TaskId taskId)
 {
     auto prom = std::make_shared<std::promise<bool>>();
     auto fut = prom->get_future();
-    this->PostEvent(
-        std::make_shared<ArgEvent<std::function<void()>>>(
-            EventType::FunctionCall, [this, prom, taskId]() REQUIRES(dm_thread()) {
-                applyFsm_(taskId, CmdCancel{taskId});
-                prom->set_value(true);
-            }));
+    this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(
+        EventType::FunctionCall, [this, prom, taskId]() REQUIRES(dm_thread()) {
+            applyFsm_(taskId, CmdCancel{taskId});
+            prom->set_value(true);
+        }));
     return fut.get();
 }
 
@@ -1735,12 +1941,11 @@ bool DownloadManager::PauseDownloadTask(TaskId taskId)
 {
     auto prom = std::make_shared<std::promise<bool>>();
     auto fut = prom->get_future();
-    this->PostEvent(
-        std::make_shared<ArgEvent<std::function<void()>>>(
-            EventType::FunctionCall, [this, prom, taskId]() REQUIRES(dm_thread()) {
-                applyFsm_(taskId, CmdPause{taskId});
-                prom->set_value(true);
-            }));
+    this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(
+        EventType::FunctionCall, [this, prom, taskId]() REQUIRES(dm_thread()) {
+            applyFsm_(taskId, CmdPause{taskId});
+            prom->set_value(true);
+        }));
     return fut.get();
 }
 
@@ -1748,12 +1953,11 @@ bool DownloadManager::ResumeDownloadTask(TaskId taskId)
 {
     auto prom = std::make_shared<std::promise<bool>>();
     auto fut = prom->get_future();
-    this->PostEvent(
-        std::make_shared<ArgEvent<std::function<void()>>>(
-            EventType::FunctionCall, [this, prom, taskId]() REQUIRES(dm_thread()) {
-                applyFsm_(taskId, CmdResume{taskId});
-                prom->set_value(true);
-            }));
+    this->PostEvent(std::make_shared<ArgEvent<std::function<void()>>>(
+        EventType::FunctionCall, [this, prom, taskId]() REQUIRES(dm_thread()) {
+            applyFsm_(taskId, CmdResume{taskId});
+            prom->set_value(true);
+        }));
     return fut.get();
 }
 
@@ -1786,36 +1990,114 @@ double DownloadManager::GetOverallSpeed() const
     return sum;
 }
 
-// ========== 回调注册 ==========
-void DownloadManager::SetBufferReadyCallback(TaskId taskId, BufferReadyCallback callback)
+void DownloadManager::SubscribeStream(TaskId taskId, StreamDataReadyCallback cb)
 {
-    AnnotatedMutex::Guard lk(mTasksMutex);
-    mBufferCallbacks[taskId] = std::move(callback);
+    // 适配器：订阅内部事件并在收到 EStreamBytes 时把 [start,end] 裁剪成连续视图喂给 C 风格回调
+    // 生命周期契约：指针仅在回调期间有效（Borrowed 模式）
+    auto sid = Subscribe([taskId, cb = cb](const DMEvent& ev) {
+        if (ev.id != taskId)
+            return;
+        auto p = dynamic_cast<const EStreamBytes*>(&ev);
+        if (!p || !p->head)
+            return;
+
+        const size_t start = p->start;
+        const size_t end = p->end;
+        if (end < start)
+            return;
+        const size_t need = end - start + 1;
+
+        // 优先尝试零拷贝：看看 [start,end] 是否完全落在某个单块 buffer 内
+        for (auto b = p->head; b; b = b->Next()) {
+            const size_t bOff = b->Offset(); // 绝对偏移
+            const size_t bLen = b->Length();
+            const size_t bEnd = bOff + (bLen ? (bLen - 1) : 0);
+            if (start >= bOff && end <= bEnd) {
+                const uint8_t* ptr = reinterpret_cast<const uint8_t*>(b->Data()) + (start - bOff);
+                // cb(taskId,); // Borrowed：仅在回调期间有效
+                return;
+            }
+        }
+
+        // 否则需要聚合拷贝（仍是 Borrowed：仅在回调期间有效）
+        // TODO: 避免拷贝，把"连续视图"换成分散/聚合（scatter-gather）视图。(借鉴系统接口（struct iovec / readv /
+        // sendmsg）)， 给Download manager增加一个"零拷贝可选"的回调,using StreamHandlerSG    =
+        // std::function<void(TaskId, const dcdn_span*, size_t, size_t /*total*/, size_t /*start*/)>; c api definition
+        // typedef unsigned long long dcdn_task_id;
+        // typedef struct dcdn_span {
+        //     const uint8_t* data;  // 指向底层 buffer 中的一段
+        //     size_t         len;   // 这段长度
+        //     size_t         offset; // 绝对偏移（便于上层定位）
+        // } dcdn_span;
+
+        // // 零拷贝 scatter-gather 回调：spans 数组表示一组连续的视图
+        // typedef void (*dcdn_stream_handler_sg)(
+        //     dcdn_task_id task_id,
+        //     const dcdn_span* spans, size_t nspans,
+        //     size_t total_size,    // sum(len)
+        //     size_t start_offset   // spans[0].offset
+        // );
+
+        std::vector<uint8_t> agg;
+        agg.resize(need);
+
+        size_t written = 0;
+        // 将链表中与 [start,end] 交集的部分 copy 到 agg 对应位置
+        for (auto b = p->head; b && written < need; b = b->Next()) {
+            const size_t bOff = b->Offset();
+            const size_t bLen = b->Length();
+            if (bLen == 0)
+                continue;
+            const size_t bEnd = bOff + bLen - 1;
+
+            // 交集 [wrBeg, wrEnd]
+            const size_t wrBeg = (start > bOff) ? start : bOff;
+            const size_t wrEnd = (end < bEnd) ? end : bEnd;
+            if (wrBeg > wrEnd)
+                continue;
+
+            const size_t n = wrEnd - wrBeg + 1;
+            const size_t src = wrBeg - bOff;
+            const size_t dst = wrBeg - start;
+
+            std::memcpy(agg.data() + dst, reinterpret_cast<const uint8_t*>(b->Data()) + src, n);
+            written += n;
+        }
+
+        if (written == need) {
+            // TODO:
+            if (cb) cb(taskId, nullptr);
+            // cb(taskId, agg.data(), need, start); // Borrowed：仅在回调期间有效
+        } else {
+            // 理论上不会出现，除非底层链上数据与事件声明不一致
+            logWarn << "[SubscribeStream] gather size mismatch: written=" << written << " need=" << need;
+        }
+        // agg 在回调返回后析构释放
+    });
+
+    // save sub-id to RemoveStreamCallback
+    AnnotatedMutex::Guard lk(mSubMutex);
+    mStreamSubByTask[taskId] = sid;
+    logDebug << "[SubscribeStream] taskId=" << taskId << " sid=" << sid;
 }
 
-void DownloadManager::RemoveBufferReadyCallback(TaskId taskId)
+void DownloadManager::RemoveStreamCallback(TaskId taskId)
 {
-    AnnotatedMutex::Guard lk(mTasksMutex);
-    mBufferCallbacks.erase(taskId);
+    SubId sid = 0;
+    {
+        AnnotatedMutex::Guard lk(mSubMutex);
+        auto it = mStreamSubByTask.find(taskId);
+        if (it != mStreamSubByTask.end()) {
+            sid = it->second;
+            mStreamSubByTask.erase(it);
+        }
+    }
+    if (sid) {
+        Unsubscribe(sid);
+    }
 }
-
-std::vector<std::pair<size_t, size_t>> DownloadManager::GetAvailableRanges(TaskId taskId) const
-{
-    AnnotatedMutex::Guard lk(mTasksMutex);
-    auto it = mTasks.find(taskId);
-    if (it != mTasks.end())
-        return it->second.CompletedRanges;
-    return {};
-}
-
-// ========== 带宽比配置（预留）==========
-void DownloadManager::SetHttpBandwidthRatio(float ratio)
-{
-    mHttpBandwidthRatio = ratio;
-}
-void DownloadManager::SetP2pBandwidthRatio(float ratio)
-{
-    mP2pBandwidthRatio = ratio;
+std::shared_ptr<util::DownloaderTaskBuffer>  DownloadManager::ReadData(TaskId id ){
+ // TODO:
 }
 
 DownloadManager::SubId DownloadManager::Subscribe(Handler h)
@@ -1866,20 +2148,13 @@ void DownloadManager::calculateSpeedLocked(DownloadTask& t, std::chrono::system_
     t.Speed = (seconds > 0) ? (static_cast<double>(t.Downloaded) / static_cast<double>(seconds)) : 0.0;
 }
 
-void DownloadManager::notifyBufferReady(const TaskId& id, size_t start, size_t end)
+void DownloadManager::notifyDataReady(
+    const TaskId& id,
+    std::shared_ptr<util::DownloaderTaskBuffer> head,
+    size_t start,
+    size_t end)
 {
-    BufferReadyCallback cb;
-    {
-        AnnotatedMutex::Guard lk(mTasksMutex);
-        auto it = mBufferCallbacks.find(id);
-        if (it != mBufferCallbacks.end())
-            cb = it->second;
-    }
-    if (cb)
-        cb(id, start, end);
-
-    EBufferReady ev{id, start, end};
-    publish_(ev);
+    publish_(EStreamBytes{id, head, start, end, /*contiguous?*/ true});
 }
 
 void DownloadManager::cancelAllSubs_(TaskId id, bool http, bool p2p)

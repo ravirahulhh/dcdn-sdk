@@ -71,3 +71,6 @@ target_link_libraries(http_test PRIVATE dcdn)
 
 add_executable(p2p_dl_manager_test DownloadeManagerTestP2P.cpp)
 target_link_libraries(p2p_dl_manager_test PRIVATE dcdn)
+
+add_executable(stream_dl_manager_test DownloadeManagerTestStream.cpp)
+target_link_libraries(stream_dl_manager_test PRIVATE dcdn)

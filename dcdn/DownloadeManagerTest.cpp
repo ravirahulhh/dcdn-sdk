@@ -52,13 +52,13 @@ int main()
     // std::string url = "https://d1.xia12345.com/video/202310/6524242c37926f1bd8c374d8/hd.mp4";
     dcdn::FileDownloadOptions opt;
     opt.OutputPath = "chunk.bin";
-    opt.HasRange = true;
+    opt.HasRange = false;
 
     // opt.RangeStart = 0;
 
     // 238cc5e19b0f043135227ca44fc93aed of https://testfileorg.netwet.net/500MB-CZIPtestfile.org.zip first part
-    opt.RangeStart = 0;
-    opt.RangeEnd = 262143999ULL;
+    // opt.RangeStart = 0;
+    // opt.RangeEnd = 262143999ULL;
 
     // md5 27e8e8c55dcaa8fdbcc654b540fefd65 of https://testfileorg.netwet.net/500MB-CZIPtestfile.org.zip second part
     // opt.RangeStart = 262144000;

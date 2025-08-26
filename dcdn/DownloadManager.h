@@ -24,6 +24,17 @@
 
 namespace dcdn {
 
+// forward declaration
+namespace util {
+class DownloaderTaskBuffer;
+class HttpDownloader;
+class DownloaderTask;
+} // namespace util
+
+namespace download {
+class P2PDownloader;
+} // namespace download
+
 struct IFileStore
 {
     virtual ~IFileStore() = default;
@@ -68,7 +79,8 @@ enum class DownloadStrategy
 {
     HTTP_ONLY,
     P2P_ONLY,
-    HYBRID
+    HYBRID,
+    Stream, // audio. video etc.
 };
 
 enum class TaskStatus
@@ -82,14 +94,12 @@ enum class TaskStatus
 };
 
 using TaskId = uint64_t;
-using StreamCallback = std::function<void(const char* data, size_t size, size_t offset)>;
-using BufferReadyCallback = std::function<void(TaskId taskId, size_t start, size_t end)>;
+typedef void(*StreamDataReadyCallback)(TaskId taskId, void* receiver);
 
 struct FileDownloadOptions
 {
     std::string OutputPath; // 若为空则可使用 OutputStream
     std::shared_ptr<std::ostream> OutputStream; // 可选；与 OutputPath 二选一
-    StreamCallback StreamCb; // 可选：直写回调
 
     size_t ChunkSize = 1u << 20; // 默认 1MB
 
@@ -99,12 +109,41 @@ struct FileDownloadOptions
     size_t RangeEnd = SIZE_MAX; // inclusive；SIZE_MAX 表示未知结尾（下载到 EOF）
     bool WriteRangeToSeparateFile = true; // 写入相对 Range 的局部文件（若使用 OutputPath）
 
-    // 策略与并发
     DownloadStrategy Strategy = DownloadStrategy::HTTP_ONLY;
     size_t MaxConcurrent = 4;
 
     IEventBus::Handler taskStateChangeEventCallback;
+
+    // === Stream-only tuning ===
+    void *StreamDataCbReceiver = nullptr;
+    StreamDataReadyCallback StreamCb = nullptr;
+    size_t StreamWarmupBytes = 256 * 1024; // 首播HTTP预热，默认256KB
+    bool StreamFallbackHttpIfNoP2P = true; // P2P空/失败时是否回退HTTP
+    bool HttpWarmupEnabled = false; // Stream 模式下是否启用HTTP预热
+    size_t maxStreamBufferBytes = 50 * 1024 * 1024; // 流式传输最大缓存
 };
+
+inline FileDownloadOptions MakeDefaultOptions(DownloadStrategy strategy)
+{
+    FileDownloadOptions opt;
+    opt.Strategy = strategy;
+
+    if (strategy == DownloadStrategy::Stream) {
+        opt.ChunkSize = 64 * 1024; // 小片（64KB），适合首屏快速响应
+        opt.MaxConcurrent = 1; // 顺序下载，避免乱序
+        opt.HasRange = false; // 默认整文件，按需裁剪
+        opt.WriteRangeToSeparateFile = false; // 不分片写独立文件，直接顺序流
+        opt.OutputPath.clear(); // 不落地文件，通常走 OutputStream 或回调
+        opt.OutputStream = nullptr; // 留给调用方设置
+        opt.StreamWarmupBytes = 256 * 1024;
+        opt.StreamFallbackHttpIfNoP2P = true;
+    } else {
+        opt.ChunkSize = 1u << 20; // 1MB
+        opt.MaxConcurrent = 8; //
+    }
+
+    return opt;
+}
 
 struct DownloadTask
 {
@@ -185,13 +224,7 @@ struct ETaskProgress: DMEvent
     size_t total;
     ETaskProgress(TaskId id, size_t downloaded, size_t total): DMEvent(id), downloaded(downloaded), total(total) {}
 };
-struct EBufferReady: DMEvent
-{
-    size_t start;
-    size_t end;
-    EBufferReady(TaskId id, size_t start, size_t end): DMEvent(id), start(start), end(end) {}
-};
-// NOTE: not used currently but keep it in case 
+// NOTE: not used currently but keep it in case
 // struct EChunkScheduled: DMEvent
 // {
 //     enum class Via
@@ -215,15 +248,18 @@ struct ETaskError: DMEvent
     ETaskError(TaskId id, int code, const std::string& message): DMEvent(id), code(code), message(message) {}
 };
 
-namespace util {
-class DownloaderTaskBuffer;
-class HttpDownloader;
-class DownloaderTask;
-} // namespace util
-
-namespace download {
-class P2PDownloader;
-} // namespace download
+struct EStreamBytes: DMEvent
+{
+    // pointer to the head of a linked list of buffers
+    std::shared_ptr<util::DownloaderTaskBuffer> head;
+    size_t start; // absolute
+    size_t end; // inclusive
+    bool contiguous; // 可选：是否保证 [start,end] 在单一连续切片内
+    EStreamBytes(TaskId id, std::shared_ptr<util::DownloaderTaskBuffer> head, size_t start, size_t end, bool contiguous)
+        : DMEvent(id), head(std::move(head)), start(start), end(end), contiguous(contiguous)
+    {
+    }
+};
 
 class DownloadManager: public BaseManager, public EventLoop<DownloadManager>
 {
@@ -242,7 +278,6 @@ public:
     explicit DownloadManager(Dependencies deps);
     ~DownloadManager();
 
-    // ===== 配置 =====
     void SetStrategy(DownloadStrategy strategy);
     void SetMaxConcurrentDownloads(size_t max);
     void SetPersistPath(const std::string& path);
@@ -261,20 +296,16 @@ public:
     std::vector<DownloadTask> GetAllTasks() const;
     double GetOverallSpeed() const;
 
-    // ===== 数据区间可用（播放器/解复用）=====
-    void SetBufferReadyCallback(TaskId taskId, BufferReadyCallback callback);
-    void RemoveBufferReadyCallback(TaskId taskId);
-    std::vector<std::pair<size_t, size_t>> GetAvailableRanges(TaskId taskId) const;
-
-    // ===== 带宽控制（预留）=====
-    void SetHttpBandwidthRatio(float ratio); // 0.0-1.0
-    void SetP2pBandwidthRatio(float ratio); // 0.0-1.0
-
-    // ===== 内部轻量订阅（同时也会向外部 IEventBus 发布）=====
+    // 所有的事件订阅最终都走这里
     using SubId = uint64_t;
     using Handler = std::function<void(const DMEvent&)>;
     SubId Subscribe(Handler h);
     void Unsubscribe(SubId id);
+
+    // 供上层调用的便捷接口(对事件订阅的语法糖封装)
+    void SubscribeStream(TaskId taskId, StreamDataReadyCallback callback);
+    void RemoveStreamCallback(TaskId taskId);
+    std::shared_ptr<util::DownloaderTaskBuffer> ReadData(TaskId taskId);
 
     void Init();
 
@@ -296,7 +327,7 @@ private:
     {
         TaskId id; // parent task id
         size_t absOffset = 0; // 数据的绝对偏移
-        std::shared_ptr<util::DownloaderTaskBuffer> data; // 数据缓冲区
+        std::shared_ptr<util::DownloaderTaskBuffer> head; // data buffer chain head
         size_t segStart = 0; // 所属分片起始偏移
         size_t segEnd = 0; // 所属分片结束偏移（闭区间）
 
@@ -376,8 +407,15 @@ private:
     // ===================== 调度/副作用（由 FSM 调用） =====================
     // —— HTTP
     void ensurePreallocate_(TaskId id, size_t totalSize) REQUIRES(dm_thread());
-    void splitTask(TaskId id, size_t probedDataLen, size_t totalSize, size_t baseOffset)
-        REQUIRES(dm_thread()); // HTTP-only 分片
+    void splitTask(TaskId id, size_t probedDataLen, size_t totalSize, size_t baseOffset) REQUIRES(dm_thread());
+    // 规划 HTTP 范围并派发首批分片（替代原 splitTask）
+    void planAndDispatchHttp_(
+        TaskId id,
+        const FileDownloadOptions& opts,
+        size_t probedDataLen,
+        size_t totalSize,
+        size_t baseOffset) REQUIRES(dm_thread());
+    void cancelHttpProbeIfAny_(TaskId id) REQUIRES(dm_thread());
     void scheduleHttpProbe_(TaskId id, const std::string& url) REQUIRES(dm_thread());
     void scheduleHttpChunk_(TaskId id, const std::string& url, size_t start, size_t end) REQUIRES(dm_thread());
 
@@ -393,7 +431,9 @@ private:
     void cancelAllSubs_(TaskId id, bool http = true, bool p2p = true) REQUIRES(dm_thread());
     void updateTaskProgress(TaskId id, size_t downloaded) REQUIRES(dm_thread());
     void calculateSpeedLocked(DownloadTask& t, std::chrono::system_clock::time_point now) REQUIRES(mTasksMutex);
-    void notifyBufferReady(const TaskId& taskId, size_t start, size_t end) REQUIRES(dm_thread());
+    void
+    notifyDataReady(const TaskId& taskId, std::shared_ptr<util::DownloaderTaskBuffer> head, size_t start, size_t end)
+        REQUIRES(dm_thread());
 
 private:
     // 运行时状态
@@ -464,6 +504,15 @@ private:
     // taskID -> {offset -> state}
     std::unordered_map<TaskId, std::unordered_map<size_t, P2PTaskState>> p2pStates_ GUARDED_BY(dm_thread());
 
+    std::vector<Range> computeHttpRanges_(size_t rangeStart, size_t absEnd, size_t chunk) const;
+    // 纯函数：计算用于切分的 chunk 大小
+    // 规则：
+    //  - 若提供了 ChunkSize 则优先使用；
+    //  - 否则默认 1MB；
+    //  - 若 MaxConcurrent>0，则与 totalSize/MaxConcurrent 取 max（保证并发下每块不至过小）；
+    //  - Stream 模式下不按并发放大（保持顺序步长）。
+    size_t computeChunkSize_(size_t totalSize, const FileDownloadOptions& opts, bool isStream) const;
+
 private:
     DownloadStrategy mStrategy = DownloadStrategy::HTTP_ONLY;
     size_t mMaxConcurrent = 4;
@@ -474,20 +523,19 @@ private:
     std::shared_ptr<download::P2PDownloader> mP2pDownloader;
     std::shared_ptr<util::HttpDownloader> mHttpDownloader;
 
-    // ========== 保护"任务快照/配置/回调订阅"的互斥 ==========
     mutable dcdn::AnnotatedMutex mTasksMutex;
     std::unordered_map<TaskId, DownloadTask> mTasks GUARDED_BY(mTasksMutex);
     std::unordered_map<TaskId, FileDownloadOptions> mTaskOptions GUARDED_BY(mTasksMutex);
-    std::unordered_map<TaskId, BufferReadyCallback> mBufferCallbacks GUARDED_BY(mTasksMutex);
 
     mutable dcdn::AnnotatedMutex mSubMutex;
     SubId mNextSubId GUARDED_BY(mSubMutex){1};
     std::unordered_map<SubId, Handler> mSubscribers GUARDED_BY(mSubMutex);
-
+    // SubscribeStream/RemoveStreamCallback
+    std::unordered_map<TaskId, SubId> mStreamSubByTask GUARDED_BY(mSubMutex);
     float mHttpBandwidthRatio = 0.5f;
     float mP2pBandwidthRatio = 0.5f;
 
-    std::atomic<TaskId> mLastCreatedTaskId{0};
+    std::atomic<TaskId> mLastCreatedTaskId GUARDED_BY(dm_thread()){0};
 
 #ifdef DCDN_DM_TESTING
     friend class dcdn::TestHook;
@@ -526,13 +574,27 @@ private:
         bool loadSubTasks(TaskId taskId, std::vector<SubTaskRec>& subtasks);
 
     private:
-        void* mDb = nullptr; // 如要用 sqlite3，可在 cpp 里替换
+        void* mDb = nullptr;
         std::mutex mDbMutex;
     };
 
     std::unique_ptr<PersistenceHelper> mDbHelper;
 
     void publish_(const DMEvent& ev) REQUIRES(dm_thread());
+
+private:
+    // Stream 模式per-task 状态，标记当前处于Warmup(HTTP) 还是 P2P 阶段，并记住 warmup 结束位置
+    struct StreamState
+    {
+        enum class Phase
+        {
+            None,
+            WarmupHttp,
+            P2P
+        } phase = Phase::None;
+        size_t warmupEnd = 0; // inclusive
+    };
+    std::unordered_map<TaskId, StreamState> mStreamState GUARDED_BY(dm_thread());
 
 private:
     DmLoopThreadCap loop_cap_;
